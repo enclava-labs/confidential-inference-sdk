@@ -1,0 +1,17 @@
+/target/
+.env
+.env.*
+!.env.example
+/tmp/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+*.log
+.DS_Store
+.idea/
+.vscode/
