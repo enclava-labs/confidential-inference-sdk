@@ -1,0 +1,342 @@
+{
+  "schema": "confidential-inference.verdict.v1",
+  "policy_schema": "confidential-inference.policy.v1",
+  "reference_values_schema": "confidential-inference.reference-values.v1",
+  "provider_registry_schema": "confidential-inference.provider-registry.v1",
+  "status": "verified",
+  "enforcement": "enforce",
+  "request_allowed": true,
+  "would_block_under_enforce": false,
+  "trust_tier": "app-e2ee",
+  "provider": "demo",
+  "requested_model": "gpt-oss-120b",
+  "provider_model": "e2ee-gpt-oss-120b-p",
+  "canonical_model": "gpt-oss-120b",
+  "route_id": "demo:gpt-oss-120b:e2ee-gpt-oss-120b-p",
+  "evidence_family": "fixture_dstack",
+  "alias_confidence": "curated",
+  "adapter_version": "demo-fixture-adapter/0.1.0",
+  "api_endpoint": "http://127.0.0.1/demo/v1",
+  "evidence_endpoint": "http://127.0.0.1/demo/v1/confidentiality",
+  "freshness_class": "per_session",
+  "streaming_allowed": false,
+  "route_execution_status": "executable_fixture",
+  "chat_executable": true,
+  "known_unsupported_modes": [
+    "streaming"
+  ],
+  "channel_binding_kind": "attested_app_e2ee",
+  "model_binding_result": "verified",
+  "request_channel_bound": true,
+  "request_confidentiality_result": "encrypted_bound",
+  "response_confidentiality_result": "encrypted_bound",
+  "response_channel_bound": true,
+  "response_integrity_result": "channel_bound",
+  "policy_digest": "sha256:3e65bdb04377c5169296f258e37d8133fa6365df10259da31dbc4502c5aca783",
+  "provider_registry_digest": "sha256:5f7d7f58d2198ccabbdd1c90e9d0ec0030d9934d80895007244971e3e61b7373",
+  "registry_version": "2026-07-05-demo",
+  "registry_source": "bundled",
+  "registry_sync_completed_at": "2026-07-05T00:00:00Z",
+  "registry_signature": {
+    "signer": "confidential-inference",
+    "key_id": "confidential-inference-demo-ed25519-2026",
+    "alg": "ed25519"
+  },
+  "reference_values_digest": "sha256:23e42367da27793fd4600dcc48ad51c2c8b7b3124f541c23cfcc7c7c8ef474b9",
+  "reference_values_version": "2026-07-05-demo",
+  "reference_values_source": "bundled",
+  "reference_values_signature": {
+    "signer": "confidential-inference",
+    "key_id": "confidential-inference-demo-ed25519-2026",
+    "alg": "ed25519"
+  },
+  "raw_evidence_digest": "sha256:2f35c87a451281deb49e68c994f13afa2f313389d314380d760c3b50e6be22e0",
+  "evidence_digest": "sha256:ba06f8999ab05aa9123c1ec392ad6cf2cb93e1e42efe54211b11ab83b9d8255e",
+  "verified_at": "2098-12-31T23:50:00Z",
+  "expires_at": "2099-01-01T00:00:00Z",
+  "expires_at_epoch_ms": 4070908800000,
+  "validity": {
+    "policy_ttl_until": "2099-01-01T00:00:00Z",
+    "collateral_valid_until": "2099-01-01T00:00:00Z",
+    "certificate_valid_until": "2099-01-01T00:00:00Z",
+    "quote_valid_until": "2099-01-01T00:00:00Z",
+    "tcb_valid_until": "2099-01-01T00:00:00Z",
+    "reference_values_valid_until": "2099-01-01T00:00:00Z",
+    "computed_expires_at": "2099-01-01T00:00:00Z"
+  },
+  "checks": {
+    "contrast_manifest": "not_applicable",
+    "cpu_tee": "verified",
+    "e2ee_key_binding": "verified",
+    "gpu_tee": "not_applicable",
+    "image_provenance": "not_applicable",
+    "model_artifact_provenance": "not_applicable",
+    "model_binding": "verified",
+    "nonce_binding": "not_applicable",
+    "request_encryption": "verified",
+    "request_key_binding": "verified",
+    "request_route_binding": "not_supported",
+    "response_channel_binding": "verified",
+    "response_encryption": "verified",
+    "response_key_binding": "verified",
+    "response_receipt": "not_applicable",
+    "route_binding": "not_supported",
+    "route_metadata_binding": "verified",
+    "sigstore": "not_applicable",
+    "tls_binding": "not_applicable"
+  },
+  "check_outcomes": {
+    "contrast_manifest": {
+      "state": "not_applicable",
+      "required": false,
+      "detail": "check is not applicable to the active policy and route",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "cpu_tee": {
+      "state": "verified",
+      "required": true,
+      "detail": "check verified against the cited evidence",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "e2ee_key_binding": {
+      "state": "verified",
+      "required": true,
+      "detail": "check verified against the cited evidence",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "gpu_tee": {
+      "state": "not_applicable",
+      "required": false,
+      "detail": "check is not applicable to the active policy and route",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "image_provenance": {
+      "state": "not_applicable",
+      "required": false,
+      "detail": "check is not applicable to the active policy and route",
+      "evidence_refs": [
+        "policy_digest",
+        "provider_registry_digest",
+        "raw_evidence_digest",
+        "reference_values_digest"
+      ]
+    },
+    "model_artifact_provenance": {
+      "state": "not_applicable",
+      "required": false,
+      "detail": "check is not applicable to the active policy and route",
+      "evidence_refs": [
+        "policy_digest",
+        "provider_registry_digest",
+        "raw_evidence_digest",
+        "reference_values_digest"
+      ]
+    },
+    "model_binding": {
+      "state": "verified",
+      "required": true,
+      "detail": "check verified against the cited evidence",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "nonce_binding": {
+      "state": "not_applicable",
+      "required": false,
+      "detail": "check is not applicable to the active policy and route",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "request_encryption": {
+      "state": "verified",
+      "required": true,
+      "detail": "check verified against the cited evidence",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "request_key_binding": {
+      "state": "verified",
+      "required": true,
+      "detail": "check verified against the cited evidence",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "request_route_binding": {
+      "state": "not_supported",
+      "required": false,
+      "detail": "the selected evidence path cannot directly prove this check",
+      "evidence_refs": [
+        "policy_digest",
+        "provider_registry_digest",
+        "reference_values_digest"
+      ]
+    },
+    "response_channel_binding": {
+      "state": "verified",
+      "required": true,
+      "detail": "check verified against the cited evidence",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "response_encryption": {
+      "state": "verified",
+      "required": true,
+      "detail": "check verified against the cited evidence",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "response_key_binding": {
+      "state": "verified",
+      "required": true,
+      "detail": "check verified against the cited evidence",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "response_receipt": {
+      "state": "not_applicable",
+      "required": false,
+      "detail": "check is not applicable to the active policy and route",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "route_binding": {
+      "state": "not_supported",
+      "required": false,
+      "detail": "the selected evidence path cannot directly prove this check",
+      "evidence_refs": [
+        "policy_digest",
+        "provider_registry_digest",
+        "reference_values_digest"
+      ]
+    },
+    "route_metadata_binding": {
+      "state": "verified",
+      "required": true,
+      "detail": "check verified against the cited evidence",
+      "evidence_refs": [
+        "policy_digest",
+        "provider_registry_digest",
+        "raw_evidence_digest",
+        "reference_values_digest"
+      ]
+    },
+    "sigstore": {
+      "state": "not_applicable",
+      "required": false,
+      "detail": "check is not applicable to the active policy and route",
+      "evidence_refs": [
+        "policy_digest",
+        "raw_evidence_digest"
+      ]
+    },
+    "tls_binding": {
+      "state": "not_applicable",
+      "required": false,
+      "detail": "check is not applicable to the active policy and route",
+      "evidence_refs": [
+        "policy_digest",
+        "provider_registry_digest",
+        "raw_evidence_digest",
+        "reference_values_digest"
+      ]
+    }
+  },
+  "route_attribution": {
+    "parties": [
+      {
+        "role": "inference_provider",
+        "party_id": "demo",
+        "source": "signed_registry",
+        "detail": "provider identity is selected directly from the signed registry route",
+        "evidence_refs": [
+          "provider_registry_digest"
+        ]
+      },
+      {
+        "role": "registry_authority",
+        "party_id": "confidential-inference",
+        "source": "signed_registry",
+        "detail": "authority identity is taken from the verified registry signature metadata",
+        "evidence_refs": [
+          "provider_registry_digest"
+        ]
+      },
+      {
+        "role": "reference_values_authority",
+        "party_id": "confidential-inference",
+        "source": "signed_reference_values",
+        "detail": "authority identity is taken from the signed reference-values issuer",
+        "evidence_refs": [
+          "reference_values_digest"
+        ]
+      },
+      {
+        "role": "workload_operator",
+        "source": "unknown",
+        "detail": "workload-operator identity is not directly asserted by the current evidence"
+      },
+      {
+        "role": "tee_platform",
+        "party_id": "tdx",
+        "source": "attested_evidence",
+        "detail": "TEE kind is taken directly from parsed evidence; consult the hardware checks for verification state",
+        "evidence_refs": [
+          "raw_evidence_digest"
+        ]
+      },
+      {
+        "role": "cloud_host",
+        "source": "unknown",
+        "detail": "cloud-host identity is not directly asserted by the current evidence"
+      }
+    ]
+  },
+  "artifacts": {
+    "source_url": "http://127.0.0.1/demo/v1/confidentiality",
+    "tee_measurement": "sha256:demo-tee-measurement",
+    "report_data": "sha256:demo-e2ee-key",
+    "signing_public_key": null,
+    "e2ee_capability": "fixture-e2ee",
+    "model_manifest": "gpt-oss-120b",
+    "model_artifacts": [
+      {
+        "kind": "weights",
+        "name": "gpt-oss-120b",
+        "digest": "sha256:demo-weights"
+      },
+      {
+        "kind": "tokenizer",
+        "name": "tokenizer.json",
+        "digest": "sha256:demo-tokenizer"
+      }
+    ]
+  },
+  "errors": []
+}

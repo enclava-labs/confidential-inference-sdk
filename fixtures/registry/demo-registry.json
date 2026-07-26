@@ -1,0 +1,52 @@
+{
+  "schema": "confidential-inference.provider-registry-envelope.v1",
+  "payload": {
+    "schema": "confidential-inference.provider-registry.v1",
+    "version": "2026-07-05-demo",
+    "generated_at": "2026-07-05T00:00:00Z",
+    "source_sync_run": {
+      "completed_at": "2026-07-05T00:00:00Z",
+      "status": "success",
+      "source": "confidential-inference-sdk-demo-fixture"
+    },
+    "models": {
+      "gpt-oss-120b": {
+        "canonical_model": "gpt-oss-120b",
+        "display_name": "GPT-OSS 120B",
+        "family": "OpenAI GPT",
+        "aliases": [
+          "gpt-oss-120b",
+          "GPT-OSS 120B"
+        ],
+        "routes": [
+          {
+            "route_id": "demo:gpt-oss-120b:e2ee-gpt-oss-120b-p",
+            "route_status": "active",
+            "provider": "demo",
+            "provider_model": "e2ee-gpt-oss-120b-p",
+            "evidence_family": "fixture_dstack",
+            "api_base_url": "http://127.0.0.1/demo/v1",
+            "evidence_endpoint": "http://127.0.0.1/demo/v1/confidentiality",
+            "adapter_version": "demo-fixture-adapter/0.1.0",
+            "freshness_class": "per_session",
+            "channel_binding_kind": "attested_app_e2ee",
+            "trust_tier": "app-e2ee",
+            "request_confidentiality_requirement": "bound_to_attested_workload",
+            "response_confidentiality_requirement": "bound_to_attested_workload",
+            "response_integrity_requirement": "any_bound",
+            "request_encryption": "required",
+            "response_decryption": "required",
+            "streaming": "unsupported",
+            "alias_confidence": "curated"
+          }
+        ]
+      }
+    }
+  },
+  "signature": {
+    "signer": "confidential-inference",
+    "key_id": "confidential-inference-demo-ed25519-2026",
+    "alg": "ed25519",
+    "value": "base64url:VA-ndYsDXdFKuORt6zqJKT-bQUzvJ7SCDE6xWDJpow8TXJtV-9OVgnbBhyQU7Hn2BomEsyVgBRaOGT785m1bDA"
+  }
+}

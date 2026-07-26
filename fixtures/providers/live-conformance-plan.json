@@ -1,0 +1,75 @@
+{
+  "compatibility_matrix_envelope_path": "fixtures/providers/compatibility-matrix-envelope.json",
+  "compatibility_matrix_path": "fixtures/providers/compatibility-matrix.json",
+  "model_alias_matrix_envelope_path": "fixtures/registry/model-alias-matrix-envelope.json",
+  "model_alias_matrix_path": "fixtures/registry/model-alias-matrix.json",
+  "providers": [
+    {
+      "attestation_url": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
+      "auth_env": "TINFOIL_API_KEY",
+      "compatibility_provider": "tinfoil-fixture",
+      "enabled": false,
+      "expected_attestation": {
+        "content_type_contains": "application/json",
+        "json_fields": [
+          "format",
+          "body"
+        ]
+      },
+      "expected_model_ids_from_alias_matrix": true,
+      "id": "tinfoil",
+      "model_list_url": "https://inference.tinfoil.sh/v1/models"
+    },
+    {
+      "auth_env": "VENICE_API_KEY",
+      "compatibility_provider": "venice-fixture",
+      "enabled": false,
+      "expected_model_ids_from_alias_matrix": true,
+      "id": "venice",
+      "model_list_url": "https://api.venice.ai/api/v1/models"
+    },
+    {
+      "attestation_url": "https://api.redpill.ai/v1/attestation/report?model=openai%2Fgpt-oss-120b&nonce=0000000000000000000000000000000000000000000000000000000000000000",
+      "auth_env": "REDPILL_API_KEY",
+      "compatibility_provider": "redpill-fixture",
+      "enabled": false,
+      "expected_attestation": {
+        "content_type_contains": "application/json",
+        "json_fields": [
+          "api_version",
+          "workload_id",
+          "attestation",
+          "all_attestations"
+        ]
+      },
+      "expected_model_ids_from_alias_matrix": true,
+      "id": "redpill",
+      "model_list_url": "https://api.redpill.ai/v1/models"
+    },
+    {
+      "attestation_url": "https://inference.phala.com/v1/aci/attestation",
+      "auth_env": "PHALA_API_KEY",
+      "compatibility_provider": "phala-direct-fixture",
+      "enabled": false,
+      "expected_attestation": {
+        "content_type_contains": "application/json",
+        "json_fields": [
+          "api_version",
+          "workload_id"
+        ]
+      },
+      "expected_model_ids_from_alias_matrix": true,
+      "id": "phala",
+      "model_list_url": "https://inference.phala.com/v1/models"
+    },
+    {
+      "auth_env": "IONET_API_KEY",
+      "compatibility_provider": "ionet-confidential-fixture",
+      "enabled": false,
+      "expected_model_ids_from_alias_matrix": true,
+      "id": "ionet",
+      "model_list_url": "https://api.intelligence.io.solutions/api/v1/models"
+    }
+  ],
+  "schema": "confidential-inference.live-conformance-plan.v1"
+}

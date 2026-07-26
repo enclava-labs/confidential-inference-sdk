@@ -1,0 +1,33 @@
+{
+  "schema": "confidential-inference.policy.v1",
+  "enforcement": "enforce",
+  "hardware": {
+    "cpu": {
+      "mode": "any_cpu_tee"
+    },
+    "gpu": {
+      "mode": "not_required"
+    }
+  },
+  "channel_binding_requirement": "attested_app_e2ee",
+  "request_confidentiality_requirement": "bound_to_attested_workload",
+  "response_confidentiality_requirement": "bound_to_attested_workload",
+  "response_integrity_requirement": "any_bound",
+  "model_binding_requirement": "if_provider_supports",
+  "provenance": {
+    "workload_image": false,
+    "model_artifacts": false,
+    "reproducible_build": false,
+    "source_attestation": false,
+    "dependency_sbom": false
+  },
+  "freshness": {
+    "mode": "per_session"
+  },
+  "stale_verdicts": {
+    "mode": "fail_closed"
+  },
+  "verdict_ttl_millis": 600000,
+  "provider_registry_digest": "sha256:5f7d7f58d2198ccabbdd1c90e9d0ec0030d9934d80895007244971e3e61b7373",
+  "reference_values_digest": "sha256:23e42367da27793fd4600dcc48ad51c2c8b7b3124f541c23cfcc7c7c8ef474b9"
+}

@@ -1,0 +1,154 @@
+{
+  "payload": {
+    "models": [
+      {
+        "aliases": [
+          "gpt-oss-120b",
+          "GPT-OSS 120B"
+        ],
+        "canonical_model": "gpt-oss-120b",
+        "display_name": "GPT-OSS 120B",
+        "family": "OpenAI GPT",
+        "must_not_match": [
+          "gpt-oss-20b",
+          "GPT-OSS 120B v2",
+          "private/gpt-oss-120b"
+        ],
+        "provider_routes": [
+          {
+            "provider": "demo",
+            "provider_model": "e2ee-gpt-oss-120b-p"
+          },
+          {
+            "provider": "venice",
+            "provider_model": "e2ee-gpt-oss-120b-p"
+          },
+          {
+            "provider": "redpill",
+            "provider_model": "openai/gpt-oss-120b"
+          },
+          {
+            "provider": "phala",
+            "provider_model": "openai/gpt-oss-120b"
+          },
+          {
+            "provider": "near",
+            "provider_model": "openai/gpt-oss-120b"
+          },
+          {
+            "provider": "nanogpt",
+            "provider_model": "TEE/gpt-oss-120b"
+          },
+          {
+            "provider": "privatemode",
+            "provider_model": "gpt-oss-120b"
+          },
+          {
+            "provider": "ionet",
+            "provider_model": "openai/gpt-oss-120b"
+          }
+        ]
+      },
+      {
+        "aliases": [
+          "llama-3.3-70b",
+          "Llama 3.3 70B"
+        ],
+        "canonical_model": "llama-3.3-70b",
+        "display_name": "Llama 3.3 70B",
+        "family": "Llama",
+        "must_not_match": [
+          "llama-3.1-70b",
+          "Llama 3.1 70B",
+          "Llama 3.3 70B Instruct",
+          "TEE/llama-3.3-70b"
+        ],
+        "provider_routes": [
+          {
+            "provider": "matrix",
+            "provider_model": "private/meta-llama-3.3-70b"
+          },
+          {
+            "provider": "tinfoil",
+            "provider_model": "llama3-3-70b"
+          },
+          {
+            "provider": "ionet",
+            "provider_model": "meta-llama/Llama-3.3-70B-Instruct"
+          }
+        ]
+      },
+      {
+        "aliases": [
+          "qwen3-vl-30b-a3b",
+          "Qwen3-VL 30B A3B"
+        ],
+        "canonical_model": "qwen3-vl-30b-a3b",
+        "display_name": "Qwen3-VL 30B A3B",
+        "family": "Qwen",
+        "must_not_match": [
+          "qwen3-vl-30b",
+          "Qwen3-VL 30B",
+          "qwen3-vl-30b-a3b-thinking",
+          "private/qwen3-vl-30b-a3b"
+        ],
+        "provider_routes": [
+          {
+            "provider": "matrix",
+            "provider_model": "TEE/Qwen3-VL-30B-A3B"
+          }
+        ]
+      },
+      {
+        "aliases": [
+          "gemma-3-27b",
+          "Gemma 3 27B"
+        ],
+        "canonical_model": "gemma-3-27b",
+        "display_name": "Gemma 3 27B",
+        "family": "Gemma",
+        "must_not_match": [
+          "gemma-4-31b",
+          "Gemma 4 31B",
+          "Gemma 3 27B Thinking",
+          "TEE/gemma-3-27b"
+        ],
+        "provider_routes": [
+          {
+            "provider": "matrix",
+            "provider_model": "private/gemma-3-27b-it"
+          }
+        ]
+      },
+      {
+        "aliases": [
+          "glm-5",
+          "GLM 5"
+        ],
+        "canonical_model": "glm-5",
+        "display_name": "GLM 5",
+        "family": "GLM",
+        "must_not_match": [
+          "glm-5.1",
+          "GLM 5.1",
+          "GLM 5 Thinking",
+          "private/glm-5"
+        ],
+        "provider_routes": [
+          {
+            "provider": "matrix",
+            "provider_model": "e2ee-glm-5-p"
+          }
+        ]
+      }
+    ],
+    "schema": "confidential-inference.model-alias-matrix.v1"
+  },
+  "schema": "confidential-inference.model-alias-matrix-envelope.v1",
+  "signature": {
+    "alg": "ed25519",
+    "key_id": "confidential-inference-alias-matrix-fixture-ed25519-2026",
+    "signer": "confidential-inference",
+    "value": "base64url:18iT1U1yXHlTxSbj3ErG4WPYHSskuWtL0gR_hK98wupmLqcoM9sJGhx9u954tIIyJLKGUVCE4zsOYTsS2dUEDg"
+  }
+}

@@ -1,0 +1,154 @@
+{
+  "schema": "confidential-inference.evidence-corpus.v1",
+  "cases": [
+    {
+      "id": "demo-valid",
+      "evidence_path": "evidence/demo-valid.json",
+      "policy": "require_attested_e2ee",
+      "expected_status": "verified",
+      "expected_request_allowed": true,
+      "expected_failed_checks": []
+    },
+    {
+      "id": "wrong-model",
+      "evidence_path": "evidence/demo-wrong-model.json",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["model_binding"]
+    },
+    {
+      "id": "wrong-e2ee-key",
+      "evidence_path": "evidence/demo-wrong-key.json",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["e2ee_key_binding"]
+    },
+    {
+      "id": "wrong-tee-measurement",
+      "evidence_path": "evidence/demo-wrong-measurement.json",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["cpu_tee"]
+    },
+    {
+      "id": "wrong-cpu-tee",
+      "evidence_path": "evidence/demo-wrong-cpu.json",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["cpu_tee"]
+    },
+    {
+      "id": "wrong-route",
+      "evidence_path": "evidence/demo-wrong-route.json",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["route_metadata_binding"]
+    },
+    {
+      "id": "wrong-channel-kind",
+      "evidence_path": "evidence/demo-wrong-channel-kind.json",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["e2ee_key_binding"]
+    },
+    {
+      "id": "request-unbound",
+      "evidence_path": "evidence/demo-request-unbound.json",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["request_key_binding", "request_encryption"]
+    },
+    {
+      "id": "response-unbound",
+      "evidence_path": "evidence/demo-response-unbound.json",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": [
+        "response_key_binding",
+        "response_encryption",
+        "response_channel_binding"
+      ]
+    },
+    {
+      "id": "wrong-workload-image",
+      "evidence_path": "evidence/demo-wrong-image.json",
+      "policy": "require_attested_e2ee_with_provenance",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["image_provenance"]
+    },
+    {
+      "id": "missing-model-artifact",
+      "evidence_path": "evidence/demo-missing-artifact.json",
+      "policy": "require_attested_e2ee_with_provenance",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["model_artifact_provenance"]
+    },
+    {
+      "id": "redpill-chutes-valid",
+      "evidence_path": "evidence/redpill-chutes-valid.json",
+      "evidence_family": "chutes_e2ee",
+      "policy": "require_attested_e2ee",
+      "expected_status": "verified",
+      "expected_request_allowed": true,
+      "expected_failed_checks": []
+    },
+    {
+      "id": "redpill-chutes-report-data-mismatch",
+      "evidence_path": "evidence/redpill-chutes-report-data-mismatch.json",
+      "evidence_family": "chutes_e2ee",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": [
+        "e2ee_key_binding",
+        "nonce_binding",
+        "request_key_binding",
+        "request_encryption",
+        "response_key_binding",
+        "response_encryption",
+        "response_channel_binding"
+      ]
+    },
+    {
+      "id": "redpill-chutes-untrusted-key",
+      "evidence_path": "evidence/redpill-chutes-untrusted-key.json",
+      "evidence_family": "chutes_e2ee",
+      "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": [
+        "e2ee_key_binding",
+        "request_key_binding",
+        "request_encryption",
+        "response_key_binding",
+        "response_encryption",
+        "response_channel_binding"
+      ]
+    },
+    {
+      "id": "redpill-chutes-missing-gpu",
+      "evidence_path": "evidence/redpill-chutes-missing-gpu.json",
+      "evidence_family": "chutes_e2ee",
+      "policy": "require_attested_e2ee_with_gpu",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["gpu_tee"]
+    },
+    {
+      "id": "unsupported-evidence-schema",
+      "evidence_path": "evidence/demo-unsupported-schema.json",
+      "policy": "require_attested_e2ee",
+      "expected_error_contains": "unsupported schema confidential-inference.unknown-evidence.v1"
+    }
+  ]
+}

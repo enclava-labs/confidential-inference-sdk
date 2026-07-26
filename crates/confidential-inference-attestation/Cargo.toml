@@ -1,0 +1,26 @@
+[package]
+name = "confidential-inference-attestation"
+description = "Confidential inference attestation policy, verdict, and fixture verification primitives."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64 = "0.22"
+base64ct.workspace = true
+dcap-qvl = { version = "0.6.1", default-features = false, features = ["std", "ring", "default-x509"] }
+ed25519-compact = { version = "2.1.1", default-features = false, features = ["std"] }
+flate2.workspace = true
+ring = "0.17"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+x509-cert.workspace = true
+zeroize.workspace = true
+zeroize_derive.workspace = true

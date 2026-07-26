@@ -1,0 +1,184 @@
+{
+  "schema": "confidential-inference.privatemode-contrast-active-corpus.v1",
+  "cases": [
+    {
+      "id": "privatemode-active-valid",
+      "manifest": {
+        "ReferenceValues": {
+          "snp": [
+            {
+              "ProductName": "Genoa",
+              "TrustedMeasurement": "333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333"
+            }
+          ]
+        },
+        "Policies": {
+          "coordinator-policy": {
+            "Role": "coordinator",
+            "SANs": [
+              "coordinator.privatemode.ai"
+            ]
+          },
+          "worker-policy": {
+            "Role": "worker",
+            "SANs": [
+              "workload-inference-proxy"
+            ]
+          }
+        }
+      },
+      "initdata_texts": [
+        "\\\"io.kubernetes.cri.image-name\\\": \\\"ghcr.io/edgelesssys/privatemode/inference-proxy:v1.45.0@sha256:4444444444444444444444444444444444444444444444444444444444444444\\\"",
+        "image=ghcr.io/edgelesssys/privatemode/worker@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+      ],
+      "coordinator_attestation_verified": true,
+      "local_proxy_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_model_path": "privatemode/models/llama-3.1-8b",
+      "expected": {
+        "model_path": "privatemode/models/llama-3.1-8b",
+        "workloads": [
+          "coordinator",
+          "inference-proxy"
+        ],
+        "reference_values": [
+          "SNP/Genoa:333333333333333333333333"
+        ],
+        "image_refs": [
+          "ghcr.io/edgelesssys/privatemode/inference-proxy:v1.45.0@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+        ]
+      }
+    },
+    {
+      "id": "privatemode-active-unpinned-image",
+      "manifest": {
+        "ReferenceValues": {
+          "snp": [
+            {
+              "ProductName": "Genoa",
+              "TrustedMeasurement": "333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333"
+            }
+          ]
+        },
+        "Policies": {
+          "coordinator-policy": {
+            "Role": "coordinator",
+            "SANs": [
+              "coordinator.privatemode.ai"
+            ]
+          }
+        }
+      },
+      "initdata_texts": [
+        "\\\"io.kubernetes.cri.image-name\\\": \\\"ghcr.io/edgelesssys/privatemode/inference-proxy:v1.45.0\\\""
+      ],
+      "coordinator_attestation_verified": true,
+      "local_proxy_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_error_contains": "unpinned workload image"
+    },
+    {
+      "id": "privatemode-active-unverified-coordinator",
+      "manifest": {
+        "ReferenceValues": {
+          "snp": [
+            {
+              "ProductName": "Genoa",
+              "TrustedMeasurement": "333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333"
+            }
+          ]
+        },
+        "Policies": {
+          "coordinator-policy": {
+            "Role": "coordinator",
+            "SANs": [
+              "coordinator.privatemode.ai"
+            ]
+          }
+        }
+      },
+      "initdata_texts": [
+        "\\\"io.kubernetes.cri.image-name\\\": \\\"ghcr.io/edgelesssys/privatemode/inference-proxy:v1.45.0@sha256:4444444444444444444444444444444444444444444444444444444444444444\\\""
+      ],
+      "coordinator_attestation_verified": false,
+      "local_proxy_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_error_contains": "Coordinator attestation was not verified"
+    },
+    {
+      "id": "privatemode-active-model-path-mismatch",
+      "manifest": {
+        "ReferenceValues": {
+          "snp": [
+            {
+              "ProductName": "Genoa",
+              "TrustedMeasurement": "333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333"
+            }
+          ]
+        },
+        "Policies": {
+          "coordinator-policy": {
+            "Role": "coordinator",
+            "SANs": [
+              "coordinator.privatemode.ai"
+            ]
+          }
+        }
+      },
+      "initdata_texts": [
+        "\\\"io.kubernetes.cri.image-name\\\": \\\"ghcr.io/edgelesssys/privatemode/inference-proxy:v1.45.0@sha256:4444444444444444444444444444444444444444444444444444444444444444\\\""
+      ],
+      "coordinator_attestation_verified": true,
+      "local_proxy_model_path": "privatemode/models/other",
+      "expected_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_error_contains": "local proxy model path mismatch"
+    },
+    {
+      "id": "privatemode-active-missing-coordinator-workload",
+      "manifest": {
+        "ReferenceValues": {
+          "snp": [
+            {
+              "ProductName": "Genoa",
+              "TrustedMeasurement": "333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333"
+            }
+          ]
+        },
+        "Policies": {
+          "worker-policy": {
+            "Role": "worker",
+            "SANs": [
+              "workload-inference-proxy"
+            ]
+          }
+        }
+      },
+      "initdata_texts": [
+        "\\\"io.kubernetes.cri.image-name\\\": \\\"ghcr.io/edgelesssys/privatemode/inference-proxy:v1.45.0@sha256:4444444444444444444444444444444444444444444444444444444444444444\\\""
+      ],
+      "coordinator_attestation_verified": true,
+      "local_proxy_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_error_contains": "coordinator workload"
+    },
+    {
+      "id": "privatemode-active-missing-platform-references",
+      "manifest": {
+        "Policies": {
+          "coordinator-policy": {
+            "Role": "coordinator",
+            "SANs": [
+              "coordinator.privatemode.ai"
+            ]
+          }
+        }
+      },
+      "initdata_texts": [
+        "\\\"io.kubernetes.cri.image-name\\\": \\\"ghcr.io/edgelesssys/privatemode/inference-proxy:v1.45.0@sha256:4444444444444444444444444444444444444444444444444444444444444444\\\""
+      ],
+      "coordinator_attestation_verified": true,
+      "local_proxy_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_model_path": "privatemode/models/llama-3.1-8b",
+      "expected_error_contains": "platform reference values"
+    }
+  ]
+}

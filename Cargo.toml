@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/confidential-inference-attestation",
+    "crates/confidential-inference-openai",
+    "crates/confidential-inference-providers",
+    "crates/confidential-inference-sdk",
+    "crates/confidential-inference-middleware",
+    "crates/confidential-inference-proxy",
+    "crates/confidential-inference-ffi",
+    "demo/confidential-demo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/enclava-labs/confidential-inference-sdk"
+rust-version = "1.97"
+
+[workspace.dependencies]
+async-trait = "0.1"
+base64ct = { version = "1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tower-service = "0.3"
+tower-layer = "0.3"
+tracing = "0.1"
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+zeroize = { version = "=1.8.1", default-features = false }
+zeroize_derive = "=1.4.2"

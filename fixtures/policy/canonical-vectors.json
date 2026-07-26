@@ -1,0 +1,139 @@
+{
+  "schema": "confidential-inference.policy-canonical-vectors.v1",
+  "vectors": [
+    {
+      "id": "require-attested-e2ee-demo",
+      "policy": {
+        "schema": "confidential-inference.policy.v1",
+        "enforcement": "enforce",
+        "hardware": {
+          "cpu": {
+            "mode": "any_cpu_tee"
+          },
+          "gpu": {
+            "mode": "not_required"
+          }
+        },
+        "channel_binding_requirement": "attested_app_e2ee",
+        "request_confidentiality_requirement": "bound_to_attested_workload",
+        "response_confidentiality_requirement": "bound_to_attested_workload",
+        "response_integrity_requirement": "any_bound",
+        "model_binding_requirement": "if_provider_supports",
+        "provenance": {
+          "workload_image": false,
+          "model_artifacts": false,
+          "reproducible_build": false,
+          "source_attestation": false,
+          "dependency_sbom": false
+        },
+        "freshness": {
+          "mode": "per_session"
+        },
+        "stale_verdicts": {
+          "mode": "fail_closed"
+        },
+        "verdict_ttl_millis": 600000,
+        "provider_registry_digest": "sha256:5f7d7f58d2198ccabbdd1c90e9d0ec0030d9934d80895007244971e3e61b7373",
+        "reference_values_digest": "sha256:23e42367da27793fd4600dcc48ad51c2c8b7b3124f541c23cfcc7c7c8ef474b9"
+      },
+      "canonical_json": "{\"channel_binding_requirement\":\"attested_app_e2ee\",\"enforcement\":\"enforce\",\"freshness\":{\"mode\":\"per_session\"},\"hardware\":{\"cpu\":{\"mode\":\"any_cpu_tee\"},\"gpu\":{\"mode\":\"not_required\"}},\"model_binding_requirement\":\"if_provider_supports\",\"provenance\":{\"dependency_sbom\":false,\"model_artifacts\":false,\"reproducible_build\":false,\"source_attestation\":false,\"workload_image\":false},\"provider_registry_digest\":\"sha256:5f7d7f58d2198ccabbdd1c90e9d0ec0030d9934d80895007244971e3e61b7373\",\"reference_values_digest\":\"sha256:23e42367da27793fd4600dcc48ad51c2c8b7b3124f541c23cfcc7c7c8ef474b9\",\"request_confidentiality_requirement\":\"bound_to_attested_workload\",\"response_confidentiality_requirement\":\"bound_to_attested_workload\",\"response_integrity_requirement\":\"any_bound\",\"schema\":\"confidential-inference.policy.v1\",\"stale_verdicts\":{\"mode\":\"fail_closed\"},\"verdict_ttl_millis\":600000}",
+      "digest": "sha256:3e65bdb04377c5169296f258e37d8133fa6365df10259da31dbc4502c5aca783"
+    },
+    {
+      "id": "tagged-enum-and-sorted-tee-allow-list",
+      "policy": {
+        "schema": "confidential-inference.policy.v1",
+        "enforcement": "enforce",
+        "hardware": {
+          "cpu": {
+            "mode": "one_of",
+            "allowed": [
+              "sev_snp",
+              "tdx"
+            ]
+          },
+          "gpu": {
+            "mode": "one_of",
+            "allowed": [
+              "nvidia_cc"
+            ]
+          }
+        },
+        "channel_binding_requirement": "any_attested_channel",
+        "request_confidentiality_requirement": "bound_to_attested_workload",
+        "response_confidentiality_requirement": "bound_to_attested_workload",
+        "response_integrity_requirement": "receipt_bound",
+        "model_binding_requirement": "required",
+        "provenance": {
+          "workload_image": true,
+          "model_artifacts": true,
+          "reproducible_build": true,
+          "source_attestation": true,
+          "dependency_sbom": true
+        },
+        "freshness": {
+          "mode": "allow_cached_binding_millis",
+          "millis": 1000
+        },
+        "stale_verdicts": {
+          "mode": "allow_for_millis",
+          "millis": 2000
+        },
+        "verdict_ttl_millis": 3000,
+        "provider_registry_digest": "sha256:5f7d7f58d2198ccabbdd1c90e9d0ec0030d9934d80895007244971e3e61b7373",
+        "reference_values_digest": "sha256:23e42367da27793fd4600dcc48ad51c2c8b7b3124f541c23cfcc7c7c8ef474b9"
+      },
+      "canonical_json": "{\"channel_binding_requirement\":\"any_attested_channel\",\"enforcement\":\"enforce\",\"freshness\":{\"millis\":1000,\"mode\":\"allow_cached_binding_millis\"},\"hardware\":{\"cpu\":{\"allowed\":[\"sev_snp\",\"tdx\"],\"mode\":\"one_of\"},\"gpu\":{\"allowed\":[\"nvidia_cc\"],\"mode\":\"one_of\"}},\"model_binding_requirement\":\"required\",\"provenance\":{\"dependency_sbom\":true,\"model_artifacts\":true,\"reproducible_build\":true,\"source_attestation\":true,\"workload_image\":true},\"provider_registry_digest\":\"sha256:5f7d7f58d2198ccabbdd1c90e9d0ec0030d9934d80895007244971e3e61b7373\",\"reference_values_digest\":\"sha256:23e42367da27793fd4600dcc48ad51c2c8b7b3124f541c23cfcc7c7c8ef474b9\",\"request_confidentiality_requirement\":\"bound_to_attested_workload\",\"response_confidentiality_requirement\":\"bound_to_attested_workload\",\"response_integrity_requirement\":\"receipt_bound\",\"schema\":\"confidential-inference.policy.v1\",\"stale_verdicts\":{\"millis\":2000,\"mode\":\"allow_for_millis\"},\"verdict_ttl_millis\":3000}",
+      "digest": "sha256:f6cf7820c5e73ef59a4a7e941b8fc90e3e05370c568315071a91400369ef1538"
+    }
+  ],
+  "equivalence_cases": [
+    {
+      "id": "tee-allow-list-order-and-duplicates",
+      "equivalent_to": "tagged-enum-and-sorted-tee-allow-list",
+      "policy": {
+        "schema": "confidential-inference.policy.v1",
+        "enforcement": "enforce",
+        "hardware": {
+          "cpu": {
+            "mode": "one_of",
+            "allowed": [
+              "tdx",
+              "sev_snp",
+              "tdx"
+            ]
+          },
+          "gpu": {
+            "mode": "one_of",
+            "allowed": [
+              "nvidia_cc"
+            ]
+          }
+        },
+        "channel_binding_requirement": "any_attested_channel",
+        "request_confidentiality_requirement": "bound_to_attested_workload",
+        "response_confidentiality_requirement": "bound_to_attested_workload",
+        "response_integrity_requirement": "receipt_bound",
+        "model_binding_requirement": "required",
+        "provenance": {
+          "workload_image": true,
+          "model_artifacts": true,
+          "reproducible_build": true,
+          "source_attestation": true,
+          "dependency_sbom": true
+        },
+        "freshness": {
+          "mode": "allow_cached_binding_millis",
+          "millis": 1000
+        },
+        "stale_verdicts": {
+          "mode": "allow_for_millis",
+          "millis": 2000
+        },
+        "verdict_ttl_millis": 3000,
+        "provider_registry_digest": "sha256:5f7d7f58d2198ccabbdd1c90e9d0ec0030d9934d80895007244971e3e61b7373",
+        "reference_values_digest": "sha256:23e42367da27793fd4600dcc48ad51c2c8b7b3124f541c23cfcc7c7c8ef474b9"
+      }
+    }
+  ]
+}

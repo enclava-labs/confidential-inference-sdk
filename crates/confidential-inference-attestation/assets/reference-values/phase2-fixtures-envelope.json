@@ -1,0 +1,111 @@
+{
+  "payload": {
+    "issuer": "confidential-inference",
+    "minimum_acceptable_version": "2026-07-05-phase2-fixtures",
+    "providers": {
+      "demo": {
+        "accepted_measurements": [
+          "sha256:demo-tee-measurement"
+        ],
+        "routes": {
+          "demo:gpt-oss-120b:e2ee-gpt-oss-120b-p": {
+            "accepted_cpu_tees": [
+              "tdx"
+            ],
+            "canonical_model": "gpt-oss-120b",
+            "channel_binding_kind": "attested_app_e2ee",
+            "e2ee_public_key_digest": "sha256:demo-e2ee-key",
+            "evidence_family": "fixture_dstack",
+            "model_artifacts": [
+              {
+                "digest": "sha256:demo-weights",
+                "kind": "weights",
+                "name": "gpt-oss-120b"
+              },
+              {
+                "digest": "sha256:demo-tokenizer",
+                "kind": "tokenizer",
+                "name": "tokenizer.json"
+              }
+            ],
+            "provider_model": "e2ee-gpt-oss-120b-p",
+            "trust_tier": "app-e2ee",
+            "valid_until": "2099-01-01T00:00:00Z",
+            "valid_until_epoch_ms": 4070908800000,
+            "workload_image_digest": "sha256:demo-workload-image"
+          }
+        }
+      },
+      "tinfoil-fixture": {
+        "accepted_measurements": [
+          "sha256:tinfoil-tee-measurement"
+        ],
+        "routes": {
+          "tinfoil-fixture:llama-3.3-70b:llama-3.3-70b": {
+            "accepted_cpu_tees": [
+              "tdx"
+            ],
+            "canonical_model": "llama-3.3-70b",
+            "channel_binding_kind": "tee_terminated_tls",
+            "e2ee_public_key_digest": "sha256:tinfoil-not-applicable",
+            "evidence_family": "tinfoil_hw_verified_tls",
+            "model_artifacts": [
+              {
+                "digest": "sha256:tinfoil-weights",
+                "kind": "weights",
+                "name": "llama-3.3-70b"
+              }
+            ],
+            "provider_model": "llama-3.3-70b",
+            "tls_spki_sha256": "sha256:fd162e4bf87ec09d1c2e6c1acb9161534bc91eb2ee822d5aab5008b08e47dfaa",
+            "trust_tier": "hw-verified-tls",
+            "valid_until": "2099-01-01T00:00:00Z",
+            "valid_until_epoch_ms": 4070908800000,
+            "workload_image_digest": "sha256:tinfoil-workload-image"
+          }
+        }
+      },
+      "venice-fixture": {
+        "accepted_measurements": [
+          "sha256:venice-tee-measurement"
+        ],
+        "routes": {
+          "venice-fixture:gpt-oss-120b:e2ee-gpt-oss-120b-p": {
+            "accepted_cpu_tees": [
+              "tdx"
+            ],
+            "canonical_model": "gpt-oss-120b",
+            "channel_binding_kind": "attested_app_e2ee",
+            "e2ee_public_key_digest": "sha256:venice-e2ee-key",
+            "evidence_family": "dstack_app_e2ee",
+            "model_artifacts": [
+              {
+                "digest": "sha256:venice-weights",
+                "kind": "weights",
+                "name": "gpt-oss-120b"
+              }
+            ],
+            "provider_model": "e2ee-gpt-oss-120b-p",
+            "trust_tier": "app-e2ee",
+            "valid_until": "2099-01-01T00:00:00Z",
+            "valid_until_epoch_ms": 4070908800000,
+            "workload_image_digest": "sha256:venice-workload-image"
+          }
+        }
+      }
+    },
+    "revocation_epoch": 1,
+    "schema": "confidential-inference.reference-values.v1",
+    "valid_from": "2026-07-05T00:00:00Z",
+    "valid_until": "2099-01-01T00:00:00Z",
+    "valid_until_epoch_ms": 4070908800000,
+    "version": "2026-07-05-phase2-fixtures"
+  },
+  "schema": "confidential-inference.reference-values-envelope.v1",
+  "signature": {
+    "alg": "ed25519",
+    "key_id": "confidential-inference-phase2-fixture-ed25519-2026",
+    "signer": "confidential-inference",
+    "value": "base64url:pJSDgMfNUOGGUai5Y7xV8-BcDRzgonLcCOJUKPeFw30k__Av5VNI_zFsOWFMvJA9p-fQriajEgPwEMQzJusZCA"
+  }
+}

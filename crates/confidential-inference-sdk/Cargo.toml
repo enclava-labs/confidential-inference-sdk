@@ -1,0 +1,32 @@
+[package]
+name = "confidential-inference-sdk"
+description = "High-level async Rust SDK for confidential inference."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+confidential-inference-attestation = { version = "0.1.0", path = "../confidential-inference-attestation" }
+confidential-inference-openai = { version = "0.1.0", path = "../confidential-inference-openai" }
+confidential-inference-providers = { version = "0.1.0", path = "../confidential-inference-providers" }
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls-no-provider", "json"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rustls = { version = "0.23.4", default-features = false, features = ["ring", "std", "tls12"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+base64 = "0.22"
+ed25519-compact = { version = "2.1.1", default-features = false, features = ["std"] }
+flate2.workspace = true
+tokio.workspace = true
+tracing-core.workspace = true
+tracing-subscriber.workspace = true

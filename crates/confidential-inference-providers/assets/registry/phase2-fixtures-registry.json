@@ -1,0 +1,103 @@
+{
+  "payload": {
+    "generated_at": "2026-07-05T00:00:00Z",
+    "models": {
+      "gpt-oss-120b": {
+        "aliases": [
+          "gpt-oss-120b",
+          "GPT-OSS 120B"
+        ],
+        "canonical_model": "gpt-oss-120b",
+        "display_name": "GPT-OSS 120B",
+        "family": "OpenAI GPT",
+        "routes": [
+          {
+            "adapter_version": "demo-fixture-adapter/0.1.0",
+            "alias_confidence": "curated",
+            "api_base_url": "http://127.0.0.1/demo/v1",
+            "channel_binding_kind": "attested_app_e2ee",
+            "evidence_endpoint": "http://127.0.0.1/demo/v1/confidentiality",
+            "evidence_family": "fixture_dstack",
+            "freshness_class": "per_session",
+            "provider": "demo",
+            "provider_model": "e2ee-gpt-oss-120b-p",
+            "request_confidentiality_requirement": "bound_to_attested_workload",
+            "request_encryption": "required",
+            "response_confidentiality_requirement": "bound_to_attested_workload",
+            "response_decryption": "required",
+            "response_integrity_requirement": "any_bound",
+            "route_id": "demo:gpt-oss-120b:e2ee-gpt-oss-120b-p",
+            "route_status": "active",
+            "streaming": "unsupported",
+            "trust_tier": "app-e2ee"
+          },
+          {
+            "adapter_version": "venice-dstack-fixture-adapter/0.1.0",
+            "alias_confidence": "curated",
+            "api_base_url": "https://api.venice.ai/api/v1",
+            "channel_binding_kind": "attested_app_e2ee",
+            "evidence_endpoint": "https://api.venice.ai/api/v1/confidentiality",
+            "evidence_family": "dstack_app_e2ee",
+            "freshness_class": "per_session",
+            "provider": "venice-fixture",
+            "provider_model": "e2ee-gpt-oss-120b-p",
+            "request_confidentiality_requirement": "bound_to_attested_workload",
+            "request_encryption": "required",
+            "response_confidentiality_requirement": "bound_to_attested_workload",
+            "response_decryption": "required",
+            "response_integrity_requirement": "any_bound",
+            "route_id": "venice-fixture:gpt-oss-120b:e2ee-gpt-oss-120b-p",
+            "route_status": "active",
+            "streaming": "unsupported",
+            "trust_tier": "app-e2ee"
+          }
+        ]
+      },
+      "llama-3.3-70b": {
+        "aliases": [
+          "llama-3.3-70b",
+          "Llama 3.3 70B"
+        ],
+        "canonical_model": "llama-3.3-70b",
+        "display_name": "Llama 3.3 70B",
+        "family": "Llama",
+        "routes": [
+          {
+            "adapter_version": "tinfoil-fixture-adapter/0.1.0",
+            "alias_confidence": "curated",
+            "api_base_url": "https://inference.tinfoil.sh/v1",
+            "channel_binding_kind": "tee_terminated_tls",
+            "evidence_endpoint": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
+            "evidence_family": "tinfoil_hw_verified_tls",
+            "freshness_class": "per_session",
+            "provider": "tinfoil-fixture",
+            "provider_model": "llama-3.3-70b",
+            "request_confidentiality_requirement": "bound_to_attested_workload",
+            "request_encryption": "not_required",
+            "response_confidentiality_requirement": "bound_to_attested_workload",
+            "response_decryption": "not_required",
+            "response_integrity_requirement": "channel_bound",
+            "route_id": "tinfoil-fixture:llama-3.3-70b:llama-3.3-70b",
+            "route_status": "active",
+            "streaming": "unsupported",
+            "trust_tier": "hw-verified-tls"
+          }
+        ]
+      }
+    },
+    "schema": "confidential-inference.provider-registry.v1",
+    "source_sync_run": {
+      "completed_at": "2026-07-05T00:00:00Z",
+      "source": "confidential-inference-sdk-phase2-fixtures",
+      "status": "success"
+    },
+    "version": "2026-07-05-phase2-fixtures"
+  },
+  "schema": "confidential-inference.provider-registry-envelope.v1",
+  "signature": {
+    "alg": "ed25519",
+    "key_id": "confidential-inference-phase2-fixture-ed25519-2026",
+    "signer": "confidential-inference",
+    "value": "base64url:Oo1qj86E-xFEtJUmPOVEBYPLb_7KfLk_iaIL55XzFuxnov2EuR3z2HPWrf7JMNnXXyX2FBq39td_-wwAqr1LDw"
+  }
+}

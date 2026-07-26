@@ -1,0 +1,379 @@
+{
+  "cases": [
+    {
+      "accepted_gpu_tees": [],
+      "adapter_version": "venice-live-sync-adapter/0.1.0",
+      "api_base_url": "https://api.venice.ai/api/v1",
+      "channel_binding_kind": "attested_app_e2ee",
+      "enrichments": [
+        {
+          "alias_confidence": "curated",
+          "aliases": [
+            "GPT-OSS 120B"
+          ],
+          "canonical_model": "gpt-oss-120b",
+          "display_name": "GPT-OSS 120B",
+          "family": "OpenAI GPT",
+          "provider_model": "e2ee-gpt-oss-120b-p",
+          "route_status": "verification_only"
+        }
+      ],
+      "evidence_endpoint": "https://api.venice.ai/api/v1/confidentiality",
+      "evidence_family": "dstack_app_e2ee",
+      "expected": {
+        "raw_model_ids": [
+          "e2ee-gpt-oss-120b-p",
+          "e2ee-new-provider-model-p"
+        ],
+        "reviewed_routes": [
+          {
+            "alias_confidence": "curated",
+            "canonical_model": "gpt-oss-120b",
+            "provider_model": "e2ee-gpt-oss-120b-p",
+            "route_status": "verification_only"
+          }
+        ],
+        "unreviewed_routes": [
+          {
+            "alias_confidence": "algorithmic",
+            "canonical_model": "e2ee-new-provider-model-p",
+            "provider_model": "e2ee-new-provider-model-p",
+            "route_status": "new_unverified"
+          }
+        ]
+      },
+      "freshness_class": "per_session",
+      "id": "venice-openai-model-list-valid",
+      "provider": "venice-http-test",
+      "raw_model_list": {
+        "data": [
+          {
+            "id": "e2ee-gpt-oss-120b-p",
+            "object": "model",
+            "owned_by": "venice"
+          },
+          {
+            "id": "e2ee-new-provider-model-p",
+            "object": "model",
+            "owned_by": "venice"
+          }
+        ],
+        "object": "list"
+      },
+      "request_confidentiality_requirement": "bound_to_attested_workload",
+      "request_encryption": "required",
+      "response_confidentiality_requirement": "bound_to_attested_workload",
+      "response_decryption": "required",
+      "response_integrity_requirement": "any_bound",
+      "streaming": "unsupported",
+      "trust_tier": "app-e2ee"
+    },
+    {
+      "accepted_gpu_tees": [
+        "nvidia_cc"
+      ],
+      "adapter_version": "redpill-live-sync-adapter/0.1.0",
+      "api_base_url": "https://api.redpill.ai/v1",
+      "channel_binding_kind": "attested_app_e2ee",
+      "enrichments": [
+        {
+          "alias_confidence": "curated",
+          "aliases": [
+            "GPT-OSS 120B"
+          ],
+          "canonical_model": "gpt-oss-120b",
+          "display_name": "GPT-OSS 120B",
+          "family": "OpenAI GPT",
+          "provider_model": "private/org/gpt-oss-120b:thinking-TEE",
+          "route_status": "verification_only"
+        }
+      ],
+      "evidence_endpoint": "https://api.redpill.ai/v1/attestation/report",
+      "evidence_family": "chutes_e2ee",
+      "expected": {
+        "raw_model_ids": [
+          "private/org/gpt-oss-120b:thinking-TEE"
+        ],
+        "reviewed_routes": [
+          {
+            "alias_confidence": "curated",
+            "canonical_model": "gpt-oss-120b",
+            "provider_model": "private/org/gpt-oss-120b:thinking-TEE",
+            "route_status": "verification_only"
+          }
+        ],
+        "unreviewed_routes": []
+      },
+      "freshness_class": "per_session",
+      "id": "redpill-openai-model-list-valid",
+      "provider": "redpill-http-test",
+      "raw_model_list": {
+        "data": [
+          {
+            "id": "private/org/gpt-oss-120b:thinking-TEE",
+            "object": "model",
+            "owned_by": "redpill"
+          }
+        ],
+        "object": "list"
+      },
+      "request_confidentiality_requirement": "bound_to_attested_workload",
+      "request_encryption": "required",
+      "response_confidentiality_requirement": "bound_to_attested_workload",
+      "response_decryption": "required",
+      "response_integrity_requirement": "any_bound",
+      "streaming": "unsupported",
+      "trust_tier": "app-e2ee"
+    },
+    {
+      "accepted_gpu_tees": [],
+      "adapter_version": "phala-dstack-live-sync-adapter/0.1.0",
+      "api_base_url": "https://inference.phala.com/v1",
+      "channel_binding_kind": "attested_app_e2ee",
+      "enrichments": [
+        {
+          "alias_confidence": "curated",
+          "aliases": [
+            "GPT-OSS 120B"
+          ],
+          "canonical_model": "gpt-oss-120b",
+          "display_name": "GPT-OSS 120B",
+          "family": "OpenAI GPT",
+          "provider_model": "phala/gpt-oss-120b-confidential",
+          "route_status": "verification_only"
+        }
+      ],
+      "evidence_endpoint": "https://inference.phala.com/v1/aci/attestation",
+      "evidence_family": "dstack_app_e2ee",
+      "expected": {
+        "raw_model_ids": [
+          "phala/gpt-oss-120b-confidential",
+          "phala/new-confidential-model"
+        ],
+        "reviewed_routes": [
+          {
+            "alias_confidence": "curated",
+            "canonical_model": "gpt-oss-120b",
+            "provider_model": "phala/gpt-oss-120b-confidential",
+            "route_status": "verification_only"
+          }
+        ],
+        "unreviewed_routes": [
+          {
+            "alias_confidence": "algorithmic",
+            "canonical_model": "phala-new-confidential-model",
+            "provider_model": "phala/new-confidential-model",
+            "route_status": "new_unverified"
+          }
+        ]
+      },
+      "freshness_class": "per_session",
+      "id": "phala-openai-model-list-valid",
+      "provider": "phala-http-test",
+      "raw_model_list": {
+        "data": [
+          {
+            "id": "phala/gpt-oss-120b-confidential",
+            "object": "model",
+            "owned_by": "phala"
+          },
+          {
+            "id": "phala/new-confidential-model",
+            "object": "model",
+            "owned_by": "phala"
+          }
+        ],
+        "object": "list"
+      },
+      "request_confidentiality_requirement": "bound_to_attested_workload",
+      "request_encryption": "required",
+      "response_confidentiality_requirement": "bound_to_attested_workload",
+      "response_decryption": "required",
+      "response_integrity_requirement": "any_bound",
+      "streaming": "unsupported",
+      "trust_tier": "app-e2ee"
+    },
+    {
+      "accepted_gpu_tees": [
+        "nvidia_cc"
+      ],
+      "adapter_version": "ionet-confidential-live-sync-adapter/0.1.0",
+      "api_base_url": "https://api.intelligence.io.net/v1/private",
+      "channel_binding_kind": "none",
+      "enrichments": [
+        {
+          "alias_confidence": "provider_declared",
+          "aliases": [
+            "Llama 3.3 70B"
+          ],
+          "canonical_model": "llama-3.3-70b",
+          "display_name": "Llama 3.3 70B",
+          "family": "Llama",
+          "provider_model": "ionet-model-llama-3-3-70b",
+          "route_status": "verification_only"
+        }
+      ],
+      "evidence_endpoint": "https://api.intelligence.io.net/v1/private/attestation",
+      "evidence_family": "ionet_confidential",
+      "expected": {
+        "raw_model_ids": [
+          "ionet-model-llama-3-3-70b",
+          "ionet-new-confidential-model"
+        ],
+        "reviewed_routes": [
+          {
+            "alias_confidence": "provider_declared",
+            "canonical_model": "llama-3.3-70b",
+            "provider_model": "ionet-model-llama-3-3-70b",
+            "route_status": "verification_only"
+          }
+        ],
+        "unreviewed_routes": [
+          {
+            "alias_confidence": "algorithmic",
+            "canonical_model": "ionet-new-confidential-model",
+            "provider_model": "ionet-new-confidential-model",
+            "route_status": "new_unverified"
+          }
+        ]
+      },
+      "freshness_class": "per_session",
+      "id": "ionet-openai-model-list-valid",
+      "provider": "ionet-http-test",
+      "raw_model_list": {
+        "data": [
+          {
+            "model_id": "ionet-model-llama-3-3-70b",
+            "name": "Llama 3.3 70B Confidential",
+            "supports_attestation": true
+          },
+          {
+            "model_id": "ionet-new-confidential-model",
+            "name": "New io.net Confidential Model",
+            "supports_attestation": true
+          }
+        ],
+        "object": "list"
+      },
+      "request_confidentiality_requirement": "not_required",
+      "request_encryption": "not_required",
+      "response_confidentiality_requirement": "not_required",
+      "response_decryption": "not_required",
+      "response_integrity_requirement": "receipt_bound",
+      "streaming": "unsupported",
+      "trust_tier": "tee-only"
+    },
+    {
+      "accepted_gpu_tees": [],
+      "adapter_version": "tinfoil-live-sync-adapter/0.1.0",
+      "api_base_url": "https://inference.tinfoil.sh/v1",
+      "channel_binding_kind": "tee_terminated_tls",
+      "enrichments": [
+        {
+          "alias_confidence": "provider_declared",
+          "aliases": [
+            "Llama 3.3 70B"
+          ],
+          "canonical_model": "llama-3.3-70b",
+          "display_name": "Llama 3.3 70B",
+          "family": "Llama",
+          "provider_model": "llama-3.3-70b",
+          "route_status": "verification_only"
+        }
+      ],
+      "evidence_endpoint": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
+      "evidence_family": "tinfoil_hw_verified_tls",
+      "expected": {
+        "raw_model_ids": [
+          "llama-3.3-70b",
+          "new-tinfoil-research-model"
+        ],
+        "reviewed_routes": [
+          {
+            "alias_confidence": "provider_declared",
+            "canonical_model": "llama-3.3-70b",
+            "provider_model": "llama-3.3-70b",
+            "route_status": "verification_only"
+          }
+        ],
+        "unreviewed_routes": [
+          {
+            "alias_confidence": "algorithmic",
+            "canonical_model": "new-tinfoil-research-model",
+            "provider_model": "new-tinfoil-research-model",
+            "route_status": "new_unverified"
+          }
+        ]
+      },
+      "freshness_class": "per_session",
+      "id": "tinfoil-provider-models-array-valid",
+      "provider": "tinfoil-http-test",
+      "raw_model_list": {
+        "models": [
+          {
+            "display_name": "Llama 3.3 70B",
+            "name": "llama-3.3-70b",
+            "provider": "tinfoil"
+          },
+          {
+            "display_name": "New Tinfoil Research Model",
+            "name": "new-tinfoil-research-model",
+            "provider": "tinfoil"
+          }
+        ]
+      },
+      "request_confidentiality_requirement": "bound_to_attested_workload",
+      "request_encryption": "not_required",
+      "response_confidentiality_requirement": "bound_to_attested_workload",
+      "response_decryption": "not_required",
+      "response_integrity_requirement": "channel_bound",
+      "streaming": "unsupported",
+      "trust_tier": "hw-verified-tls"
+    },
+    {
+      "expected_error_contains": "missing string model identifier",
+      "id": "provider-models-array-missing-id-fails-closed",
+      "provider": "tinfoil-http-test",
+      "raw_model_list": {
+        "models": [
+          {
+            "display_name": "No machine-readable model id"
+          }
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "missing string id",
+      "id": "missing-model-id-fails-closed",
+      "provider": "venice-http-test",
+      "raw_model_list": {
+        "data": [
+          {
+            "object": "model",
+            "owned_by": "venice"
+          }
+        ],
+        "object": "list"
+      }
+    },
+    {
+      "expected_error_contains": "repeats model id llama-3.3-70b",
+      "id": "duplicate-model-id-fails-closed",
+      "provider": "tinfoil-http-test",
+      "raw_model_list": {
+        "data": [
+          {
+            "id": "llama-3.3-70b",
+            "object": "model"
+          },
+          {
+            "id": "llama-3.3-70b",
+            "object": "model"
+          }
+        ],
+        "object": "list"
+      }
+    }
+  ],
+  "schema": "confidential-inference.provider-live-sync-corpus.v1"
+}

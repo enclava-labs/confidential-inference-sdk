@@ -1,0 +1,110 @@
+{
+  "schema": "confidential-inference.dcap-qvl-audit.v1",
+  "review_date": "2026-07-26",
+  "scope": "Upstream dcap-qvl dependency, review policy, lockfile, and TDX/DCAP evidence used by the SDK.",
+  "upstream_sync_policy": {
+    "path": "docs/dcap-qvl-upstream-sync.md",
+    "required_release_gate": true,
+    "review_triggers": [
+      "production release enabling offline TDX/DCAP",
+      "resolved dcap-qvl or dcap-qvl-webpki version change",
+      "RustSec advisory affecting DCAP verifier dependencies",
+      "Intel DCAP quote or collateral validation requirement change",
+      "enabled QVL feature or cryptographic backend change",
+      "real evidence, malformed-input, or mutation corpus change"
+    ],
+    "required_commands": [
+      "cargo test -p confidential-inference-providers --test dcap_qvl_audit --locked",
+      "cargo test -p confidential-inference-attestation dcap_tdx_malformed_corpus --locked",
+      "cargo test -p confidential-inference-attestation dcap_tdx_mutation_sweep --locked",
+      "cargo test --workspace --locked",
+      "cargo deny check",
+      "cargo audit --ignore RUSTSEC-2023-0071"
+    ]
+  },
+  "crates": [
+    {
+      "name": "dcap-qvl",
+      "version": "0.6.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "license": "MIT"
+    },
+    {
+      "name": "dcap-qvl-webpki",
+      "version": "0.103.4+dcap.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "license": "ISC"
+    }
+  ],
+  "audited_files": [
+    {
+      "path": "docs/dcap-qvl-upstream-sync.md",
+      "sha256": "0adf2351dcca4601e4c1bbbc7ac70fd6865f496daa7c9190dc17953c90c2e49e",
+      "reason": "Checked-in upstream review and production release policy."
+    },
+    {
+      "path": "fixtures/evidence/dcap-qvl/tdx_quote.bin",
+      "sha256": "c42f9164325024bca2757bc8819b11879a0a369132ea4e2b7c85df4805ea72db",
+      "reason": "Real TDX quote exercised by the verifier tests."
+    },
+    {
+      "path": "fixtures/evidence/dcap-qvl/tdx_quote_collateral.json",
+      "sha256": "b0a5f5fd620a8881b1eda45261fdf30dd930b49aff93231556645c81fcb4c0bc",
+      "reason": "Collateral paired with the real TDX quote fixture."
+    },
+    {
+      "path": "fixtures/evidence/dcap-qvl/malformed-corpus.json",
+      "sha256": "e0fa2e6f8a158f213b20a5408b748edfe3185184841ea588b966c8b0f18ce060",
+      "reason": "Malformed quote and collateral cases that must fail closed."
+    },
+    {
+      "path": "fixtures/evidence/dcap-qvl/mutation-sweep.json",
+      "sha256": "60bc771d256d973eaeb0dd6bf513407ac0bda1af8127bb79a91f81f63fd81301",
+      "reason": "Deterministic quote and collateral mutation sweep."
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "17ffeb1b5d493b43f201f661ad742968af6dc49c7f35a3cf56c01ef8f3cb3208",
+      "reason": "Exact upstream dependency resolution used by release verification."
+    }
+  ],
+  "required_substrings": [
+    {
+      "path": "Cargo.toml",
+      "value": "rust-version = \"1.97\"",
+      "reason": "Package metadata records the stable Rust baseline used for verification."
+    },
+    {
+      "path": "crates/confidential-inference-attestation/Cargo.toml",
+      "value": "dcap-qvl = { version = \"0.6.1\", default-features = false, features = [\"std\", \"ring\", \"default-x509\"] }",
+      "reason": "Offline verification uses upstream QVL with explicit ring feature selection."
+    },
+    {
+      "path": "crates/confidential-inference-providers/Cargo.toml",
+      "value": "dcap-qvl = { version = \"0.6.1\", default-features = false, features = [\"std\", \"ring\", \"default-x509\", \"report\"] }",
+      "reason": "The provider collateral client adds only the reviewed report feature."
+    },
+    {
+      "path": "Cargo.lock",
+      "value": "name = \"dcap-qvl\"\nversion = \"0.6.1\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"",
+      "reason": "The lockfile resolves the reviewed upstream registry package."
+    }
+  ],
+  "forbidden_substrings": [
+    {
+      "path": "Cargo.lock",
+      "value": "name = \"confidential-inference-dcap-qvl\"",
+      "reason": "The obsolete local QVL fork must not be resolved."
+    },
+    {
+      "path": "Cargo.lock",
+      "value": "name = \"confidential-inference-dcap-qvl-webpki\"",
+      "reason": "The obsolete local webpki fork must not be resolved."
+    },
+    {
+      "path": "Cargo.toml",
+      "value": "third_party/dcap-qvl",
+      "reason": "DCAP verifier source is no longer a workspace member."
+    }
+  ]
+}

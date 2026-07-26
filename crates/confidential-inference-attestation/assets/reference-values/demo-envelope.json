@@ -1,0 +1,54 @@
+{
+  "schema": "confidential-inference.reference-values-envelope.v1",
+  "payload": {
+    "schema": "confidential-inference.reference-values.v1",
+    "version": "2026-07-05-demo",
+    "issuer": "confidential-inference",
+    "valid_from": "2026-07-05T00:00:00Z",
+    "valid_until": "2099-01-01T00:00:00Z",
+    "valid_until_epoch_ms": 4070908800000,
+    "revocation_epoch": 1,
+    "minimum_acceptable_version": "2026-07-05-demo",
+    "providers": {
+      "demo": {
+        "accepted_measurements": [
+          "sha256:demo-tee-measurement"
+        ],
+        "routes": {
+          "demo:gpt-oss-120b:e2ee-gpt-oss-120b-p": {
+            "canonical_model": "gpt-oss-120b",
+            "provider_model": "e2ee-gpt-oss-120b-p",
+            "evidence_family": "fixture_dstack",
+            "channel_binding_kind": "attested_app_e2ee",
+            "trust_tier": "app-e2ee",
+            "accepted_cpu_tees": [
+              "tdx"
+            ],
+            "e2ee_public_key_digest": "sha256:demo-e2ee-key",
+            "workload_image_digest": "sha256:demo-workload-image",
+            "model_artifacts": [
+              {
+                "kind": "weights",
+                "name": "gpt-oss-120b",
+                "digest": "sha256:demo-weights"
+              },
+              {
+                "kind": "tokenizer",
+                "name": "tokenizer.json",
+                "digest": "sha256:demo-tokenizer"
+              }
+            ],
+            "valid_until": "2099-01-01T00:00:00Z",
+            "valid_until_epoch_ms": 4070908800000
+          }
+        }
+      }
+    }
+  },
+  "signature": {
+    "signer": "confidential-inference",
+    "key_id": "confidential-inference-demo-ed25519-2026",
+    "alg": "ed25519",
+    "value": "base64url:pDlMbVZPVD8sqM5p5S7WrYtjKor-2NJJ9hpCYcsq6Shf1xC2b4R4yM3ySwU66uqdec-ib23SiXF9KY_xMkPECw"
+  }
+}

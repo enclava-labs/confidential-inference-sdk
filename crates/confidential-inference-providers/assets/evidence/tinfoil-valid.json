@@ -1,0 +1,24 @@
+{
+  "schema": "confidential-inference.tinfoil-tls-evidence.v1",
+  "provider": "tinfoil-fixture",
+  "route_id": "tinfoil-fixture:llama-3.3-70b:llama-3.3-70b",
+  "evidence_family": "tinfoil_hw_verified_tls",
+  "tee_measurement": "sha256:tinfoil-tee-measurement",
+  "hardware": {
+    "cpu": "tdx"
+  },
+  "report_data": "fd162e4bf87ec09d1c2e6c1acb9161534bc91eb2ee822d5aab5008b08e47dfaa0000000000000000000000000000000000000000000000000000000000000000",
+  "leaf_certificate_der_base64": "MIIDGzCCAgOgAwIBAgIUAjMO3OhvZPgEWRWQYomFbHMN8pUwDQYJKoZIhvcNAQELBQAwHTEbMBkGA1UEAwwSZW5jbGF2YS10ZXN0LmxvY2FsMB4XDTI2MDcwNTExMDU0NVoXDTI2MDcwNjExMDU0NVowHTEbMBkGA1UEAwwSZW5jbGF2YS10ZXN0LmxvY2FsMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArTL6xaF71lFhaA6Ohe4jbzExpBsGvQxg76P9R14jYZz0J6STFJgCj4XNWZdymLw3Ua6HBqF/0F6LVpRRtKLMtDqDTDJsINZpA1yqTOJiYsKUG+S6iifhFDkO0MJ7QV3w1GZi+TRe9ahCpqhKGl/LYlRr3zbaT6Vl2MsJhwonjSzzn08c7937soBxW7s7Fg805j8UO0mkLb5kfWV72+ET9MEoVaYPgvDeiMJfD6gAK4tZ3q6PBMBxmRqd20Utm1BoGZie7tiyJA4oH8vjM+Aw8O2HjjBck6Z4PZf11CkZQNvOXu7qwzoIhoTn5au53MYfMgiLM7HTG/9qDTT0VN4MVQIDAQABo1MwUTAdBgNVHQ4EFgQU2Zf0ANwb0g5UWOKv5FHy5/HjsXgwHwYDVR0jBBgwFoAU2Zf0ANwb0g5UWOKv5FHy5/HjsXgwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAhG5lD+HAEajqUBM2JI0hBctIIhMmJCuTT3zvb1E1pNrBbiPTC1vHLeJdQijCHcFiVuJLCJh/c99+ymE/1KESiolU+4LIPV2bfSL+3BsB0gg/JuQETSfiUBq3nqscYRBmSDbZkt/UCk6+GvLQ9A+mEBI+AY4pO7H/OSozdYj2/whN6lxs4wwmtCe/M6gfm3YLKzpBmoDGmw9SZ03canoAnBzvXi3x7WHy6+6QVdaDj0r0XAYze0wDYUIznSRjUC7o5koYsLI/VRLwVJaPLg6mzlUkZcP1l4L2zuDEkopTBM7xBVBBoigimsIDhwrpFXs8S9rbe94bRvTSppx51oUiUg==",
+  "attested_model": "llama-3.3-70b",
+  "workload_image_digest": "sha256:tinfoil-workload-image",
+  "model_artifacts": [
+    {
+      "kind": "weights",
+      "name": "llama-3.3-70b",
+      "digest": "sha256:tinfoil-weights"
+    }
+  ],
+  "issued_at": "2098-12-31T23:50:00Z",
+  "expires_at": "2099-01-01T00:00:00Z",
+  "expires_at_epoch_ms": 4070908800000
+}

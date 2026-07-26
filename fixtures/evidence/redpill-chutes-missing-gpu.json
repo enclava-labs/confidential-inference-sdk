@@ -1,0 +1,25 @@
+{
+  "schema": "confidential-inference.chutes-e2ee-evidence.v1",
+  "provider": "redpill-fixture",
+  "route_id": "redpill-fixture:gpt-oss-120b:private-org-gpt-oss-120b-thinking-TEE",
+  "evidence_family": "chutes_e2ee",
+  "tee_measurement": "sha256:chutes-tee-measurement",
+  "hardware": {
+    "cpu": "tdx"
+  },
+  "report_data": "9058cc76ff22e8c81acab931ebbeb446f5e5392866adc259c4a528fbc5f2bd450000000000000000000000000000000000000000000000000000000000000000",
+  "nonce": "3333333333333333333333333333333333333333333333333333333333333333",
+  "e2e_pubkey": "chutes-test-public-key",
+  "attested_model": "gpt-oss-120b",
+  "workload_image_digest": "sha256:chutes-workload-image",
+  "model_artifacts": [
+    {
+      "kind": "weights",
+      "name": "gpt-oss-120b",
+      "digest": "sha256:chutes-weights"
+    }
+  ],
+  "issued_at": "2098-12-31T23:50:00Z",
+  "expires_at": "2099-01-01T00:00:00Z",
+  "expires_at_epoch_ms": 4070908800000
+}

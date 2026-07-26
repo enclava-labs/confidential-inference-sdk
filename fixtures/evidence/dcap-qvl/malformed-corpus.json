@@ -1,0 +1,69 @@
+{
+  "schema": "confidential-inference.dcap-tdx-malformed-corpus.v1",
+  "cases": [
+    {
+      "id": "empty-quote",
+      "target": "quote",
+      "mutation": {
+        "kind": "truncate",
+        "len": 0
+      },
+      "expected_error_contains": "TDX DCAP quote verification"
+    },
+    {
+      "id": "truncated-quote-header",
+      "target": "quote",
+      "mutation": {
+        "kind": "truncate",
+        "len": 47
+      },
+      "expected_error_contains": "TDX DCAP quote verification"
+    },
+    {
+      "id": "truncated-td-report",
+      "target": "quote",
+      "mutation": {
+        "kind": "truncate",
+        "len": 568
+      },
+      "expected_error_contains": "TDX DCAP quote verification"
+    },
+    {
+      "id": "mutated-report-data",
+      "target": "quote",
+      "mutation": {
+        "kind": "flip_byte",
+        "offset": 568,
+        "xor": 1
+      },
+      "expected_error_contains": "TDX DCAP quote verification"
+    },
+    {
+      "id": "invalid-collateral-json",
+      "target": "collateral_json",
+      "mutation": {
+        "kind": "replace_json",
+        "value": "{not json"
+      },
+      "expected_error_contains": "invalid TDX DCAP collateral JSON"
+    },
+    {
+      "id": "missing-tcb-next-update",
+      "target": "collateral_json",
+      "mutation": {
+        "kind": "replace_tcb_info_json",
+        "value": "{\"id\":\"TDX\",\"version\":3}"
+      },
+      "expected_error_contains": "TDX collateral JSON is missing nextUpdate"
+    },
+    {
+      "id": "missing-qe-identity-next-update",
+      "target": "collateral_json",
+      "mutation": {
+        "kind": "replace_qe_identity_json",
+        "value": "{\"id\":\"TD_QE\",\"version\":2}"
+      },
+      "expected_error_contains": "TDX collateral JSON is missing nextUpdate"
+    }
+  ]
+}

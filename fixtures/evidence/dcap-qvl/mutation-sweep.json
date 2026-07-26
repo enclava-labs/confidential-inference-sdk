@@ -1,0 +1,51 @@
+{
+  "schema": "confidential-inference.dcap-tdx-mutation-sweep.v1",
+  "quote_truncation_lengths": [
+    0,
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    47,
+    48,
+    49,
+    128,
+    512,
+    1024,
+    2048,
+    4096
+  ],
+  "quote_flip_offsets": [
+    0,
+    4,
+    15,
+    47,
+    48,
+    63,
+    255,
+    568,
+    631
+  ],
+  "quote_flip_xors": [
+    1,
+    255
+  ],
+  "collateral_nested_json_truncation_lengths": [
+    0,
+    1,
+    2,
+    16,
+    64,
+    128,
+    256
+  ],
+  "collateral_nested_json_replacements": [
+    "",
+    "{}",
+    "[]",
+    "{\"nextUpdate\":\"2099-01-01T00:00:00Z\"}",
+    "{\"id\":\"TDX\",\"nextUpdate\":\"2099-01-01T00:00:00Z\"}"
+  ]
+}

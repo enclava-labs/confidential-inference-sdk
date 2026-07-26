@@ -1,0 +1,29 @@
+{
+  "schema": "confidential-inference.fixture-evidence.v1",
+  "provider": "demo",
+  "route_id": "demo:gpt-oss-120b:e2ee-gpt-oss-120b-p",
+  "evidence_family": "fixture_dstack",
+  "tee_measurement": "sha256:demo-tee-measurement",
+  "hardware": {
+    "cpu": "tdx"
+  },
+  "channel_binding": {
+    "kind": "attested_app_e2ee",
+    "public_key_digest": "sha256:demo-e2ee-key",
+    "request_bound": true,
+    "response_bound": true
+  },
+  "attested_model": "gpt-oss-20b",
+  "workload_image_digest": "sha256:demo-workload-image",
+  "model_artifacts": [
+    {
+      "kind": "weights",
+      "name": "gpt-oss-120b",
+      "digest": "sha256:demo-weights"
+    }
+  ],
+  "issued_at": "2098-12-31T23:50:00Z",
+  "expires_at": "2099-01-01T00:00:00Z",
+  "expires_at_epoch_ms": 4070908800000
+}
+

@@ -1,0 +1,322 @@
+{
+  "schema": "confidential-inference.tinfoil-live-reference-corpus.v1",
+  "cases": [
+    {
+      "id": "tinfoil-live-reference-valid",
+      "version": "2026-07-05-live-tinfoil-fixture",
+      "issuer": "confidential-inference-live-fixture",
+      "valid_from": "2026-07-05T00:00:00Z",
+      "revocation_epoch": 1,
+      "minimum_acceptable_version": "2026-07-05-live-tinfoil-fixture",
+      "canonical_model": "llama-3.3-70b",
+      "route": {
+        "route_id": "tinfoil-live:llama-3.3-70b:llama-3.3-70b",
+        "route_status": "active",
+        "provider": "tinfoil-live",
+        "provider_model": "llama-3.3-70b",
+        "evidence_family": "tinfoil_hw_verified_tls",
+        "api_base_url": "https://inference.tinfoil.sh/v1",
+        "evidence_endpoint": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
+        "adapter_version": "tinfoil-live-reference-corpus/0.1.0",
+        "freshness_class": "per_session",
+        "channel_binding_kind": "tee_terminated_tls",
+        "trust_tier": "hw-verified-tls",
+        "request_confidentiality_requirement": "bound_to_attested_workload",
+        "response_confidentiality_requirement": "bound_to_attested_workload",
+        "response_integrity_requirement": "channel_bound",
+        "request_encryption": "not_required",
+        "response_decryption": "not_required",
+        "streaming": "unsupported",
+        "alias_confidence": "curated"
+      },
+      "verified_quote": {
+        "attestation_format": "https://tinfoil.sh/predicate/tdx-guest/v2",
+        "hardware": {
+          "cpu": "tdx"
+        },
+        "tee_measurement": "tdx:mr_td:live-reference-fixture-measurement",
+        "report_data": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000000000000000000000000000000000000000000000000000000000",
+        "issued_at": "2098-12-31T23:50:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "expires_at_epoch_ms": 4070908800000,
+        "attested_model": "llama-3.3-70b",
+        "workload_image_digest": "sha256:tinfoil-live-workload",
+        "model_artifacts": [
+          {
+            "kind": "weights",
+            "name": "llama-3.3-70b",
+            "digest": "sha256:tinfoil-live-weights"
+          }
+        ]
+      },
+      "live_tls_spki_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "provider": "tinfoil-live",
+        "route_id": "tinfoil-live:llama-3.3-70b:llama-3.3-70b",
+        "reference_values_version": "2026-07-05-live-tinfoil-fixture",
+        "accepted_measurement": "tdx:mr_td:live-reference-fixture-measurement",
+        "accepted_cpu_tee": "tdx",
+        "tls_spki_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "workload_image_digest": "sha256:tinfoil-live-workload",
+        "model_artifact_count": 1
+      }
+    },
+    {
+      "id": "tinfoil-live-reference-sev-snp-valid",
+      "version": "2026-07-05-live-tinfoil-snp-fixture",
+      "issuer": "confidential-inference-live-fixture",
+      "valid_from": "2026-07-05T00:00:00Z",
+      "revocation_epoch": 1,
+      "minimum_acceptable_version": "2026-07-05-live-tinfoil-snp-fixture",
+      "canonical_model": "llama-3.3-70b",
+      "route": {
+        "route_id": "tinfoil-snp-live:llama-3.3-70b:llama-3.3-70b",
+        "route_status": "active",
+        "provider": "tinfoil-snp-live",
+        "provider_model": "llama-3.3-70b",
+        "evidence_family": "tinfoil_hw_verified_tls",
+        "api_base_url": "https://inference.tinfoil.sh/v1",
+        "evidence_endpoint": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
+        "adapter_version": "tinfoil-live-reference-corpus/0.1.0",
+        "freshness_class": "per_session",
+        "channel_binding_kind": "tee_terminated_tls",
+        "trust_tier": "hw-verified-tls",
+        "request_confidentiality_requirement": "bound_to_attested_workload",
+        "response_confidentiality_requirement": "bound_to_attested_workload",
+        "response_integrity_requirement": "channel_bound",
+        "request_encryption": "not_required",
+        "response_decryption": "not_required",
+        "streaming": "unsupported",
+        "alias_confidence": "curated"
+      },
+      "verified_quote": {
+        "attestation_format": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+        "hardware": {
+          "cpu": "sev_snp"
+        },
+        "tee_measurement": "sev-snp:measurement:live-reference-fixture",
+        "report_data": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000000000000000000000000000000000000000000000000000000000",
+        "issued_at": "2098-12-31T23:50:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "expires_at_epoch_ms": 4070908800000,
+        "attested_model": "llama-3.3-70b",
+        "workload_image_digest": "sha256:tinfoil-snp-live-workload",
+        "model_artifacts": [
+          {
+            "kind": "weights",
+            "name": "llama-3.3-70b",
+            "digest": "sha256:tinfoil-snp-live-weights"
+          }
+        ]
+      },
+      "live_tls_spki_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "provider": "tinfoil-snp-live",
+        "route_id": "tinfoil-snp-live:llama-3.3-70b:llama-3.3-70b",
+        "reference_values_version": "2026-07-05-live-tinfoil-snp-fixture",
+        "accepted_measurement": "sev-snp:measurement:live-reference-fixture",
+        "accepted_cpu_tee": "sev_snp",
+        "tls_spki_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "workload_image_digest": "sha256:tinfoil-snp-live-workload",
+        "model_artifact_count": 1
+      }
+    },
+    {
+      "id": "tinfoil-live-reference-model-mismatch",
+      "version": "2026-07-05-live-tinfoil-fixture",
+      "issuer": "confidential-inference-live-fixture",
+      "valid_from": "2026-07-05T00:00:00Z",
+      "revocation_epoch": 1,
+      "minimum_acceptable_version": "2026-07-05-live-tinfoil-fixture",
+      "canonical_model": "llama-3.3-70b",
+      "route": {
+        "route_id": "tinfoil-live:llama-3.3-70b:llama-3.3-70b",
+        "route_status": "active",
+        "provider": "tinfoil-live",
+        "provider_model": "llama-3.3-70b",
+        "evidence_family": "tinfoil_hw_verified_tls",
+        "api_base_url": "https://inference.tinfoil.sh/v1",
+        "evidence_endpoint": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
+        "adapter_version": "tinfoil-live-reference-corpus/0.1.0",
+        "freshness_class": "per_session",
+        "channel_binding_kind": "tee_terminated_tls",
+        "trust_tier": "hw-verified-tls",
+        "request_confidentiality_requirement": "bound_to_attested_workload",
+        "response_confidentiality_requirement": "bound_to_attested_workload",
+        "response_integrity_requirement": "channel_bound",
+        "request_encryption": "not_required",
+        "response_decryption": "not_required",
+        "streaming": "unsupported",
+        "alias_confidence": "curated"
+      },
+      "verified_quote": {
+        "attestation_format": "https://tinfoil.sh/predicate/tdx-guest/v2",
+        "hardware": {
+          "cpu": "tdx"
+        },
+        "tee_measurement": "tdx:mr_td:live-reference-fixture-measurement",
+        "report_data": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000000000000000000000000000000000000000000000000000000000",
+        "issued_at": "2098-12-31T23:50:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "expires_at_epoch_ms": 4070908800000,
+        "attested_model": "wrong-model",
+        "workload_image_digest": "sha256:tinfoil-live-workload",
+        "model_artifacts": [
+          {
+            "kind": "weights",
+            "name": "llama-3.3-70b",
+            "digest": "sha256:tinfoil-live-weights"
+          }
+        ]
+      },
+      "live_tls_spki_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_error_contains": "does not match canonical model"
+    },
+    {
+      "id": "tinfoil-live-reference-unbound-spki",
+      "version": "2026-07-05-live-tinfoil-fixture",
+      "issuer": "confidential-inference-live-fixture",
+      "valid_from": "2026-07-05T00:00:00Z",
+      "revocation_epoch": 1,
+      "minimum_acceptable_version": "2026-07-05-live-tinfoil-fixture",
+      "canonical_model": "llama-3.3-70b",
+      "route": {
+        "route_id": "tinfoil-live:llama-3.3-70b:llama-3.3-70b",
+        "route_status": "active",
+        "provider": "tinfoil-live",
+        "provider_model": "llama-3.3-70b",
+        "evidence_family": "tinfoil_hw_verified_tls",
+        "api_base_url": "https://inference.tinfoil.sh/v1",
+        "evidence_endpoint": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
+        "adapter_version": "tinfoil-live-reference-corpus/0.1.0",
+        "freshness_class": "per_session",
+        "channel_binding_kind": "tee_terminated_tls",
+        "trust_tier": "hw-verified-tls",
+        "request_confidentiality_requirement": "bound_to_attested_workload",
+        "response_confidentiality_requirement": "bound_to_attested_workload",
+        "response_integrity_requirement": "channel_bound",
+        "request_encryption": "not_required",
+        "response_decryption": "not_required",
+        "streaming": "unsupported",
+        "alias_confidence": "curated"
+      },
+      "verified_quote": {
+        "attestation_format": "https://tinfoil.sh/predicate/tdx-guest/v2",
+        "hardware": {
+          "cpu": "tdx"
+        },
+        "tee_measurement": "tdx:mr_td:live-reference-fixture-measurement",
+        "report_data": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000000000000000000000000000000000000000000000000000000000",
+        "issued_at": "2098-12-31T23:50:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "expires_at_epoch_ms": 4070908800000,
+        "attested_model": "llama-3.3-70b",
+        "workload_image_digest": "sha256:tinfoil-live-workload",
+        "model_artifacts": [
+          {
+            "kind": "weights",
+            "name": "llama-3.3-70b",
+            "digest": "sha256:tinfoil-live-weights"
+          }
+        ]
+      },
+      "live_tls_spki_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expected_error_contains": "not bound to the live TLS SPKI"
+    },
+    {
+      "id": "tinfoil-live-reference-missing-provenance",
+      "version": "2026-07-05-live-tinfoil-fixture",
+      "issuer": "confidential-inference-live-fixture",
+      "valid_from": "2026-07-05T00:00:00Z",
+      "revocation_epoch": 1,
+      "minimum_acceptable_version": "2026-07-05-live-tinfoil-fixture",
+      "canonical_model": "llama-3.3-70b",
+      "route": {
+        "route_id": "tinfoil-live:llama-3.3-70b:llama-3.3-70b",
+        "route_status": "active",
+        "provider": "tinfoil-live",
+        "provider_model": "llama-3.3-70b",
+        "evidence_family": "tinfoil_hw_verified_tls",
+        "api_base_url": "https://inference.tinfoil.sh/v1",
+        "evidence_endpoint": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
+        "adapter_version": "tinfoil-live-reference-corpus/0.1.0",
+        "freshness_class": "per_session",
+        "channel_binding_kind": "tee_terminated_tls",
+        "trust_tier": "hw-verified-tls",
+        "request_confidentiality_requirement": "bound_to_attested_workload",
+        "response_confidentiality_requirement": "bound_to_attested_workload",
+        "response_integrity_requirement": "channel_bound",
+        "request_encryption": "not_required",
+        "response_decryption": "not_required",
+        "streaming": "unsupported",
+        "alias_confidence": "curated"
+      },
+      "verified_quote": {
+        "attestation_format": "https://tinfoil.sh/predicate/tdx-guest/v2",
+        "hardware": {
+          "cpu": "tdx"
+        },
+        "tee_measurement": "tdx:mr_td:live-reference-fixture-measurement",
+        "report_data": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000000000000000000000000000000000000000000000000000000000",
+        "issued_at": "2098-12-31T23:50:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "expires_at_epoch_ms": 4070908800000,
+        "attested_model": "llama-3.3-70b",
+        "model_artifacts": []
+      },
+      "live_tls_spki_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_error_contains": "workload image provenance"
+    },
+    {
+      "id": "tinfoil-live-reference-wrong-trust-tier",
+      "version": "2026-07-05-live-tinfoil-fixture",
+      "issuer": "confidential-inference-live-fixture",
+      "valid_from": "2026-07-05T00:00:00Z",
+      "revocation_epoch": 1,
+      "minimum_acceptable_version": "2026-07-05-live-tinfoil-fixture",
+      "canonical_model": "llama-3.3-70b",
+      "route": {
+        "route_id": "tinfoil-live:llama-3.3-70b:llama-3.3-70b",
+        "route_status": "active",
+        "provider": "tinfoil-live",
+        "provider_model": "llama-3.3-70b",
+        "evidence_family": "tinfoil_hw_verified_tls",
+        "api_base_url": "https://inference.tinfoil.sh/v1",
+        "evidence_endpoint": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
+        "adapter_version": "tinfoil-live-reference-corpus/0.1.0",
+        "freshness_class": "per_session",
+        "channel_binding_kind": "tee_terminated_tls",
+        "trust_tier": "app-e2ee",
+        "request_confidentiality_requirement": "bound_to_attested_workload",
+        "response_confidentiality_requirement": "bound_to_attested_workload",
+        "response_integrity_requirement": "channel_bound",
+        "request_encryption": "not_required",
+        "response_decryption": "not_required",
+        "streaming": "unsupported",
+        "alias_confidence": "curated"
+      },
+      "verified_quote": {
+        "attestation_format": "https://tinfoil.sh/predicate/tdx-guest/v2",
+        "hardware": {
+          "cpu": "tdx"
+        },
+        "tee_measurement": "tdx:mr_td:live-reference-fixture-measurement",
+        "report_data": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000000000000000000000000000000000000000000000000000000000",
+        "issued_at": "2098-12-31T23:50:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "expires_at_epoch_ms": 4070908800000,
+        "attested_model": "llama-3.3-70b",
+        "workload_image_digest": "sha256:tinfoil-live-workload",
+        "model_artifacts": [
+          {
+            "kind": "weights",
+            "name": "llama-3.3-70b",
+            "digest": "sha256:tinfoil-live-weights"
+          }
+        ]
+      },
+      "live_tls_spki_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_error_contains": "hardware-verified TLS trust tier"
+    }
+  ]
+}
