@@ -269,35 +269,6 @@ impl ChutesE2eeEvidence {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct IonetConfidentialEvidence {
-    pub schema: String,
-    pub provider: String,
-    pub route_id: String,
-    pub evidence_family: String,
-    pub nonce: String,
-    pub nonce_prefix: String,
-    pub signing_address: String,
-    pub image_digest: String,
-    pub gpu_tee: GpuTeeKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpu_attestation: Option<NvidiaGpuAttestationEvidence>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_quote_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attested_model: Option<String>,
-    pub workload_image_digest: String,
-    pub model_artifacts: Vec<ArtifactDigest>,
-    pub issued_at: String,
-    pub expires_at: String,
-    pub expires_at_epoch_ms: u64,
-}
-
-impl IonetConfidentialEvidence {
-    pub const SCHEMA: &'static str = "confidential-inference.ionet-confidential-evidence.v1";
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TinfoilLiveCaptureEvidence {
     pub schema: String,
     pub provider: String,

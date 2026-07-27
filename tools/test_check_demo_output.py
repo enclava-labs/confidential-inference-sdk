@@ -784,183 +784,6 @@ def sample_local_app_e2ee_reference_values_envelope(payload=None):
     }
 
 
-def sample_local_ionet_reference_values_payload():
-    return {
-        "schema": "confidential-inference.reference-values.v1",
-        "version": "2026-07-05-local-ionet-demo",
-        "issuer": "confidential-inference-local-demo",
-        "valid_from": "2026-07-05T00:00:00Z",
-        "valid_until": "2099-01-01T00:00:00Z",
-        "valid_until_epoch_ms": 4_070_908_800_000,
-        "revocation_epoch": 1,
-        "minimum_acceptable_version": "2026-07-05-local-ionet-demo",
-        "providers": {
-            "local-ionet": {
-                "accepted_measurements": [],
-                "routes": {
-                    "local-ionet:llama-3.3-70b:local-ionet-llama-3-3-70b": {
-                        "canonical_model": "llama-3.3-70b",
-                        "provider_model": "local-ionet-llama-3-3-70b",
-                        "evidence_family": "ionet_confidential",
-                        "channel_binding_kind": "none",
-                        "trust_tier": "tee-only",
-                        "accepted_cpu_tees": [],
-                        "e2ee_public_key_digest": "",
-                        "response_signing_key_digest": "sha256:" + "3" * 64,
-                        "workload_image_digest": "sha256:local-ionet-workload-image",
-                        "model_artifacts": [
-                            {
-                                "kind": "provider_model",
-                                "name": "local-ionet-llama-3-3-70b",
-                                "digest": "sha256:" + "4" * 64,
-                            }
-                        ],
-                        "valid_until": "2099-01-01T00:00:00Z",
-                        "valid_until_epoch_ms": 4_070_908_800_000,
-                    }
-                },
-            }
-        },
-    }
-
-
-def sample_local_ionet_registry_payload():
-    return {
-        "schema": "confidential-inference.provider-registry.v1",
-        "version": "2026-07-05-local-ionet-demo",
-        "generated_at": "2026-07-05T00:00:00Z",
-        "source_sync_run": {
-            "completed_at": "2026-07-05T00:00:00Z",
-            "status": "success",
-            "source": "confidential-demo-local-ionet",
-        },
-        "models": {
-            "llama-3.3-70b": {
-                "canonical_model": "llama-3.3-70b",
-                "display_name": "Llama 3.3 70B",
-                "family": "Llama",
-                "aliases": ["llama-3.3-70b", "Llama 3.3 70B"],
-                "routes": [
-                    {
-                        "route_id": (
-                            "local-ionet:llama-3.3-70b:local-ionet-llama-3-3-70b"
-                        ),
-                        "route_status": "active",
-                        "provider": "local-ionet",
-                        "provider_model": "local-ionet-llama-3-3-70b",
-                        "evidence_family": "ionet_confidential",
-                        "api_base_url": "http://127.0.0.1:33791/v1/private",
-                        "evidence_endpoint": (
-                            "http://127.0.0.1:33791/v1/private/attestation"
-                        ),
-                        "adapter_version": "local-ionet-demo-adapter/0.1.0",
-                        "freshness_class": "per_session",
-                        "channel_binding_kind": "none",
-                        "trust_tier": "tee-only",
-                        "request_confidentiality_requirement": "not_required",
-                        "response_confidentiality_requirement": "not_required",
-                        "response_integrity_requirement": "receipt_bound",
-                        "accepted_gpu_tees": ["nvidia_cc"],
-                        "request_encryption": "not_required",
-                        "response_decryption": "not_required",
-                        "streaming": "unsupported",
-                        "alias_confidence": "curated",
-                    }
-                ],
-            }
-        },
-    }
-
-
-LOCAL_IONET_REGISTRY_DIGEST = check_demo_output._canonical_sha256_digest(
-    sample_local_ionet_registry_payload()
-)
-
-
-def sample_local_ionet_registry_envelope(payload=None):
-    payload = sample_local_ionet_registry_payload() if payload is None else payload
-    signature = sign_ed25519(
-        LOCAL_DEMO_SEED,
-        check_demo_output._canonical_json(payload).encode("utf-8"),
-    )
-    return {
-        "schema": "confidential-inference.provider-registry-envelope.v1",
-        "payload": payload,
-        "signature": {
-            **LOCAL_LIVE_SIGNATURE,
-            "value": "base64url:" + encode_unpadded_base64url(signature),
-        },
-    }
-
-
-def sample_local_ionet_compatibility_matrix_payload():
-    return {
-        "schema": "confidential-inference.provider-compatibility-matrix.v1",
-        "providers": {
-            "local-ionet": {
-                "provider": "local-ionet",
-                "route_execution_status": "executable",
-                "api_base_url": "http://127.0.0.1:33791/v1/private",
-                "supported_openai_endpoints": ["chat_completions"],
-                "model_listing": "signed_registry_only",
-                "model_id_rewrite": "use_route_provider_model",
-                "token_parameter_rewrite": "preserve_max_tokens",
-                "streaming": "unsupported",
-                "request_encryption": "not_required",
-                "response_decryption": "not_required",
-                "attestation_endpoint_shape": "ionet_confidential_local_demo",
-                "required_credentials": [],
-                "freshness_class": "per_session",
-                "cacheability_class": "per_session_verdict",
-                "expected_trust_tier": "tee-only",
-                "model_binding_support": "verified",
-                "known_unsupported_modes": ["streaming"],
-            }
-        },
-    }
-
-
-LOCAL_IONET_COMPATIBILITY_MATRIX_DIGEST = check_demo_output._canonical_sha256_digest(
-    sample_local_ionet_compatibility_matrix_payload()
-)
-
-
-def sample_local_ionet_compatibility_matrix_envelope(payload=None):
-    payload = sample_local_ionet_compatibility_matrix_payload() if payload is None else payload
-    signature = sign_ed25519(
-        LOCAL_DEMO_SEED,
-        check_demo_output._canonical_json(payload).encode("utf-8"),
-    )
-    return {
-        "schema": "confidential-inference.provider-compatibility-matrix-envelope.v1",
-        "payload": payload,
-        "signature": {
-            **LOCAL_LIVE_SIGNATURE,
-            "value": "base64url:" + encode_unpadded_base64url(signature),
-        },
-    }
-
-
-LOCAL_IONET_REFERENCE_DIGEST = check_demo_output._canonical_sha256_digest(
-    sample_local_ionet_reference_values_payload()
-)
-
-
-def sample_local_ionet_reference_values_envelope(payload=None):
-    payload = sample_local_ionet_reference_values_payload() if payload is None else payload
-    signature = sign_ed25519(
-        LOCAL_DEMO_SEED,
-        check_demo_output._canonical_json(payload).encode("utf-8"),
-    )
-    return {
-        "schema": "confidential-inference.reference-values-envelope.v1",
-        "payload": payload,
-        "signature": {
-            **LOCAL_LIVE_SIGNATURE,
-            "value": "base64url:" + encode_unpadded_base64url(signature),
-        },
-    }
-
 
 def sample_local_live_verdict(**overrides):
     verdict = sample_verdict(
@@ -1127,117 +950,6 @@ def sample_local_app_e2ee_record(
     record.update(overrides)
     return record
 
-
-def sample_local_ionet_verdict(**overrides):
-    verdict = sample_verdict(
-        trust_tier="tee-only",
-        provider="local-ionet",
-        requested_model="llama-3.3-70b",
-        provider_model="local-ionet-llama-3-3-70b",
-        canonical_model="llama-3.3-70b",
-        route_id="local-ionet:llama-3.3-70b:local-ionet-llama-3-3-70b",
-        evidence_family="ionet_confidential",
-        adapter_version="local-ionet-demo-adapter/0.1.0",
-        route_execution_status="executable",
-        channel_binding_kind="none",
-        model_binding_result="not_supported",
-        request_channel_bound=False,
-        request_confidentiality_result="unknown",
-        response_confidentiality_result="unknown",
-        response_channel_bound=False,
-        response_integrity_result="receipt_bound",
-        registry_source="custom",
-        reference_values_source="custom",
-        policy_digest=DIGEST,
-        provider_registry_digest=LOCAL_IONET_REGISTRY_DIGEST,
-        reference_values_digest=LOCAL_IONET_REFERENCE_DIGEST,
-        registry_signature=LOCAL_LIVE_SIGNATURE,
-        reference_values_signature=LOCAL_LIVE_SIGNATURE,
-        alias_confidence="curated",
-        registry_version="2026-07-05-local-ionet-demo",
-        reference_values_version="2026-07-05-local-ionet-demo",
-        checks={
-            "cpu_tee": "not_applicable",
-            "e2ee_key_binding": "not_applicable",
-            "gpu_tee": "verified",
-            "image_provenance": "verified",
-            "model_artifact_provenance": "verified",
-            "model_binding": "not_supported",
-            "nonce_binding": "verified",
-            "request_encryption": "not_applicable",
-            "request_key_binding": "not_applicable",
-            "response_channel_binding": "verified",
-            "response_encryption": "not_applicable",
-            "response_key_binding": "not_applicable",
-            "response_receipt": "verified",
-            "response_signing_key_binding": "verified",
-            "request_route_binding": "not_supported",
-            "route_binding": "not_supported",
-            "route_metadata_binding": "verified",
-            "tls_binding": "not_applicable",
-        },
-        artifacts={
-            "source_url": "http://127.0.0.1:33791/v1/private/attestation",
-            "tee_measurement": None,
-            "report_data": "0" * 128,
-            "signing_public_key": "sha256:" + "3" * 64,
-            "e2ee_capability": None,
-            "model_manifest": None,
-            "model_artifacts": [
-                {
-                    "kind": "provider_model",
-                    "name": "local-ionet-llama-3-3-70b",
-                    "digest": "sha256:" + "4" * 64,
-                }
-            ],
-        },
-    )
-    verdict.update(overrides)
-    return verdict
-
-
-def sample_local_ionet_record(
-    *,
-    cache_hit: bool = False,
-    nested_overrides: dict | None = None,
-    **overrides,
-):
-    verdict = sample_local_ionet_verdict(**(nested_overrides or {}))
-    record = {
-        "provider": verdict["provider"],
-        "route_id": verdict["route_id"],
-        "requested_model": verdict["requested_model"],
-        "provider_model": verdict["provider_model"],
-        "canonical_model": verdict["canonical_model"],
-        "enforcement": verdict["enforcement"],
-        "status": verdict["status"],
-        "request_allowed": verdict["request_allowed"],
-        "would_block_under_enforce": verdict["would_block_under_enforce"],
-        "policy_digest": verdict["policy_digest"],
-        "provider_registry_digest": verdict["provider_registry_digest"],
-        "registry_version": verdict["registry_version"],
-        "registry_source": verdict["registry_source"],
-        "registry_sync_completed_at": verdict["registry_sync_completed_at"],
-        "registry_signature": verdict["registry_signature"],
-        "reference_values_digest": verdict["reference_values_digest"],
-        "reference_values_version": verdict["reference_values_version"],
-        "reference_values_source": verdict["reference_values_source"],
-        "reference_values_signature": verdict["reference_values_signature"],
-        "raw_evidence_digest": verdict["raw_evidence_digest"],
-        "evidence_digest": verdict["evidence_digest"],
-        "verified_at": verdict["verified_at"],
-        "expires_at": verdict["expires_at"],
-        "freshness_class": verdict["freshness_class"],
-        "streaming_allowed": verdict["streaming_allowed"],
-        "route_execution_status": verdict["route_execution_status"],
-        "chat_executable": verdict["chat_executable"],
-        "known_unsupported_modes": verdict["known_unsupported_modes"],
-        "cache_hit": cache_hit,
-        "errors": verdict["errors"],
-        "verdict_json": verdict,
-    }
-    record.update(overrides)
-    return record
 
 
 def sample_local_live_record(
@@ -1425,25 +1137,6 @@ def write_sample_artifacts(root: Path) -> None:
     write_json(
         target / "confidential-demo-local-sdk-app-e2ee-reference-values.json",
         sample_local_app_e2ee_reference_values_envelope(),
-    )
-    write_jsonl(
-        target / "confidential-demo-local-ionet-verdicts.jsonl",
-        [
-            sample_local_ionet_record(),
-            sample_local_ionet_record(cache_hit=True),
-        ],
-    )
-    write_json(
-        target / "confidential-demo-local-ionet-registry.json",
-        sample_local_ionet_registry_envelope(),
-    )
-    write_json(
-        target / "confidential-demo-local-ionet-compatibility-matrix.json",
-        sample_local_ionet_compatibility_matrix_envelope(),
-    )
-    write_json(
-        target / "confidential-demo-local-ionet-reference-values.json",
-        sample_local_ionet_reference_values_envelope(),
     )
     write_jsonl(
         target / "confidential-demo-local-live-verdicts.jsonl",
@@ -1679,54 +1372,6 @@ def sample_output(
         "local_sdk_app_e2ee_reference_values_artifact_digest": (
             LOCAL_APP_E2EE_REFERENCE_DIGEST
         ),
-        "local_ionet_provider": "local-ionet",
-        "local_ionet_route_id": "local-ionet:llama-3.3-70b:local-ionet-llama-3-3-70b",
-        "local_ionet_requested_model": "llama-3.3-70b",
-        "local_ionet_provider_model": "local-ionet-llama-3-3-70b",
-        "local_ionet_canonical_model": "llama-3.3-70b",
-        "local_ionet_trust_tier": "tee-only",
-        "local_ionet_evidence_family": "ionet_confidential",
-        "local_ionet_channel_binding_kind": "none",
-        "local_ionet_request_confidentiality_result": "unknown",
-        "local_ionet_response_confidentiality_result": "unknown",
-        "local_ionet_response_integrity_result": "receipt_bound",
-        "local_ionet_route_execution_status": "executable",
-        "local_ionet_chat_executable": "true",
-        "local_ionet_policy_digest": DIGEST,
-        "local_ionet_provider_registry_digest": LOCAL_IONET_REGISTRY_DIGEST,
-        "local_ionet_reference_values_digest": LOCAL_IONET_REFERENCE_DIGEST,
-        "local_ionet_registry_source": "custom",
-        "local_ionet_reference_values_source": "custom",
-        "local_ionet_registry_signature_signer": "confidential-inference-local-demo",
-        "local_ionet_reference_values_signature_signer": "confidential-inference-local-demo",
-        "local_ionet_gpu_tee": "Some(Verified)",
-        "local_ionet_response_receipt": "Some(Verified)",
-        "local_ionet_nonce_binding": "Some(Verified)",
-        "local_ionet_response_signing_key_binding": "Some(Verified)",
-        "local_ionet_model_binding": "Some(NotSupported)",
-        "local_ionet_image_provenance": "Some(Verified)",
-        "local_ionet_model_artifact_provenance": "Some(Verified)",
-        "local_ionet_response_integrity": "ReceiptBound",
-        "local_ionet_response": (
-            "local io.net receipt-bound response for local-ionet-llama-3-3-70b: "
-            "verify the local io.net receipt-bound path"
-        ),
-        "local_ionet_persisted_verdicts": "2",
-        "local_ionet_verdict_store": "target/confidential-demo-local-ionet-verdicts.jsonl",
-        "local_ionet_registry_artifact": (
-            "target/confidential-demo-local-ionet-registry.json"
-        ),
-        "local_ionet_registry_artifact_digest": LOCAL_IONET_REGISTRY_DIGEST,
-        "local_ionet_compatibility_matrix_artifact": (
-            "target/confidential-demo-local-ionet-compatibility-matrix.json"
-        ),
-        "local_ionet_compatibility_matrix_artifact_digest": (
-            LOCAL_IONET_COMPATIBILITY_MATRIX_DIGEST
-        ),
-        "local_ionet_reference_values_artifact": (
-            "target/confidential-demo-local-ionet-reference-values.json"
-        ),
-        "local_ionet_reference_values_artifact_digest": LOCAL_IONET_REFERENCE_DIGEST,
         "local_live_tinfoil_provider": "local-tinfoil-live",
         "local_live_tinfoil_route_id": "local-tinfoil-live:llama-3.3-70b:llama-3.3-70b",
         "local_live_tinfoil_requested_model": "llama-3.3-70b",
@@ -1806,7 +1451,7 @@ class CheckDemoOutputTests(unittest.TestCase):
             output.write_text(
                 sample_output(
                     sample_verdict(status="failed", policy_digest="sha256:not-hex"),
-                    omit_label="local_ionet_response_receipt",
+                    omit_label="local_sdk_app_e2ee_model_binding",
                 ),
                 encoding="utf-8",
             )
@@ -1814,7 +1459,7 @@ class CheckDemoOutputTests(unittest.TestCase):
             report = check_demo_output.check_demo_output(output)
 
         joined = "\n".join(report["violations"])
-        self.assertIn("missing marker local_ionet_response_receipt", joined)
+        self.assertIn("missing marker local_sdk_app_e2ee_model_binding", joined)
         self.assertIn("verdict.status expected 'verified', got 'failed'", joined)
         self.assertIn("verdict.policy_digest must be canonical sha256 hex digest", joined)
 
@@ -2130,8 +1775,6 @@ class CheckDemoOutputTests(unittest.TestCase):
                     label_overrides={
                         "local_sdk_app_e2ee_trust_tier": "app-e2ee",
                         "local_sdk_app_e2ee_policy_digest": "sha256:not-hex",
-                        "local_ionet_response_integrity_result": "channel_bound",
-                        "local_ionet_reference_values_digest": "not-a-digest",
                     }
                 ),
                 encoding="utf-8",
@@ -2143,14 +1786,6 @@ class CheckDemoOutputTests(unittest.TestCase):
         self.assertIn("local_sdk_app_e2ee_trust_tier expected 'tee-only'", joined)
         self.assertIn(
             "local_sdk_app_e2ee_policy_digest must be a canonical sha256 hex digest",
-            joined,
-        )
-        self.assertIn(
-            "local_ionet_response_integrity_result expected 'receipt_bound'",
-            joined,
-        )
-        self.assertIn(
-            "local_ionet_reference_values_digest must be a canonical sha256 hex digest",
             joined,
         )
 
@@ -2402,33 +2037,6 @@ class CheckDemoOutputTests(unittest.TestCase):
             joined,
         )
 
-    def test_local_ionet_registry_artifact_must_bind_gpu_and_receipt(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_sample_artifacts(root)
-            artifact_path = root / "target" / "confidential-demo-local-ionet-registry.json"
-            payload = sample_local_ionet_registry_payload()
-            route = payload["models"]["llama-3.3-70b"]["routes"][0]
-            route["accepted_gpu_tees"] = []
-            route["response_integrity_requirement"] = "channel_bound"
-            write_json(artifact_path, sample_local_ionet_registry_envelope(payload))
-            output = root / "target" / "demo.out"
-            output.write_text(sample_output(), encoding="utf-8")
-
-            report = check_demo_output.check_demo_output(output)
-
-        joined = "\n".join(report["violations"])
-        self.assertIn("local_ionet_registry_artifact_digest expected", joined)
-        self.assertIn(
-            "local io.net registry artifact.route.accepted_gpu_tees "
-            "expected ['nvidia_cc'], got []",
-            joined,
-        )
-        self.assertIn(
-            "local io.net registry artifact.route.response_integrity_requirement "
-            "expected 'receipt_bound', got 'channel_bound'",
-            joined,
-        )
 
     def test_local_live_registry_artifact_must_bind_tls_route(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2498,38 +2106,6 @@ class CheckDemoOutputTests(unittest.TestCase):
             joined,
         )
 
-    def test_local_ionet_compatibility_matrix_must_bind_receipt_profile(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_sample_artifacts(root)
-            artifact_path = (
-                root / "target" / "confidential-demo-local-ionet-compatibility-matrix.json"
-            )
-            payload = sample_local_ionet_compatibility_matrix_payload()
-            provider = payload["providers"]["local-ionet"]
-            provider["route_execution_status"] = "verification_only"
-            provider["attestation_endpoint_shape"] = "dstack_app_e2ee_local_demo"
-            write_json(
-                artifact_path,
-                sample_local_ionet_compatibility_matrix_envelope(payload),
-            )
-            output = root / "target" / "demo.out"
-            output.write_text(sample_output(), encoding="utf-8")
-
-            report = check_demo_output.check_demo_output(output)
-
-        joined = "\n".join(report["violations"])
-        self.assertIn("local_ionet_compatibility_matrix_artifact_digest expected", joined)
-        self.assertIn(
-            "local io.net compatibility matrix artifact.provider.route_execution_status "
-            "expected 'executable', got 'verification_only'",
-            joined,
-        )
-        self.assertIn(
-            "local io.net compatibility matrix artifact.provider.attestation_endpoint_shape "
-            "expected 'ionet_confidential_local_demo', got 'dstack_app_e2ee_local_demo'",
-            joined,
-        )
 
     def test_local_live_compatibility_matrix_must_bind_tls_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2634,37 +2210,6 @@ class CheckDemoOutputTests(unittest.TestCase):
             joined,
         )
 
-    def test_local_ionet_reference_values_artifact_must_bind_receipt_key(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_sample_artifacts(root)
-            artifact_path = (
-                root / "target" / "confidential-demo-local-ionet-reference-values.json"
-            )
-            payload = sample_local_ionet_reference_values_payload()
-            provider = payload["providers"]["local-ionet"]
-            provider["accepted_measurements"] = [OTHER_DIGEST]
-            route = provider["routes"][
-                "local-ionet:llama-3.3-70b:local-ionet-llama-3-3-70b"
-            ]
-            route["response_signing_key_digest"] = OTHER_DIGEST
-            write_json(artifact_path, sample_local_ionet_reference_values_envelope(payload))
-            output = root / "target" / "demo.out"
-            output.write_text(sample_output(), encoding="utf-8")
-
-            report = check_demo_output.check_demo_output(output)
-
-        joined = "\n".join(report["violations"])
-        self.assertIn("local_ionet_reference_values_digest expected", joined)
-        self.assertIn(
-            "local io.net reference-values artifact.accepted_measurements must be empty",
-            joined,
-        )
-        self.assertIn(
-            "local io.net reference-values artifact.route.response_signing_key_digest "
-            "must match fresh io.net verdict signing_public_key",
-            joined,
-        )
 
     def test_local_live_markers_must_match_fresh_persisted_verdict(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2755,78 +2300,7 @@ class CheckDemoOutputTests(unittest.TestCase):
             "\n".join(report["violations"]),
         )
 
-    def test_local_ionet_store_must_preserve_receipt_bound_integrity(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_sample_artifacts(root)
-            ionet_path = root / "target" / "confidential-demo-local-ionet-verdicts.jsonl"
-            first = sample_local_ionet_record(
-                nested_overrides={
-                    "trust_tier": "app-e2ee",
-                    "checks": {
-                        "cpu_tee": "not_applicable",
-                        "e2ee_key_binding": "not_applicable",
-                        "gpu_tee": "verified",
-                        "image_provenance": "verified",
-                        "model_artifact_provenance": "verified",
-                        "model_binding": "verified",
-                        "nonce_binding": "verified",
-                        "request_encryption": "not_applicable",
-                        "request_key_binding": "verified",
-                        "response_channel_binding": "verified",
-                        "response_encryption": "not_applicable",
-                        "response_key_binding": "verified",
-                        "response_receipt": "failed",
-                        "response_signing_key_binding": "verified",
-                        "route_binding": "verified",
-                        "tls_binding": "not_applicable",
-                    },
-                }
-            )
-            write_jsonl(
-                ionet_path,
-                [first, sample_local_ionet_record(cache_hit=False)],
-            )
-            output = root / "target" / "demo.out"
-            output.write_text(sample_output(), encoding="utf-8")
 
-            report = check_demo_output.check_demo_output(output)
-
-        joined = "\n".join(report["violations"])
-        self.assertIn(
-            "local io.net verdict JSONL record 1.verdict_json.trust_tier "
-            "expected 'tee-only', got 'app-e2ee'",
-            joined,
-        )
-        self.assertIn(
-            "local io.net verdict JSONL record 1.verdict_json.checks.response_receipt "
-            "expected 'verified', got 'failed'",
-            joined,
-        )
-        self.assertIn(
-            "local io.net verdict JSONL must include both fresh and cached records",
-            joined,
-        )
-
-    def test_local_ionet_markers_must_match_fresh_persisted_verdict(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_sample_artifacts(root)
-            ionet_path = root / "target" / "confidential-demo-local-ionet-verdicts.jsonl"
-            fresh = sample_local_ionet_record(
-                nested_overrides={"policy_digest": OTHER_DIGEST}
-            )
-            cached = sample_local_ionet_record(cache_hit=True)
-            write_jsonl(ionet_path, [fresh, cached])
-            output = root / "target" / "demo.out"
-            output.write_text(sample_output(), encoding="utf-8")
-
-            report = check_demo_output.check_demo_output(output)
-
-        self.assertIn(
-            f"local_ionet_policy_digest expected '{OTHER_DIGEST}', got '{DIGEST}'",
-            "\n".join(report["violations"]),
-        )
 
     def test_metrics_counts_and_route_labels_must_match_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

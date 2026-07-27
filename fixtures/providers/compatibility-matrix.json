@@ -23,32 +23,6 @@
       ],
       "token_parameter_rewrite": "preserve_max_tokens"
     },
-    "ionet-confidential-fixture": {
-      "api_base_url": "https://api.intelligence.io.solutions/api/v1",
-      "attestation_endpoint_shape": "ionet_confidential_attestation_and_signed_response_fixture",
-      "cacheability_class": "per_session_verdict",
-      "expected_trust_tier": "tee-only",
-      "freshness_class": "per_session",
-      "known_unsupported_modes": [
-        "streaming",
-        "live_execution"
-      ],
-      "model_binding_support": "verified",
-      "model_id_rewrite": "use_route_provider_model",
-      "model_listing": "signed_registry_only",
-      "provider": "ionet-confidential-fixture",
-      "request_encryption": "not_required",
-      "required_credentials": [
-        "bearer_token"
-      ],
-      "response_decryption": "not_required",
-      "route_execution_status": "adapter_shape_fixture",
-      "streaming": "unsupported",
-      "supported_openai_endpoints": [
-        "chat_completions"
-      ],
-      "token_parameter_rewrite": "preserve_max_tokens"
-    },
     "phala-direct-fixture": {
       "api_base_url": "https://inference.phala.com/v1",
       "attestation_endpoint_shape": "phala_dstack_app_e2ee_fixture",

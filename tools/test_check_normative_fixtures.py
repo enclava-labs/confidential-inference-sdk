@@ -317,26 +317,6 @@ class CheckNormativeFixturesTests(unittest.TestCase):
         self.assertIn("Direct Phala dstack profiles must remain", joined)
         self.assertIn("live_execution", joined)
 
-    def test_ionet_profile_must_not_be_marked_executable_before_live_artifacts(self) -> None:
-        envelope = copy.deepcopy(
-            check_normative_fixtures.load_json(
-                Path("fixtures/providers/compatibility-matrix-envelope.json")
-            )
-        )
-        ionet = envelope["payload"]["providers"]["ionet-confidential-fixture"]
-        ionet["route_execution_status"] = "executable"
-        ionet["known_unsupported_modes"] = ["streaming"]
-
-        violations = check_normative_fixtures.validate_compatibility_matrix_envelope(
-            Path("fixtures/providers/compatibility-matrix-envelope.json"),
-            envelope,
-            Path("."),
-        )
-
-        joined = "\n".join(violations)
-        self.assertIn("io.net confidential inference profiles must remain", joined)
-        self.assertIn("live_execution", joined)
-
     def test_venice_profile_must_not_be_marked_executable_before_live_artifacts(self) -> None:
         envelope = copy.deepcopy(
             check_normative_fixtures.load_json(

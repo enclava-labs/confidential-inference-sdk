@@ -35,34 +35,30 @@ assert CHECK_SPEC.loader is not None
 CHECK_SPEC.loader.exec_module(check_release_manifest)
 
 
-LIVE_PROVIDER_IDS = ("tinfoil", "venice", "redpill", "phala", "ionet")
+LIVE_PROVIDER_IDS = ("tinfoil", "venice", "redpill", "phala")
 LIVE_COMPATIBILITY_PROVIDER_IDS = {
     "tinfoil": "tinfoil-fixture",
     "venice": "venice-fixture",
     "redpill": "redpill-fixture",
     "phala": "phala-direct-fixture",
-    "ionet": "ionet-confidential-fixture",
 }
 LIVE_AUTH_ENVS = {
     "tinfoil": "TINFOIL_API_KEY",
     "venice": "VENICE_API_KEY",
     "redpill": "REDPILL_API_KEY",
     "phala": "PHALA_API_KEY",
-    "ionet": "IONET_API_KEY",
 }
 LIVE_MODEL_LIST_URLS = {
     "tinfoil": "https://inference.tinfoil.sh/v1/models",
     "venice": "https://api.venice.ai/api/v1/models",
     "redpill": "https://api.redpill.ai/v1/models",
     "phala": "https://inference.phala.com/v1/models",
-    "ionet": "https://api.intelligence.io.solutions/api/v1/models",
 }
 LIVE_ATTESTATION_URLS = {
     "tinfoil": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
     "venice": "https://api.venice.ai/api/v1/confidentiality",
     "redpill": "https://api.redpill.ai/v1/attestation/report",
     "phala": "https://inference.phala.com/v1/aci/attestation",
-    "ionet": "https://api.intelligence.io.solutions/api/v1/attestation",
 }
 COMPATIBILITY_FIXTURE_SEED = bytes([47]) * 32
 
@@ -323,7 +319,6 @@ def production_compatibility_matrix(matrix: dict[str, object]) -> dict[str, obje
         "venice-fixture": "dstack_app_e2ee_live",
         "redpill-fixture": "chutes_e2ee_gpu_live",
         "phala-direct-fixture": "phala_dstack_app_e2ee_live",
-        "ionet-confidential-fixture": "ionet_confidential_live",
     }
     for provider_id, attestation_shape in live_shapes.items():
         profile = providers[provider_id]
@@ -884,7 +879,6 @@ class CheckReleaseManifestTests(unittest.TestCase):
                 joined,
             )
             self.assertIn("venice", joined)
-            self.assertIn("ionet", joined)
             self.assertFalse(report["live_conformance_gate_verified"])
 
     def test_release_manifest_rejects_live_report_without_provider_enable_override(self) -> None:

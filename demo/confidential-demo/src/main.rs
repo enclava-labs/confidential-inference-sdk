@@ -2,13 +2,12 @@ use base64::Engine;
 use confidential_inference_attestation::{
     canonical_json, certificate_spki_sha256_hex, sha256_digest, AliasConfidence, ArtifactDigest,
     ArtifactSignature, AttestationError, AttestationVerdict, BoundDataRequirement,
-    ChannelBindingKind, CheckResult, ConfidentialityResult, CpuTeeKind, CpuTeeRequirement,
-    EvidenceHardware, FreshnessClass, GpuAttestationVerifier, GpuTeeKind, GpuTeeRequirement,
-    ModelBindingRequirement, NvidiaGpuAttestationVerificationRequest, ProviderReference,
-    ReferenceValuesEnvelope, ReferenceValuesPayload, ResponseIntegrityRequirement,
-    ResponseIntegrityResult, RouteReference, TinfoilAttestationDoc, TinfoilAttestationFormat,
-    TinfoilQuoteVerificationRequest, TinfoilQuoteVerifier, TrustTier, TrustedSigningKey,
-    VerificationPolicy, VerifiedGpuAttestation, VerifiedTinfoilQuote, TINFOIL_TDX_GUEST_V2_FORMAT,
+    ChannelBindingKind, CheckResult, ConfidentialityResult, CpuTeeKind, EvidenceHardware,
+    FreshnessClass, ModelBindingRequirement, ProviderReference, ReferenceValuesEnvelope,
+    ReferenceValuesPayload, ResponseIntegrityRequirement, ResponseIntegrityResult, RouteReference,
+    TinfoilAttestationDoc, TinfoilAttestationFormat, TinfoilQuoteVerificationRequest,
+    TinfoilQuoteVerifier, TrustTier, TrustedSigningKey, VerificationPolicy, VerifiedTinfoilQuote,
+    TINFOIL_TDX_GUEST_V2_FORMAT,
 };
 use confidential_inference_openai::{ChatCompletionRequest, ChatMessage};
 use confidential_inference_providers::{
@@ -81,13 +80,6 @@ const LOCAL_APP_E2EE_WORKLOAD_IMAGE_REFERENCE: &str = concat!(
 );
 const LOCAL_APP_E2EE_WEIGHTS: &str = "sha256:local-sdk-app-e2ee-weights";
 const LOCAL_APP_E2EE_PROMPT: &str = "verify the local SDK app-E2EE path";
-const LOCAL_IONET_PROVIDER: &str = "local-ionet";
-const LOCAL_IONET_ROUTE_ID: &str = "local-ionet:llama-3.3-70b:local-ionet-llama-3-3-70b";
-const LOCAL_IONET_MODEL: &str = "llama-3.3-70b";
-const LOCAL_IONET_PROVIDER_MODEL: &str = "local-ionet-llama-3-3-70b";
-const LOCAL_IONET_SIGNING_ADDRESS: &str = "0x3333333333333333333333333333333333333333";
-const LOCAL_IONET_WORKLOAD_IMAGE: &str = "sha256:local-ionet-workload-image";
-const LOCAL_IONET_PROMPT: &str = "verify the local io.net receipt-bound path";
 const PHASE2_TINFOIL_PROMPT: &str = "verify the signed Tinfoil fixture path";
 const PHASE2_VENICE_BLOCKED_PROMPT: &str = "this route is verification-only";
 const LOCAL_ARTIFACT_SIGNER: &str = "confidential-inference-local-demo";
@@ -153,7 +145,6 @@ async fn main() -> Result<(), DemoError> {
     run_proxy_demo().await?;
     run_phase2_fixtures().await?;
     run_local_sdk_app_e2ee_demo().await?;
-    run_local_ionet_demo().await?;
     run_local_live_tinfoil_demo().await?;
 
     Ok(())
@@ -1237,161 +1228,6 @@ async fn run_local_sdk_app_e2ee_demo() -> Result<(), DemoError> {
     Ok(())
 }
 
-async fn run_local_ionet_demo() -> Result<(), DemoError> {
-    let server = LocalIonetServer::spawn().await?;
-    let route = server.route.clone();
-    let registry = signed_local_ionet_registry(route.clone())?;
-    let registry_path = local_ionet_registry_path()?;
-    let registry_digest = registry.payload.digest()?;
-    write_json_artifact(&registry_path, &registry)?;
-    validate_local_registry_artifact(
-        &registry_path,
-        &registry_digest,
-        LOCAL_IONET_MODEL,
-        &route,
-        "local io.net registry artifact",
-    )?;
-    let reference_values = signed_local_ionet_reference_values(&route)?;
-    let reference_values_path = local_ionet_reference_values_path()?;
-    let reference_values_digest = reference_values.payload.digest()?;
-    write_json_artifact(&reference_values_path, &reference_values)?;
-    validate_local_ionet_reference_values_artifact(
-        &reference_values_path,
-        &reference_values_digest,
-        &route,
-    )?;
-    let compatibility_matrix = local_ionet_compatibility_matrix(&route);
-    let compatibility_matrix_path = local_ionet_compatibility_matrix_path()?;
-    let compatibility_matrix_digest = compatibility_matrix.digest()?;
-    let compatibility_matrix_artifact =
-        signed_local_compatibility_matrix(compatibility_matrix.clone())?;
-    write_json_artifact(&compatibility_matrix_path, &compatibility_matrix_artifact)?;
-    validate_local_compatibility_matrix_artifact(
-        &compatibility_matrix_path,
-        &compatibility_matrix_digest,
-        &compatibility_matrix,
-        LOCAL_IONET_PROVIDER,
-        &route,
-        "local io.net compatibility matrix artifact",
-    )?;
-    let verdict_path = local_ionet_verdict_path()?;
-    let verdict_store = Arc::new(JsonlVerdictStore::create(&verdict_path)?);
-
-    let client = ConfidentialInference::builder()
-        .registry(registry)
-        .reference_values(reference_values)
-        .compatibility_matrix(compatibility_matrix)
-        .verdict_store(verdict_store)
-        .trusted_artifact_signing_key(local_trusted_signing_key())
-        .api_key(LOCAL_IONET_PROVIDER, "local-ionet-demo-key")
-        .gpu_attestation_verifier(LocalIonetGpuAttestationVerifier)
-        .policy(local_ionet_policy())
-        .build()
-        .await?;
-
-    let response = client
-        .chat_completions()
-        .model(LOCAL_IONET_MODEL)
-        .message(ChatMessage::user(LOCAL_IONET_PROMPT))
-        .send()
-        .await?;
-
-    for check in [
-        "gpu_tee",
-        "nonce_binding",
-        "response_signing_key_binding",
-        "response_receipt",
-        "response_channel_binding",
-        "image_provenance",
-        "model_artifact_provenance",
-    ] {
-        require_verified_check(&response.verdict, check)?;
-    }
-    if response.verdict.check("model_binding") != Some(&CheckResult::NotSupported) {
-        return Err("local io.net verdict must preserve the absent model binding".into());
-    }
-    require_response_summary(
-        &response,
-        false,
-        ConfidentialityResult::Unknown,
-        false,
-        ConfidentialityResult::Unknown,
-        ResponseIntegrityResult::ReceiptBound,
-    )?;
-    let verdict_jsonl = read_jsonl_records(&verdict_path)?;
-    let persisted_verdicts = verdict_jsonl.len();
-    if persisted_verdicts < 2 {
-        return Err(format!(
-            "local io.net verdict store expected at least two records, got {persisted_verdicts}"
-        )
-        .into());
-    }
-    validate_local_ionet_verdict_records(
-        &verdict_jsonl,
-        &[
-            LOCAL_IONET_PROMPT,
-            response.response.choices[0].message.content.as_str(),
-        ],
-    )?;
-
-    println!();
-    println!("local_ionet_provider: {}", response.provider);
-    print_route_verdict_summary("local_ionet", &response.verdict)?;
-    println!(
-        "local_ionet_gpu_tee: {:?}",
-        response.verdict.check("gpu_tee")
-    );
-    println!(
-        "local_ionet_response_receipt: {:?}",
-        response.verdict.check("response_receipt")
-    );
-    println!(
-        "local_ionet_nonce_binding: {:?}",
-        response.verdict.check("nonce_binding")
-    );
-    println!(
-        "local_ionet_response_signing_key_binding: {:?}",
-        response.verdict.check("response_signing_key_binding")
-    );
-    println!(
-        "local_ionet_model_binding: {:?}",
-        response.verdict.check("model_binding")
-    );
-    println!(
-        "local_ionet_image_provenance: {:?}",
-        response.verdict.check("image_provenance")
-    );
-    println!(
-        "local_ionet_model_artifact_provenance: {:?}",
-        response.verdict.check("model_artifact_provenance")
-    );
-    println!(
-        "local_ionet_response_integrity: {:?}",
-        response.verdict.response_integrity_result
-    );
-    println!(
-        "local_ionet_response: {}",
-        response.response.choices[0].message.content
-    );
-    println!("local_ionet_persisted_verdicts: {persisted_verdicts}");
-    println!("local_ionet_verdict_store: {}", verdict_path.display());
-    println!("local_ionet_registry_artifact: {}", registry_path.display());
-    println!("local_ionet_registry_artifact_digest: {registry_digest}");
-    println!(
-        "local_ionet_compatibility_matrix_artifact: {}",
-        compatibility_matrix_path.display()
-    );
-    println!("local_ionet_compatibility_matrix_artifact_digest: {compatibility_matrix_digest}");
-    println!(
-        "local_ionet_reference_values_artifact: {}",
-        reference_values_path.display()
-    );
-    println!("local_ionet_reference_values_artifact_digest: {reference_values_digest}");
-
-    server.await_shutdown().await?;
-    Ok(())
-}
-
 async fn run_local_live_tinfoil_demo() -> Result<(), DemoError> {
     let server = LocalTinfoilServer::spawn().await?;
     let route = local_tinfoil_route(&server.base_url);
@@ -1970,22 +1806,6 @@ fn local_app_e2ee_reference_values_path() -> Result<std::path::PathBuf, DemoErro
     reset_demo_artifact_path("target/confidential-demo-local-sdk-app-e2ee-reference-values.json")
 }
 
-fn local_ionet_verdict_path() -> Result<std::path::PathBuf, DemoError> {
-    reset_demo_jsonl_path("target/confidential-demo-local-ionet-verdicts.jsonl")
-}
-
-fn local_ionet_registry_path() -> Result<std::path::PathBuf, DemoError> {
-    reset_demo_artifact_path("target/confidential-demo-local-ionet-registry.json")
-}
-
-fn local_ionet_compatibility_matrix_path() -> Result<std::path::PathBuf, DemoError> {
-    reset_demo_artifact_path("target/confidential-demo-local-ionet-compatibility-matrix.json")
-}
-
-fn local_ionet_reference_values_path() -> Result<std::path::PathBuf, DemoError> {
-    reset_demo_artifact_path("target/confidential-demo-local-ionet-reference-values.json")
-}
-
 fn local_demo_audit_path() -> Result<std::path::PathBuf, DemoError> {
     reset_demo_jsonl_path("target/confidential-demo-audit.jsonl")
 }
@@ -2348,64 +2168,6 @@ fn validate_local_app_e2ee_reference_values_artifact(
     {
         return Err(
             "local SDK app-E2EE reference-values artifact did not bind the expected route".into(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_local_ionet_reference_values_artifact(
-    path: &std::path::Path,
-    expected_digest: &str,
-    route: &RouteDefinition,
-) -> Result<(), DemoError> {
-    let envelope: ReferenceValuesEnvelope = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-    envelope.verify_signature_with_keys(&[local_trusted_signing_key()])?;
-    let digest = envelope.payload.digest()?;
-    if digest != expected_digest {
-        return Err(format!(
-            "local io.net reference-values artifact digest {digest} did not match expected {expected_digest}"
-        )
-        .into());
-    }
-    if envelope.signature.signer != LOCAL_ARTIFACT_SIGNER
-        || envelope.signature.key_id != LOCAL_ARTIFACT_KEY_ID
-        || envelope.signature.alg != "ed25519"
-    {
-        return Err("local io.net reference-values artifact signature identity drifted".into());
-    }
-
-    let provider = envelope
-        .payload
-        .providers
-        .get(LOCAL_IONET_PROVIDER)
-        .ok_or("local io.net reference-values artifact missing provider")?;
-    if !provider.accepted_measurements.is_empty() {
-        return Err("local io.net reference-values artifact must not pin a CPU measurement".into());
-    }
-    let route_reference = provider
-        .routes
-        .get(&route.route_id)
-        .ok_or("local io.net reference-values artifact missing route")?;
-    let signing_key_digest = sha256_digest(LOCAL_IONET_SIGNING_ADDRESS.as_bytes());
-    let model_digest = sha256_digest(LOCAL_IONET_PROVIDER_MODEL.as_bytes());
-    if route_reference.canonical_model != LOCAL_IONET_MODEL
-        || route_reference.provider_model != LOCAL_IONET_PROVIDER_MODEL
-        || route_reference.evidence_family != "ionet_confidential"
-        || route_reference.channel_binding_kind != ChannelBindingKind::None
-        || route_reference.trust_tier != TrustTier::TeeOnly
-        || !route_reference.accepted_cpu_tees.is_empty()
-        || !route_reference.e2ee_public_key_digest.is_empty()
-        || route_reference.response_signing_key_digest.as_deref()
-            != Some(signing_key_digest.as_str())
-        || route_reference.workload_image_digest != LOCAL_IONET_WORKLOAD_IMAGE
-        || !route_reference.model_artifacts.iter().any(|artifact| {
-            artifact.kind == "provider_model"
-                && artifact.name == LOCAL_IONET_PROVIDER_MODEL
-                && artifact.digest == model_digest
-        })
-    {
-        return Err(
-            "local io.net reference-values artifact did not bind the expected route".into(),
         );
     }
     Ok(())
@@ -2934,82 +2696,6 @@ fn validate_local_app_e2ee_verdict_records(
     Ok(())
 }
 
-fn validate_local_ionet_verdict_records(
-    records: &[Value],
-    forbidden: &[&str],
-) -> Result<(), DemoError> {
-    validate_jsonl_redaction(records, forbidden, "local io.net verdict store")?;
-    require_cache_hit_coverage(records, "local io.net verdict store")?;
-    for record in records {
-        require_json_string(record, "provider", LOCAL_IONET_PROVIDER)?;
-        require_json_string(record, "status", "verified")?;
-        require_json_string(record, "enforcement", "enforce")?;
-        require_json_bool(record, "request_allowed", true)?;
-        require_json_bool(record, "would_block_under_enforce", false)?;
-        require_json_bool(record, "chat_executable", true)?;
-        require_json_string(record, "route_execution_status", "executable")?;
-        require_digest_field(record, "policy_digest")?;
-        require_digest_field(record, "provider_registry_digest")?;
-        require_digest_field(record, "reference_values_digest")?;
-        require_digest_field(record, "raw_evidence_digest")?;
-        require_digest_field(record, "evidence_digest")?;
-        require_json_object(record, "registry_signature")?;
-        require_json_object(record, "reference_values_signature")?;
-        let verdict_json = record
-            .get("verdict_json")
-            .ok_or("local io.net verdict record is missing verdict_json")?;
-        require_record_or_verdict_json_string(
-            record,
-            verdict_json,
-            "request_confidentiality_result",
-            "unknown",
-        )?;
-        require_record_or_verdict_json_string(
-            record,
-            verdict_json,
-            "response_confidentiality_result",
-            "unknown",
-        )?;
-        require_record_or_verdict_json_string(
-            record,
-            verdict_json,
-            "response_integrity_result",
-            "receipt_bound",
-        )?;
-        for check in [
-            "gpu_tee",
-            "nonce_binding",
-            "response_signing_key_binding",
-            "response_receipt",
-            "response_channel_binding",
-            "image_provenance",
-            "model_artifact_provenance",
-        ] {
-            let got = verdict_json
-                .get("checks")
-                .and_then(|checks| checks.get(check))
-                .and_then(Value::as_str);
-            if got != Some("verified") {
-                return Err(format!(
-                    "local io.net verdict_json check {check} expected verified, got {got:?}"
-                )
-                .into());
-            }
-        }
-        let model_binding = verdict_json
-            .get("checks")
-            .and_then(|checks| checks.get("model_binding"))
-            .and_then(Value::as_str);
-        if model_binding != Some("not_supported") {
-            return Err(format!(
-                "local io.net verdict_json check model_binding expected not_supported, got {model_binding:?}"
-            )
-            .into());
-        }
-    }
-    Ok(())
-}
-
 fn validate_jsonl_redaction(
     records: &[Value],
     forbidden: &[&str],
@@ -3182,17 +2868,6 @@ fn local_app_e2ee_policy() -> VerificationPolicy {
     policy
 }
 
-fn local_ionet_policy() -> VerificationPolicy {
-    let mut policy = VerificationPolicy::require_hardware();
-    policy.hardware.cpu = CpuTeeRequirement::NotRequired;
-    policy.hardware.gpu = GpuTeeRequirement::one_of(vec![GpuTeeKind::NvidiaCc]);
-    policy.response_integrity_requirement = ResponseIntegrityRequirement::ReceiptBound;
-    policy.model_binding_requirement = ModelBindingRequirement::IfProviderSupports;
-    policy.provenance.workload_image = true;
-    policy.provenance.model_artifacts = true;
-    policy
-}
-
 fn local_app_e2ee_route(base_url: &str) -> RouteDefinition {
     RouteDefinition {
         route_id: LOCAL_APP_E2EE_ROUTE_ID.into(),
@@ -3212,30 +2887,6 @@ fn local_app_e2ee_route(base_url: &str) -> RouteDefinition {
         accepted_gpu_tees: Vec::new(),
         request_encryption: EncryptionRequirement::Required,
         response_decryption: EncryptionRequirement::Required,
-        streaming: StreamingSupport::Unsupported,
-        alias_confidence: AliasConfidence::Curated,
-    }
-}
-
-fn local_ionet_route(base_url: &str) -> RouteDefinition {
-    RouteDefinition {
-        route_id: LOCAL_IONET_ROUTE_ID.into(),
-        route_status: RouteLifecycle::Active,
-        provider: LOCAL_IONET_PROVIDER.into(),
-        provider_model: LOCAL_IONET_PROVIDER_MODEL.into(),
-        evidence_family: "ionet_confidential".into(),
-        api_base_url: format!("{}/v1/private", base_url.trim_end_matches('/')),
-        evidence_endpoint: format!("{}/v1/private/attestation", base_url.trim_end_matches('/')),
-        adapter_version: "local-ionet-demo-adapter/0.1.0".into(),
-        freshness_class: FreshnessClass::PerSession,
-        channel_binding_kind: ChannelBindingKind::None,
-        trust_tier: TrustTier::TeeOnly,
-        request_confidentiality_requirement: BoundDataRequirement::NotRequired,
-        response_confidentiality_requirement: BoundDataRequirement::NotRequired,
-        response_integrity_requirement: ResponseIntegrityRequirement::ReceiptBound,
-        accepted_gpu_tees: vec![GpuTeeKind::NvidiaCc],
-        request_encryption: EncryptionRequirement::NotRequired,
-        response_decryption: EncryptionRequirement::NotRequired,
         streaming: StreamingSupport::Unsupported,
         alias_confidence: AliasConfidence::Curated,
     }
@@ -3264,41 +2915,6 @@ fn signed_local_app_e2ee_registry(
             completed_at: "2026-07-05T00:00:00Z".into(),
             status: "success".into(),
             source: "confidential-demo-local-sdk-app-e2ee".into(),
-        },
-        models,
-    };
-    let signature = sign_local_artifact(&payload)?;
-
-    Ok(ProviderRegistryEnvelope {
-        schema: ProviderRegistryEnvelope::SCHEMA.into(),
-        payload,
-        signature,
-    })
-}
-
-fn signed_local_ionet_registry(
-    route: RouteDefinition,
-) -> Result<ProviderRegistryEnvelope, DemoError> {
-    let mut models = BTreeMap::new();
-    models.insert(
-        LOCAL_IONET_MODEL.into(),
-        RegistryModel {
-            canonical_model: LOCAL_IONET_MODEL.into(),
-            display_name: "Llama 3.3 70B".into(),
-            family: "Llama".into(),
-            aliases: vec![LOCAL_IONET_MODEL.into(), "Llama 3.3 70B".into()],
-            routes: vec![route],
-        },
-    );
-
-    let payload = ProviderRegistry {
-        schema: ProviderRegistry::SCHEMA.into(),
-        version: "2026-07-05-local-ionet-demo".into(),
-        generated_at: "2026-07-05T00:00:00Z".into(),
-        source_sync_run: SourceSyncRun {
-            completed_at: "2026-07-05T00:00:00Z".into(),
-            status: "success".into(),
-            source: "confidential-demo-local-ionet".into(),
         },
         models,
     };
@@ -3373,65 +2989,6 @@ fn signed_local_app_e2ee_reference_values(
     })
 }
 
-fn signed_local_ionet_reference_values(
-    route: &RouteDefinition,
-) -> Result<ReferenceValuesEnvelope, DemoError> {
-    let mut routes = BTreeMap::new();
-    routes.insert(
-        route.route_id.clone(),
-        RouteReference {
-            canonical_model: LOCAL_IONET_MODEL.into(),
-            provider_model: LOCAL_IONET_PROVIDER_MODEL.into(),
-            evidence_family: route.evidence_family.clone(),
-            channel_binding_kind: ChannelBindingKind::None,
-            trust_tier: TrustTier::TeeOnly,
-            accepted_cpu_tees: Vec::new(),
-            e2ee_public_key_digest: String::new(),
-            response_signing_key_digest: Some(sha256_digest(
-                LOCAL_IONET_SIGNING_ADDRESS.as_bytes(),
-            )),
-            tls_spki_sha256: None,
-            workload_images: Vec::new(),
-            workload_image_digest: LOCAL_IONET_WORKLOAD_IMAGE.into(),
-            model_artifacts: vec![ArtifactDigest {
-                kind: "provider_model".into(),
-                name: LOCAL_IONET_PROVIDER_MODEL.into(),
-                digest: sha256_digest(LOCAL_IONET_PROVIDER_MODEL.as_bytes()),
-            }],
-            valid_until: "2099-01-01T00:00:00Z".into(),
-            valid_until_epoch_ms: 4_070_908_800_000,
-        },
-    );
-
-    let mut providers = BTreeMap::new();
-    providers.insert(
-        LOCAL_IONET_PROVIDER.into(),
-        ProviderReference {
-            accepted_measurements: Vec::new(),
-            routes,
-        },
-    );
-
-    let payload = ReferenceValuesPayload {
-        schema: ReferenceValuesPayload::SCHEMA.into(),
-        version: "2026-07-05-local-ionet-demo".into(),
-        issuer: "confidential-inference-local-demo".into(),
-        valid_from: "2026-07-05T00:00:00Z".into(),
-        valid_until: "2099-01-01T00:00:00Z".into(),
-        valid_until_epoch_ms: 4_070_908_800_000,
-        revocation_epoch: 1,
-        minimum_acceptable_version: "2026-07-05-local-ionet-demo".into(),
-        providers,
-    };
-    let signature = sign_local_artifact(&payload)?;
-
-    Ok(ReferenceValuesEnvelope {
-        schema: ReferenceValuesEnvelope::SCHEMA.into(),
-        payload,
-        signature,
-    })
-}
-
 fn signed_local_compatibility_matrix(
     payload: ProviderCompatibilityMatrix,
 ) -> Result<ProviderCompatibilityMatrixEnvelope, DemoError> {
@@ -3479,38 +3036,6 @@ fn local_app_e2ee_compatibility_matrix(
     }
 }
 
-fn local_ionet_compatibility_matrix(route: &RouteDefinition) -> ProviderCompatibilityMatrix {
-    let mut providers = BTreeMap::new();
-    providers.insert(
-        LOCAL_IONET_PROVIDER.into(),
-        ProviderCompatibility {
-            provider: LOCAL_IONET_PROVIDER.into(),
-            route_execution_status: RouteExecutionStatus::Executable,
-            api_base_url: route.api_base_url.clone(),
-            supported_openai_endpoints: vec![OpenAiEndpoint::ChatCompletions],
-            model_listing: ModelListingBehavior::SignedRegistryOnly,
-            model_id_rewrite: ModelIdRewrite::UseRouteProviderModel,
-            token_parameter_rewrite: TokenParameterRewrite::PreserveMaxTokens,
-            streaming: StreamingSupport::Unsupported,
-            request_encryption: EncryptionRequirement::NotRequired,
-            response_decryption: EncryptionRequirement::NotRequired,
-            sdk_app_e2ee: None,
-            attestation_endpoint_shape: "ionet_confidential_local_demo".into(),
-            required_credentials: Vec::new(),
-            freshness_class: FreshnessClass::PerSession,
-            cacheability_class: CacheabilityClass::PerSessionVerdict,
-            expected_trust_tier: TrustTier::TeeOnly,
-            model_binding_support: ModelBindingSupport::Verified,
-            known_unsupported_modes: vec!["streaming".into()],
-        },
-    );
-
-    ProviderCompatibilityMatrix {
-        schema: ProviderCompatibilityMatrix::SCHEMA.into(),
-        providers,
-    }
-}
-
 struct LocalSdkAppE2eeServer {
     route: RouteDefinition,
     handle: JoinHandle<Result<(), DemoError>>,
@@ -3538,81 +3063,6 @@ impl LocalSdkAppE2eeServer {
             std::io::Error::other(format!("local SDK app-E2EE server task failed: {error}"))
         })??;
         Ok(())
-    }
-}
-
-struct LocalIonetServer {
-    route: RouteDefinition,
-    handle: JoinHandle<Result<(), DemoError>>,
-}
-
-impl LocalIonetServer {
-    async fn spawn() -> Result<Self, DemoError> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let base_url = format!("http://{}", listener.local_addr()?);
-        let route = local_ionet_route(&base_url);
-        let server_route = route.clone();
-        let handle = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await?;
-                handle_local_ionet_request(&mut stream, &server_route).await?;
-            }
-            Ok(())
-        });
-
-        Ok(Self { route, handle })
-    }
-
-    async fn await_shutdown(self) -> Result<(), DemoError> {
-        self.handle.await.map_err(|error| {
-            std::io::Error::other(format!("local io.net server task failed: {error}"))
-        })??;
-        Ok(())
-    }
-}
-
-async fn handle_local_ionet_request<S>(
-    stream: &mut S,
-    route: &RouteDefinition,
-) -> Result<(), DemoError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let request = read_http_request(stream).await?;
-    let request_text = String::from_utf8_lossy(&request);
-    if !request_text.contains("authorization: Bearer local-ionet-demo-key") {
-        return Err("local io.net demo did not receive the configured bearer token".into());
-    }
-    let (method, path) = request_line(&request)?;
-    match (method, path) {
-        ("POST", "/v1/private/attestation") => {
-            let body: Value = serde_json::from_slice(request_body(&request)?)?;
-            if body["model_id"] != LOCAL_IONET_PROVIDER_MODEL {
-                return Err("local io.net attestation request did not use provider model".into());
-            }
-            let nonce_prefix = body["nonce"]
-                .as_str()
-                .ok_or("local io.net attestation request did not include nonce")?;
-            let body = local_ionet_attestation_body(nonce_prefix)?;
-            write_http_response(stream, 200, "OK", &body).await
-        }
-        ("POST", "/v1/private/completions") => {
-            let body = local_ionet_chat_body(&request, route)?;
-            let signed_text = sha256_digest(body.as_bytes());
-            let signature = local_ionet_fixture_signature(&signed_text);
-            let headers = [
-                ("text", signed_text.as_str()),
-                ("signature", signature.as_str()),
-                ("signing_address", LOCAL_IONET_SIGNING_ADDRESS),
-                ("signing_algo", "fixture-sha256"),
-                ("image_digest", LOCAL_IONET_WORKLOAD_IMAGE),
-            ];
-            write_http_response_with_headers(stream, 200, "OK", &body, &headers).await
-        }
-        _ => {
-            let body = json!({"error": "not found"}).to_string();
-            write_http_response(stream, 404, "Not Found", &body).await
-        }
     }
 }
 
@@ -3736,80 +3186,6 @@ fn local_app_e2ee_encrypted_chat_body(
     }))?;
     let response_envelope = session.encrypt_response_body(route, &response_plaintext)?;
     Ok(serde_json::to_string(&response_envelope)?)
-}
-
-fn local_ionet_attestation_body(nonce_prefix: &str) -> Result<String, DemoError> {
-    let nonce = format!("{nonce_prefix}{}", "00".repeat(16));
-    let evidence_payload =
-        base64::engine::general_purpose::STANDARD.encode(br#"{"gpu":"nvidia_cc","demo":"ionet"}"#);
-    let body = json!({
-        "nonce": nonce,
-        "gpu": {
-            "arch": "gpu-hopper-h100",
-            "nonce": nonce,
-            "evidence_list": [{
-                "evidence": evidence_payload
-            }]
-        },
-        "cpu": {
-            "quote": base64::engine::general_purpose::STANDARD
-                .encode(br#"local-ionet-cpu-quote-fixture"#)
-        },
-        "signing_address": LOCAL_IONET_SIGNING_ADDRESS,
-        "image_digest": LOCAL_IONET_WORKLOAD_IMAGE,
-        "issued_at": "2098-12-31T23:50:00Z",
-        "expires_at": "2099-01-01T00:00:00Z",
-        "expires_at_epoch_ms": 4_070_908_800_000u64
-    });
-    Ok(serde_json::to_string(&body)?)
-}
-
-fn local_ionet_chat_body(request: &[u8], route: &RouteDefinition) -> Result<String, DemoError> {
-    let body: Value = serde_json::from_slice(request_body(request)?)?;
-    if body["model"] != route.provider_model {
-        return Err(format!(
-            "local io.net request model {} was not rewritten to provider model {}",
-            body["model"], route.provider_model
-        )
-        .into());
-    }
-    let prompt = body
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|messages| {
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        })
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let content = format!(
-        "local io.net receipt-bound response for {}: {}",
-        route.provider_model, prompt
-    );
-    Ok(json!({
-        "id": "chatcmpl-local-ionet-demo",
-        "object": "chat.completion",
-        "created": 1783209600u64,
-        "model": route.provider_model,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content},
-            "finish_reason": "stop"
-        }],
-        "usage": {
-            "prompt_tokens": prompt.split_whitespace().count(),
-            "completion_tokens": content.split_whitespace().count(),
-            "total_tokens": prompt.split_whitespace().count() + content.split_whitespace().count()
-        }
-    })
-    .to_string())
-}
-
-fn local_ionet_fixture_signature(text: &str) -> String {
-    sha256_digest(format!("{text}:{LOCAL_IONET_SIGNING_ADDRESS}").as_bytes())
 }
 
 fn local_tinfoil_route(base_url: &str) -> RouteDefinition {
@@ -3961,43 +3337,7 @@ fn local_key_pair() -> KeyPair {
 }
 
 #[derive(Clone, Debug)]
-struct LocalIonetGpuAttestationVerifier;
 
-impl GpuAttestationVerifier for LocalIonetGpuAttestationVerifier {
-    fn verify_nvidia_gpu_attestation(
-        &self,
-        request: &NvidiaGpuAttestationVerificationRequest<'_>,
-    ) -> confidential_inference_attestation::Result<VerifiedGpuAttestation> {
-        if request.expected_tee != GpuTeeKind::NvidiaCc {
-            return Err(AttestationError::InvalidEvidence(
-                "local io.net demo expected NVIDIA CC GPU evidence".into(),
-            ));
-        }
-        if request.provider != LOCAL_IONET_PROVIDER || request.route_id != LOCAL_IONET_ROUTE_ID {
-            return Err(AttestationError::InvalidEvidence(
-                "local io.net demo GPU evidence was bound to the wrong route".into(),
-            ));
-        }
-        if request.expected_nonce != request.evidence.nonce {
-            return Err(AttestationError::InvalidEvidence(
-                "local io.net demo GPU evidence nonce did not match attestation nonce".into(),
-            ));
-        }
-        if request.evidence.raw_payload_base64.is_none() {
-            return Err(AttestationError::InvalidEvidence(
-                "local io.net demo GPU evidence was missing raw payload".into(),
-            ));
-        }
-
-        Ok(VerifiedGpuAttestation::nvidia_cc(
-            request.expected_nonce,
-            request.evidence.attestation_format.clone(),
-            "local-ionet-demo-verifier",
-        ))
-    }
-}
-
-#[derive(Clone, Debug)]
 struct LocalTinfoilQuoteVerifier {
     spki_sha256: String,
 }

@@ -39,8 +39,8 @@ pub use dcap_tdx::{
 };
 pub use demo::{DemoEvidenceMode, DemoProvider};
 pub use http::{
-    ConfidentialHttpProvider, DstackHttpProvider, IonetHttpProvider, OpenAiHttpProvider,
-    PhalaHttpProvider, TinfoilHttpProvider,
+    ConfidentialHttpProvider, DstackHttpProvider, OpenAiHttpProvider, PhalaHttpProvider,
+    TinfoilHttpProvider,
 };
 #[allow(deprecated)]
 pub use nvidia::{

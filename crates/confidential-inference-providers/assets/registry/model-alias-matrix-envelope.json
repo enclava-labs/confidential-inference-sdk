@@ -42,10 +42,6 @@
           {
             "provider": "privatemode",
             "provider_model": "gpt-oss-120b"
-          },
-          {
-            "provider": "ionet",
-            "provider_model": "openai/gpt-oss-120b"
           }
         ]
       },
@@ -71,10 +67,6 @@
           {
             "provider": "tinfoil",
             "provider_model": "llama3-3-70b"
-          },
-          {
-            "provider": "ionet",
-            "provider_model": "meta-llama/Llama-3.3-70B-Instruct"
           }
         ]
       },
@@ -149,6 +141,6 @@
     "alg": "ed25519",
     "key_id": "confidential-inference-alias-matrix-fixture-ed25519-2026",
     "signer": "confidential-inference",
-    "value": "base64url:18iT1U1yXHlTxSbj3ErG4WPYHSskuWtL0gR_hK98wupmLqcoM9sJGhx9u954tIIyJLKGUVCE4zsOYTsS2dUEDg"
+    "value": "base64url:L59RGxqnTVupTfS6Yfy0J6eV_biOBtBgwx-5_5Gj90rF2ftD339GsJQFJWe3O_XxIhGfxO7MmTNUnP6cPAZmAw"
   }
 }

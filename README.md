@@ -6,6 +6,28 @@
 A fail-closed Rust SDK for sending OpenAI-compatible inference requests only
 after the selected route satisfies an explicit attestation policy.
 
+## Supported providers
+
+**Tinfoil · Venice · RedPill (Chutes E2EE) · Phala · Privatemode**
+
+| Provider | SDK integration | Current scope |
+| --- | --- | --- |
+| **Tinfoil** | Dedicated HTTP adapter, attestation endpoint capture, TLS certificate/SPKI binding, and TDX/DCAP quote verification | Live adapter and verifier path |
+| **Venice** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Live adapter and evidence path |
+| **RedPill** | OpenAI-compatible HTTP execution, Chutes E2EE evidence, nonce/public-key report-data binding, and NVIDIA CC verification through NRAS | Live adapter and verifier path |
+| **Phala** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Live adapter and evidence path |
+| **Privatemode** | Contrast manifest, initdata, image-pin, coordinator-attestation, and model-path verification | Verification component; the caller supplies live transport |
+
+The first four providers have concrete HTTP integrations and credentialed
+live-conformance definitions. Privatemode support currently covers verification
+of Contrast deployment evidence rather than a turn-key HTTP adapter.
+
+Provider support does not make an arbitrary deployment trusted. Production
+routes still require provider-issued signed metadata and reference values, the
+applicable quote or GPU verifier, and a successful credentialed conformance
+run. Provider names that appear only in model-alias or compatibility fixtures
+are not supported live integrations.
+
 The SDK combines provider routing, signed provider metadata, reference values,
 hardware-evidence verification, request and response protection, and structured
 attestation verdicts. Rust owns the trust decisions; the C, Python, and Node.js
@@ -22,7 +44,7 @@ layers call the same verification path.
 - Fail-closed policy enforcement before a provider request is sent.
 - Signed provider registries, compatibility profiles, and reference values.
 - Offline Intel TDX/DCAP quote verification with supplied collateral.
-- Evidence paths for dstack, Chutes/Redpill, io.net, Tinfoil, and Privatemode.
+- Evidence paths for dstack, Chutes/Redpill, Tinfoil, and Privatemode.
 - SDK-managed app-E2EE for routes with a compatible encryption profile.
 - OpenAI-shaped Chat Completions and a text-only Responses compatibility path.
 - Structured verdicts, audit records, metrics, and optional verdict caching.

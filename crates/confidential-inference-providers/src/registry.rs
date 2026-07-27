@@ -1709,7 +1709,7 @@ mod tests {
     const DEMO_REGISTRY_DIGEST: &str =
         "sha256:5f7d7f58d2198ccabbdd1c90e9d0ec0030d9934d80895007244971e3e61b7373";
     const MODEL_ALIAS_MATRIX_DIGEST: &str =
-        "sha256:e45b685139ba1b4547e7cf8bb71faa3dc13e6db968c4ef48402fcf7864f32e29";
+        "sha256:9ecd9fbfe2aa438a43271902192bf79ee26dc47c48ef2a37e5e66eeb8710d387";
 
     #[test]
     fn bundled_registry_preserves_provider_model_id() {

@@ -61,14 +61,6 @@
       "expected_model_ids_from_alias_matrix": true,
       "id": "phala",
       "model_list_url": "https://inference.phala.com/v1/models"
-    },
-    {
-      "auth_env": "IONET_API_KEY",
-      "compatibility_provider": "ionet-confidential-fixture",
-      "enabled": false,
-      "expected_model_ids_from_alias_matrix": true,
-      "id": "ionet",
-      "model_list_url": "https://api.intelligence.io.solutions/api/v1/models"
     }
   ],
   "schema": "confidential-inference.live-conformance-plan.v1"

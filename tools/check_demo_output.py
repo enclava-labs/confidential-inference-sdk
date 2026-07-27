@@ -149,41 +149,6 @@ REQUIRED_LABELS = {
     "local_sdk_app_e2ee_reference_values_artifact": (
         "target/confidential-demo-local-sdk-app-e2ee-reference-values.json"
     ),
-    "local_ionet_provider": "local-ionet",
-    "local_ionet_route_id": "local-ionet:llama-3.3-70b:local-ionet-llama-3-3-70b",
-    "local_ionet_requested_model": "llama-3.3-70b",
-    "local_ionet_provider_model": "local-ionet-llama-3-3-70b",
-    "local_ionet_canonical_model": "llama-3.3-70b",
-    "local_ionet_trust_tier": "tee-only",
-    "local_ionet_evidence_family": "ionet_confidential",
-    "local_ionet_channel_binding_kind": "none",
-    "local_ionet_request_confidentiality_result": "unknown",
-    "local_ionet_response_confidentiality_result": "unknown",
-    "local_ionet_response_integrity_result": "receipt_bound",
-    "local_ionet_route_execution_status": "executable",
-    "local_ionet_chat_executable": "true",
-    "local_ionet_registry_source": "custom",
-    "local_ionet_reference_values_source": "custom",
-    "local_ionet_registry_signature_signer": "confidential-inference-local-demo",
-    "local_ionet_reference_values_signature_signer": "confidential-inference-local-demo",
-    "local_ionet_gpu_tee": "Some(Verified)",
-    "local_ionet_response_receipt": "Some(Verified)",
-    "local_ionet_nonce_binding": "Some(Verified)",
-    "local_ionet_response_signing_key_binding": "Some(Verified)",
-    "local_ionet_model_binding": "Some(NotSupported)",
-    "local_ionet_image_provenance": "Some(Verified)",
-    "local_ionet_model_artifact_provenance": "Some(Verified)",
-    "local_ionet_response_integrity": "ReceiptBound",
-    "local_ionet_verdict_store": "target/confidential-demo-local-ionet-verdicts.jsonl",
-    "local_ionet_registry_artifact": (
-        "target/confidential-demo-local-ionet-registry.json"
-    ),
-    "local_ionet_compatibility_matrix_artifact": (
-        "target/confidential-demo-local-ionet-compatibility-matrix.json"
-    ),
-    "local_ionet_reference_values_artifact": (
-        "target/confidential-demo-local-ionet-reference-values.json"
-    ),
     "local_live_tinfoil_provider": "local-tinfoil-live",
     "local_live_tinfoil_route_id": "local-tinfoil-live:llama-3.3-70b:llama-3.3-70b",
     "local_live_tinfoil_requested_model": "llama-3.3-70b",
@@ -239,7 +204,6 @@ MIN_NUMERIC_LABELS = {
     "proxy_persisted_verdicts": 3,
     "phase2_fixture_persisted_verdicts": 4,
     "local_sdk_app_e2ee_persisted_verdicts": 2,
-    "local_ionet_persisted_verdicts": 2,
     "local_live_tinfoil_persisted_verdicts": 2,
 }
 
@@ -254,8 +218,6 @@ REQUIRED_SUBSTRINGS = (
     "verify the signed Tinfoil fixture path",
     "local_sdk_app_e2ee_response: local SDK app-E2EE response for "
     "e2ee-gpt-oss-120b-p: verify the local SDK app-E2EE path",
-    "local_ionet_response: local io.net receipt-bound response for "
-    "local-ionet-llama-3-3-70b: verify the local io.net receipt-bound path",
     "local_live_tinfoil_response: local live Tinfoil response for "
     "llama-3.3-70b: verify the local live TLS path",
 )
@@ -727,86 +689,6 @@ LOCAL_APP_E2EE_REQUIRED_ARTIFACTS = (
     "model_manifest",
     "model_artifacts",
 )
-LOCAL_IONET_EXPECTED_VALUES = {
-    "provider": "local-ionet",
-    "route_id": "local-ionet:llama-3.3-70b:local-ionet-llama-3-3-70b",
-    "requested_model": "llama-3.3-70b",
-    "provider_model": "local-ionet-llama-3-3-70b",
-    "canonical_model": "llama-3.3-70b",
-    "status": "verified",
-    "enforcement": "enforce",
-    "request_allowed": True,
-    "would_block_under_enforce": False,
-    "freshness_class": "per_session",
-    "route_execution_status": "executable",
-    "chat_executable": True,
-    "streaming_allowed": False,
-}
-LOCAL_IONET_VERDICT_VALUES = {
-    "schema": "confidential-inference.verdict.v1",
-    "policy_schema": "confidential-inference.policy.v1",
-    "reference_values_schema": "confidential-inference.reference-values.v1",
-    "provider_registry_schema": "confidential-inference.provider-registry.v1",
-    "trust_tier": "tee-only",
-    "evidence_family": "ionet_confidential",
-    "adapter_version": "local-ionet-demo-adapter/0.1.0",
-    "alias_confidence": "curated",
-    "channel_binding_kind": "none",
-    "model_binding_result": "not_supported",
-    "request_channel_bound": False,
-    "request_confidentiality_result": "unknown",
-    "response_confidentiality_result": "unknown",
-    "response_channel_bound": False,
-    "response_integrity_result": "receipt_bound",
-    "registry_source": "custom",
-    "reference_values_source": "custom",
-}
-LOCAL_IONET_REQUIRED_CHECKS = {
-    "cpu_tee": "not_applicable",
-    "e2ee_key_binding": "not_applicable",
-    "gpu_tee": "verified",
-    "image_provenance": "verified",
-    "model_artifact_provenance": "verified",
-    "model_binding": "not_supported",
-    "nonce_binding": "verified",
-    "request_encryption": "not_applicable",
-    "request_key_binding": "not_applicable",
-    "response_channel_binding": "verified",
-    "response_encryption": "not_applicable",
-    "response_key_binding": "not_applicable",
-    "response_receipt": "verified",
-    "response_signing_key_binding": "verified",
-    "request_route_binding": "not_supported",
-    "route_binding": "not_supported",
-    "route_metadata_binding": "verified",
-    "tls_binding": "not_applicable",
-}
-LOCAL_IONET_TRANSCRIPT_FIELDS = {
-    "local_ionet_provider": "provider",
-    "local_ionet_route_id": "route_id",
-    "local_ionet_requested_model": "requested_model",
-    "local_ionet_provider_model": "provider_model",
-    "local_ionet_canonical_model": "canonical_model",
-    "local_ionet_trust_tier": "trust_tier",
-    "local_ionet_evidence_family": "evidence_family",
-    "local_ionet_channel_binding_kind": "channel_binding_kind",
-    "local_ionet_request_confidentiality_result": "request_confidentiality_result",
-    "local_ionet_response_confidentiality_result": "response_confidentiality_result",
-    "local_ionet_response_integrity_result": "response_integrity_result",
-    "local_ionet_route_execution_status": "route_execution_status",
-    "local_ionet_chat_executable": "chat_executable",
-    "local_ionet_policy_digest": "policy_digest",
-    "local_ionet_provider_registry_digest": "provider_registry_digest",
-    "local_ionet_reference_values_digest": "reference_values_digest",
-    "local_ionet_registry_source": "registry_source",
-    "local_ionet_reference_values_source": "reference_values_source",
-}
-LOCAL_IONET_REQUIRED_ARTIFACTS = (
-    "source_url",
-    "report_data",
-    "signing_public_key",
-    "model_artifacts",
-)
 FORBIDDEN_ARTIFACT_SUBSTRINGS = (
     "verify the confidential inference SDK path",
     "verify the proxy SDK path",
@@ -818,8 +700,6 @@ FORBIDDEN_ARTIFACT_SUBSTRINGS = (
     "demo-api-key-not-used",
     "verify the local SDK app-E2EE path",
     "local SDK app-E2EE response",
-    "verify the local io.net receipt-bound path",
-    "local io.net receipt-bound response",
     "verify the local live TLS path",
     "local live Tinfoil response",
 )
@@ -1416,7 +1296,6 @@ def _validate_route_digest_markers(labels: dict[str, str]) -> list[str]:
         "phase2_tinfoil",
         "phase2_venice",
         "local_sdk_app_e2ee",
-        "local_ionet",
         "local_live_tinfoil",
     ):
         for suffix in (
@@ -1748,39 +1627,6 @@ def _validate_local_sdk_app_e2ee_marker_binding(
 
     return violations
 
-
-def _validate_local_ionet_marker_binding(
-    labels: dict[str, str],
-    verdict_json: dict[str, Any] | None,
-) -> list[str]:
-    if not isinstance(verdict_json, dict):
-        return ["local_ionet transcript markers require a fresh persisted verdict_json record"]
-
-    violations: list[str] = []
-    for label, verdict_field in LOCAL_IONET_TRANSCRIPT_FIELDS.items():
-        expected = _label_text(verdict_json.get(verdict_field))
-        if expected is None:
-            violations.append(
-                f"local io.net verdict JSONL verdict_json.{verdict_field} must be non-empty before comparing {label}"
-            )
-            continue
-        violations.extend(_require_label_value(labels, label, expected, label))
-
-    signature_labels = {
-        "local_ionet_registry_signature_signer": "registry_signature",
-        "local_ionet_reference_values_signature_signer": "reference_values_signature",
-    }
-    for label, signature_field in signature_labels.items():
-        signature = verdict_json.get(signature_field)
-        expected = signature.get("signer") if isinstance(signature, dict) else None
-        if not isinstance(expected, str) or not expected:
-            violations.append(
-                f"local io.net verdict JSONL verdict_json.{signature_field}.signer must be non-empty before comparing {label}"
-            )
-            continue
-        violations.extend(_require_label_value(labels, label, expected, label))
-
-    return violations
 
 
 def _phase2_profile(provider: str) -> dict[str, Any] | None:
@@ -2210,136 +2056,6 @@ def _validate_local_sdk_app_e2ee_records(
 
     return violations
 
-
-def _validate_local_ionet_records(
-    records: list[dict[str, Any]],
-    labels: dict[str, str],
-) -> list[str]:
-    violations: list[str] = []
-    cache_hit_states = set()
-    fresh_verdict_json: dict[str, Any] | None = None
-
-    if labels.get("local_ionet_provider") != LOCAL_IONET_EXPECTED_VALUES["provider"]:
-        violations.append("local_ionet_provider marker must match local io.net verdict provider")
-
-    for index, record in enumerate(records, start=1):
-        subject = f"local io.net verdict JSONL record {index}"
-        verdict_json = record.get("verdict_json")
-        if not isinstance(verdict_json, dict):
-            continue
-
-        cache_hit = record.get("cache_hit")
-        if isinstance(cache_hit, bool):
-            cache_hit_states.add(cache_hit)
-            if not cache_hit and fresh_verdict_json is None:
-                fresh_verdict_json = verdict_json
-        else:
-            violations.append(f"{subject}.cache_hit must be a boolean")
-
-        for field, expected in LOCAL_IONET_EXPECTED_VALUES.items():
-            actual = _record_or_verdict_value(record, verdict_json, field)
-            if actual != expected:
-                violations.append(f"{subject}.{field} expected {expected!r}, got {actual!r}")
-
-        for field, expected in LOCAL_IONET_VERDICT_VALUES.items():
-            actual = verdict_json.get(field)
-            if actual != expected:
-                violations.append(
-                    f"{subject}.verdict_json.{field} expected {expected!r}, got {actual!r}"
-                )
-
-        for field in LOCAL_LIVE_TINFOIL_MIRRORED_FIELDS:
-            if (
-                field in record
-                and field in verdict_json
-                and record.get(field) != verdict_json.get(field)
-            ):
-                violations.append(f"{subject}.verdict_json.{field} must match top-level {field}")
-
-        for field in ("registry_signature", "reference_values_signature"):
-            violations.extend(_validate_signature(f"{subject}.verdict_json", verdict_json, field))
-            top_signature = record.get(field)
-            verdict_signature = verdict_json.get(field)
-            if top_signature != LOCAL_LIVE_TINFOIL_SIGNATURE:
-                violations.append(
-                    f"{subject}.{field} expected {LOCAL_LIVE_TINFOIL_SIGNATURE!r}, "
-                    f"got {top_signature!r}"
-                )
-            if verdict_signature != LOCAL_LIVE_TINFOIL_SIGNATURE:
-                violations.append(
-                    f"{subject}.verdict_json.{field} expected "
-                    f"{LOCAL_LIVE_TINFOIL_SIGNATURE!r}, got {verdict_signature!r}"
-                )
-
-        if record.get("errors") != []:
-            violations.append(f"{subject}.errors must be empty")
-        if verdict_json.get("errors") != []:
-            violations.append(f"{subject}.verdict_json.errors must be empty")
-
-        unsupported_modes = _record_or_verdict_value(
-            record,
-            verdict_json,
-            "known_unsupported_modes",
-        )
-        if not isinstance(unsupported_modes, list) or "streaming" not in unsupported_modes:
-            violations.append(f"{subject}.known_unsupported_modes must contain 'streaming'")
-
-        checks = verdict_json.get("checks")
-        if not isinstance(checks, dict):
-            violations.append(f"{subject}.verdict_json.checks must be an object")
-        else:
-            for field, expected in LOCAL_IONET_REQUIRED_CHECKS.items():
-                actual = checks.get(field)
-                if actual != expected:
-                    violations.append(
-                        f"{subject}.verdict_json.checks.{field} expected "
-                        f"{expected!r}, got {actual!r}"
-                    )
-
-        artifacts = verdict_json.get("artifacts")
-        if not isinstance(artifacts, dict):
-            violations.append(f"{subject}.verdict_json.artifacts must be an object")
-        else:
-            for field in LOCAL_IONET_REQUIRED_ARTIFACTS:
-                value = artifacts.get(field)
-                if value in (None, "", []):
-                    violations.append(
-                        f"{subject}.verdict_json.artifacts.{field} must be present"
-                    )
-            source_url = artifacts.get("source_url")
-            if not (
-                isinstance(source_url, str)
-                and source_url.startswith("http://127.0.0.1:")
-                and source_url.endswith("/v1/private/attestation")
-            ):
-                violations.append(
-                    f"{subject}.verdict_json.artifacts.source_url must be the local io.net attestation endpoint"
-                )
-            signing_public_key = artifacts.get("signing_public_key")
-            if not (isinstance(signing_public_key, str) and SHA256_RE.match(signing_public_key)):
-                violations.append(
-                    f"{subject}.verdict_json.artifacts.signing_public_key must be a canonical sha256 digest"
-                )
-            if artifacts.get("e2ee_capability") is not None:
-                violations.append(
-                    f"{subject}.verdict_json.artifacts.e2ee_capability must be null for receipt-bound io.net route"
-                )
-            if artifacts.get("model_manifest") is not None:
-                violations.append(
-                    f"{subject}.verdict_json.artifacts.model_manifest must be absent when model evidence is absent"
-                )
-            if not isinstance(artifacts.get("model_artifacts"), list):
-                violations.append(
-                    f"{subject}.verdict_json.artifacts.model_artifacts must be an array"
-                )
-
-    if cache_hit_states != {False, True}:
-        violations.append(
-            "local io.net verdict JSONL must include both fresh and cached records"
-        )
-    violations.extend(_validate_local_ionet_marker_binding(labels, fresh_verdict_json))
-
-    return violations
 
 
 def _validate_local_live_tinfoil_records(
@@ -3370,127 +3086,6 @@ def _validate_local_app_e2ee_reference_values_artifact(
     return violations
 
 
-def _validate_local_ionet_reference_values_artifact(
-    artifact: Any,
-    labels: dict[str, str],
-    local_ionet_verdict: dict[str, Any] | None,
-) -> list[str]:
-    subject = "local io.net reference-values artifact"
-    if not isinstance(artifact, dict):
-        return [f"{subject} must be a JSON object"]
-
-    violations: list[str] = []
-    if artifact.get("schema") != "confidential-inference.reference-values-envelope.v1":
-        violations.append(f"{subject}.schema must be confidential-inference.reference-values-envelope.v1")
-    payload = artifact.get("payload")
-    if not isinstance(payload, dict):
-        return [*violations, f"{subject}.payload must be an object"]
-    if payload.get("schema") != "confidential-inference.reference-values.v1":
-        violations.append(f"{subject}.payload.schema must be confidential-inference.reference-values.v1")
-
-    signature = artifact.get("signature")
-    if not isinstance(signature, dict):
-        violations.append(f"{subject}.signature must be an object")
-    else:
-        try:
-            verify_artifact_signature(
-                signature,
-                _canonical_json(payload).encode("utf-8"),
-                subject,
-                LOCAL_DEMO_TRUSTED_SIGNING_KEYS,
-            )
-        except (ArtifactSignatureError, ValueError) as error:
-            violations.append(str(error))
-        if signature.get("signer") != "confidential-inference-local-demo":
-            violations.append(f"{subject}.signature.signer must be confidential-inference-local-demo")
-        if signature.get("key_id") != "confidential-inference-local-demo-ed25519-2026":
-            violations.append(f"{subject}.signature.key_id must be confidential-inference-local-demo-ed25519-2026")
-        if signature.get("alg") != "ed25519":
-            violations.append(f"{subject}.signature.alg must be ed25519")
-
-    try:
-        digest = _canonical_sha256_digest(payload)
-    except ValueError as error:
-        violations.append(f"{subject}.payload could not be canonicalized: {error}")
-        digest = None
-    if digest is not None:
-        for label in (
-            "local_ionet_reference_values_digest",
-            "local_ionet_reference_values_artifact_digest",
-        ):
-            expected = labels.get(label)
-            if expected is None:
-                violations.append(f"missing marker {label}")
-            elif expected != digest:
-                violations.append(f"{label} expected {digest!r}, got {expected!r}")
-        if (
-            local_ionet_verdict is not None
-            and local_ionet_verdict.get("reference_values_digest") != digest
-        ):
-            violations.append(
-                "local io.net reference-values artifact digest must match "
-                "fresh io.net verdict.reference_values_digest"
-            )
-
-    providers = payload.get("providers")
-    if not isinstance(providers, dict):
-        return [*violations, f"{subject}.payload.providers must be an object"]
-    provider = providers.get("local-ionet")
-    if not isinstance(provider, dict):
-        return [*violations, f"{subject}.payload.providers.local-ionet must be an object"]
-    accepted_measurements = provider.get("accepted_measurements")
-    if accepted_measurements != []:
-        violations.append(f"{subject}.accepted_measurements must be empty")
-
-    routes = provider.get("routes")
-    route_id = labels.get("local_ionet_route_id")
-    if not isinstance(routes, dict):
-        return [*violations, f"{subject}.routes must be an object"]
-    route_reference = routes.get(route_id)
-    if not isinstance(route_reference, dict):
-        return [*violations, f"{subject}.routes must include {route_id}"]
-
-    verdict_artifacts = (
-        local_ionet_verdict.get("artifacts") if isinstance(local_ionet_verdict, dict) else None
-    )
-    route_expectations = {
-        "canonical_model": labels.get("local_ionet_canonical_model"),
-        "provider_model": labels.get("local_ionet_provider_model"),
-        "evidence_family": "ionet_confidential",
-        "channel_binding_kind": "none",
-        "trust_tier": "tee-only",
-        "e2ee_public_key_digest": "",
-        "workload_image_digest": "sha256:local-ionet-workload-image",
-    }
-    for field, expected in route_expectations.items():
-        actual = route_reference.get(field)
-        if actual != expected:
-            violations.append(f"{subject}.route.{field} expected {expected!r}, got {actual!r}")
-    if route_reference.get("accepted_cpu_tees") != []:
-        violations.append(f"{subject}.route.accepted_cpu_tees must be empty")
-    if route_reference.get("response_signing_key_digest") != (
-        verdict_artifacts.get("signing_public_key")
-        if isinstance(verdict_artifacts, dict)
-        else None
-    ):
-        violations.append(
-            f"{subject}.route.response_signing_key_digest must match fresh io.net verdict signing_public_key"
-        )
-    model_artifacts = route_reference.get("model_artifacts")
-    verdict_model_artifacts = (
-        verdict_artifacts.get("model_artifacts") if isinstance(verdict_artifacts, dict) else None
-    )
-    if not isinstance(model_artifacts, list) or not model_artifacts:
-        violations.append(f"{subject}.route.model_artifacts must be non-empty")
-    elif isinstance(verdict_model_artifacts, list):
-        for artifact in verdict_model_artifacts:
-            if artifact not in model_artifacts:
-                violations.append(
-                    f"{subject}.route.model_artifacts must include fresh io.net verdict artifact {artifact!r}"
-                )
-
-    return violations
-
 
 def _integer_label(labels: dict[str, str], label: str) -> int | None:
     value = labels.get(label)
@@ -3516,7 +3111,6 @@ def _validate_demo_artifacts(
 ) -> list[str]:
     violations: list[str] = []
     local_app_e2ee_verdict_json: dict[str, Any] | None = None
-    local_ionet_verdict_json: dict[str, Any] | None = None
     local_live_verdict_json: dict[str, Any] | None = None
     artifact_specs = (
         ("metrics_log", "metrics JSONL", "metrics_jsonl_records"),
@@ -3540,11 +3134,6 @@ def _validate_demo_artifacts(
             "local_sdk_app_e2ee_verdict_store",
             "local SDK app-E2EE verdict JSONL",
             "local_sdk_app_e2ee_persisted_verdicts",
-        ),
-        (
-            "local_ionet_verdict_store",
-            "local io.net verdict JSONL",
-            "local_ionet_persisted_verdicts",
         ),
         (
             "local_live_tinfoil_verdict_store",
@@ -3575,7 +3164,6 @@ def _validate_demo_artifacts(
                 "proxy_verdict_store",
                 "phase2_fixture_verdict_store",
                 "local_sdk_app_e2ee_verdict_store",
-                "local_ionet_verdict_store",
                 "local_live_tinfoil_verdict_store",
             }
             for index, record in enumerate(records, start=1):
@@ -3599,9 +3187,6 @@ def _validate_demo_artifacts(
             elif label == "local_sdk_app_e2ee_verdict_store":
                 violations.extend(_validate_local_sdk_app_e2ee_records(records, labels))
                 local_app_e2ee_verdict_json = _fresh_verdict_json(records)
-            elif label == "local_ionet_verdict_store":
-                violations.extend(_validate_local_ionet_records(records, labels))
-                local_ionet_verdict_json = _fresh_verdict_json(records)
             elif label == "local_live_tinfoil_verdict_store":
                 violations.extend(_validate_local_live_tinfoil_records(records, labels))
                 local_live_verdict_json = _fresh_verdict_json(records)
@@ -3625,18 +3210,6 @@ def _validate_demo_artifacts(
         (
             "local_sdk_app_e2ee_reference_values_artifact",
             "local SDK app-E2EE reference-values artifact",
-        ),
-        (
-            "local_ionet_registry_artifact",
-            "local io.net registry artifact",
-        ),
-        (
-            "local_ionet_compatibility_matrix_artifact",
-            "local io.net compatibility matrix artifact",
-        ),
-        (
-            "local_ionet_reference_values_artifact",
-            "local io.net reference-values artifact",
         ),
         (
             "local_live_tinfoil_registry_artifact",
@@ -3718,55 +3291,6 @@ def _validate_demo_artifacts(
                     artifact,
                     labels,
                     local_app_e2ee_verdict_json,
-                )
-            )
-        elif label == "local_ionet_registry_artifact":
-            violations.extend(
-                _validate_local_registry_artifact(
-                    artifact,
-                    labels,
-                    local_ionet_verdict_json,
-                    prefix="local_ionet",
-                    subject="local io.net registry artifact",
-                    model_key="llama-3.3-70b",
-                    adapter_version="local-ionet-demo-adapter/0.1.0",
-                    source="confidential-demo-local-ionet",
-                    api_scheme="http",
-                    api_suffix="/v1/private",
-                    evidence_suffix="/v1/private/attestation",
-                    route_expectations={
-                        "request_confidentiality_requirement": "not_required",
-                        "response_confidentiality_requirement": "not_required",
-                        "response_integrity_requirement": "receipt_bound",
-                        "accepted_gpu_tees": ["nvidia_cc"],
-                        "request_encryption": "not_required",
-                        "response_decryption": "not_required",
-                    },
-                )
-            )
-        elif label == "local_ionet_compatibility_matrix_artifact":
-            violations.extend(
-                _validate_local_compatibility_matrix_artifact(
-                    artifact,
-                    labels,
-                    local_ionet_verdict_json,
-                    prefix="local_ionet",
-                    subject="local io.net compatibility matrix artifact",
-                    provider_id="local-ionet",
-                    api_scheme="http",
-                    api_suffix="/v1/private",
-                    attestation_endpoint_shape="ionet_confidential_local_demo",
-                    request_encryption="not_required",
-                    response_decryption="not_required",
-                    require_sdk_app_e2ee=False,
-                )
-            )
-        elif label == "local_ionet_reference_values_artifact":
-            violations.extend(
-                _validate_local_ionet_reference_values_artifact(
-                    artifact,
-                    labels,
-                    local_ionet_verdict_json,
                 )
             )
         elif label == "local_live_tinfoil_registry_artifact":

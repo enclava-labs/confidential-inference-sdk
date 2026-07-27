@@ -488,7 +488,7 @@ mod tests {
     use confidential_inference_openai::ChatMessage;
 
     const COMPATIBILITY_MATRIX_DIGEST: &str =
-        "sha256:bc8b1b5e04436313caa368d19bc3c1b1ea9f944a94cdfd6ddc7dda9dd96f33ce";
+        "sha256:1a39eb4b2cad6c6abcb6703e905e41f80b5dce8c33937b9caa8fb60399bf576a";
 
     #[test]
     fn bundled_compatibility_matrix_validates() {
@@ -499,7 +499,6 @@ mod tests {
         assert!(matrix.provider("tinfoil-fixture").is_ok());
         assert!(matrix.provider("venice-fixture").is_ok());
         assert!(matrix.provider("phala-direct-fixture").is_ok());
-        assert!(matrix.provider("ionet-confidential-fixture").is_ok());
         assert!(matrix.provider("redpill-fixture").is_ok());
         assert!(matrix.provider("ppq-private-fixture").is_ok());
     }

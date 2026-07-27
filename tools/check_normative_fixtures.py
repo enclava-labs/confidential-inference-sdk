@@ -35,7 +35,6 @@ TINFOIL_LIVE_TDX_UNSUPPORTED_MODE = "live_tdx_quote"
 FIXTURE_ONLY_COMPATIBILITY_PROFILE_PATTERNS = {
     "chutes": "Chutes/Redpill E2EE+GPU",
     "phala": "Direct Phala dstack",
-    "ionet": "io.net confidential inference",
     "ehbp": "PPQ EHBP",
 }
 FIXTURE_ONLY_COMPATIBILITY_PROVIDERS = {
@@ -45,13 +44,11 @@ FIXTURE_ONLY_LIVE_SYNC_PROVIDER_PATTERNS = {
     "venice": "Venice dstack app-E2EE",
     "phala": "Direct Phala dstack",
     "redpill": "Chutes/Redpill E2EE+GPU",
-    "ionet": "io.net confidential inference",
     "tinfoil": "Tinfoil hw-verified TLS",
 }
 FIXTURE_ONLY_LIVE_SYNC_EVIDENCE_FAMILIES = {
     "dstack_app_e2ee": "dstack app-E2EE",
     "chutes_e2ee": "Chutes/Redpill E2EE+GPU",
-    "ionet_confidential": "io.net confidential inference",
     "tinfoil_hw_verified_tls": "Tinfoil hw-verified TLS",
 }
 ACTIVE_REGISTRY_ROUTE_STATUS = "active"

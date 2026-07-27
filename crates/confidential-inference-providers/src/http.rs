@@ -1,18 +1,13 @@
 use async_trait::async_trait;
 use base64::Engine;
 use confidential_inference_attestation::{
-    certificate_spki_sha256_hex, chutes_provider_nonce, format_utc_timestamp_millis, sha256_digest,
-    ArtifactDigest, GpuTeeKind, IonetConfidentialEvidence, NvidiaGpuAttestationEvidence,
-    TinfoilLiveCaptureEvidence,
+    certificate_spki_sha256_hex, chutes_provider_nonce, TinfoilLiveCaptureEvidence,
 };
 use confidential_inference_openai::ChatCompletionResponse;
-use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
-use serde::Deserialize;
-use sha3::{Digest as Sha3Digest, Keccak256};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, Once};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -257,196 +252,6 @@ pub type DstackHttpProvider = ConfidentialHttpProvider;
 pub type PhalaHttpProvider = ConfidentialHttpProvider;
 
 #[derive(Clone, Debug)]
-pub struct IonetHttpProvider {
-    provider_id: String,
-    routes: Vec<RouteDefinition>,
-    api_key: Option<ProviderApiKey>,
-    client: reqwest::Client,
-    attestation_state: Arc<Mutex<BTreeMap<String, IonetAttestationState>>>,
-}
-
-impl IonetHttpProvider {
-    pub fn new(provider_id: impl Into<String>, routes: Vec<RouteDefinition>) -> Result<Self> {
-        Self::with_api_key(provider_id, routes, None::<String>)
-    }
-
-    pub fn with_api_key(
-        provider_id: impl Into<String>,
-        routes: Vec<RouteDefinition>,
-        api_key: Option<impl Into<String>>,
-    ) -> Result<Self> {
-        install_default_rustls_provider();
-        let client = reqwest::Client::builder()
-            .timeout(DEFAULT_HTTP_TIMEOUT)
-            .build()
-            .map_err(|error| ProviderError::Http(error.to_string()))?;
-
-        Ok(Self::with_client(
-            provider_id,
-            routes,
-            api_key.map(Into::into),
-            client,
-        ))
-    }
-
-    pub fn with_client(
-        provider_id: impl Into<String>,
-        routes: Vec<RouteDefinition>,
-        api_key: Option<String>,
-        client: reqwest::Client,
-    ) -> Self {
-        Self {
-            provider_id: provider_id.into(),
-            routes,
-            api_key: api_key.map(ProviderApiKey::from),
-            client,
-            attestation_state: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
-
-    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.api_key {
-            Some(api_key) => request.bearer_auth(api_key.as_str()),
-            None => request,
-        }
-    }
-}
-
-#[async_trait]
-impl ProviderAdapter for IonetHttpProvider {
-    fn provider_id(&self) -> &str {
-        &self.provider_id
-    }
-
-    fn routes(&self) -> Vec<RouteDefinition> {
-        self.routes.clone()
-    }
-
-    async fn fetch_evidence(
-        &self,
-        route: &RouteDefinition,
-        request: &EvidenceRequest,
-    ) -> Result<Vec<u8>> {
-        ensure_ionet_route(route, &self.provider_id)?;
-        let nonce_prefix = request
-            .nonce
-            .clone()
-            .unwrap_or_else(|| ionet_nonce_prefix(route, request));
-        let response = self
-            .authorize(
-                self.client
-                    .post(&route.evidence_endpoint)
-                    .json(&serde_json::json!({
-                        "model_id": route.provider_model,
-                        "nonce": nonce_prefix,
-                    })),
-            )
-            .send()
-            .await
-            .map_err(|error| ProviderError::Http(error.to_string()))?;
-        let body = checked_response_bytes(response, "io.net attestation").await?;
-        let attestation: IonetAttestationResponse = serde_json::from_slice(&body)?;
-        let evidence = normalize_ionet_evidence(route, request, &attestation, &nonce_prefix)?;
-
-        self.attestation_state
-            .lock()
-            .map_err(|_| {
-                ProviderError::Adapter("io.net attestation state lock is poisoned".into())
-            })?
-            .insert(
-                route.route_id.clone(),
-                IonetAttestationState {
-                    signing_address: evidence.signing_address.clone(),
-                    image_digest: evidence.image_digest.clone(),
-                },
-            );
-
-        serde_json::to_vec(&evidence).map_err(Into::into)
-    }
-
-    async fn chat(
-        &self,
-        route: &RouteDefinition,
-        request: ProviderChatRequest,
-    ) -> Result<ChatCompletionResponse> {
-        ensure_ionet_route(route, &self.provider_id)?;
-        if request.confidentiality() != &ProviderRequestConfidentiality::Plaintext {
-            return Err(ProviderError::Adapter(
-                "io.net HTTP provider requires plaintext OpenAI request bodies".into(),
-            ));
-        }
-        let state = self
-            .attestation_state
-            .lock()
-            .map_err(|_| {
-                ProviderError::Adapter("io.net attestation state lock is poisoned".into())
-            })?
-            .get(&route.route_id)
-            .cloned()
-            .ok_or_else(|| {
-                ProviderError::Compatibility(format!(
-                    "route {} has no captured io.net attestation; verify evidence before chat",
-                    route.route_id
-                ))
-            })?;
-
-        let url = ionet_completions_url(&route.api_base_url)?;
-        let response = self
-            .authorize(self.client.post(url).json(request.body()))
-            .send()
-            .await
-            .map_err(|error| ProviderError::Http(error.to_string()))?;
-        let capture = capture_response(response, "io.net private completions").await?;
-        verify_ionet_response_headers(route, &state, &capture)?;
-        serde_json::from_slice(&capture.body).map_err(Into::into)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct IonetAttestationState {
-    signing_address: String,
-    image_digest: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct IonetAttestationResponse {
-    nonce: String,
-    signing_address: String,
-    image_digest: String,
-    #[serde(default)]
-    gpu: Option<IonetGpuAttestationResponse>,
-    #[serde(default)]
-    cpu: Option<IonetCpuAttestationResponse>,
-    #[serde(default)]
-    issued_at: Option<String>,
-    #[serde(default)]
-    expires_at: Option<String>,
-    #[serde(default)]
-    expires_at_epoch_ms: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct IonetGpuAttestationResponse {
-    #[serde(default)]
-    arch: Option<String>,
-    #[serde(default)]
-    nonce: Option<String>,
-    #[serde(default)]
-    evidence_list: Vec<IonetGpuEvidenceItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct IonetGpuEvidenceItem {
-    evidence: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct IonetCpuAttestationResponse {
-    #[serde(default)]
-    quote: Option<String>,
-}
-
-#[derive(Clone, Debug)]
 pub struct TinfoilHttpProvider {
     inner: OpenAiHttpProvider,
     tls_state: Arc<Mutex<BTreeMap<String, LiveTlsPeer>>>,
@@ -583,7 +388,6 @@ impl ProviderAdapter for TinfoilHttpProvider {
 #[derive(Clone, Debug)]
 struct HttpResponseCapture {
     body: Vec<u8>,
-    headers: BTreeMap<String, String>,
     tls_peer: Option<LiveTlsPeer>,
 }
 
@@ -621,17 +425,6 @@ fn ensure_tinfoil_route(route: &RouteDefinition, provider: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_ionet_route(route: &RouteDefinition, provider: &str) -> Result<()> {
-    ensure_route_provider(route, provider)?;
-    if route.evidence_family != "ionet_confidential" {
-        return Err(ProviderError::Compatibility(format!(
-            "route {} uses evidence family {}, not ionet_confidential",
-            route.route_id, route.evidence_family
-        )));
-    }
-    Ok(())
-}
-
 fn require_https_url(url: &str, field: &str, route_id: &str) -> Result<()> {
     if url.starts_with("https://") {
         Ok(())
@@ -654,118 +447,13 @@ fn chat_completions_url(api_base_url: &str) -> Result<String> {
     ))
 }
 
-fn ionet_completions_url(api_base_url: &str) -> Result<String> {
-    if api_base_url.trim().is_empty() {
-        return Err(ProviderError::Compatibility(
-            "route api_base_url is empty".into(),
-        ));
-    }
-    Ok(format!(
-        "{}/completions",
-        api_base_url.trim_end_matches('/')
-    ))
-}
-
-fn ionet_nonce_prefix(route: &RouteDefinition, request: &EvidenceRequest) -> String {
-    let input = format!(
-        "confidential-inference.ionet.nonce.v1:{}:{}:{}",
-        route.route_id, request.requested_model, request.policy_digest
-    );
-    sha256_digest(input.as_bytes())
-        .trim_start_matches("sha256:")
-        .chars()
-        .take(32)
-        .collect()
-}
-
-fn normalize_ionet_evidence(
-    route: &RouteDefinition,
-    _request: &EvidenceRequest,
-    attestation: &IonetAttestationResponse,
-    nonce_prefix: &str,
-) -> Result<IonetConfidentialEvidence> {
-    let issued_at_epoch_ms = now_epoch_millis();
-    let issued_at = attestation
-        .issued_at
-        .clone()
-        .unwrap_or_else(|| format_utc_timestamp_millis(issued_at_epoch_ms));
-    let expires_at_epoch_ms = attestation
-        .expires_at_epoch_ms
-        .unwrap_or_else(|| issued_at_epoch_ms.saturating_add(600_000));
-    let expires_at = attestation
-        .expires_at
-        .clone()
-        .unwrap_or_else(|| format_utc_timestamp_millis(expires_at_epoch_ms));
-    let raw_gpu_payload = attestation
-        .gpu
-        .as_ref()
-        .and_then(|gpu| gpu.evidence_list.first())
-        .map(|item| item.evidence.clone());
-    let gpu_nonce = attestation
-        .gpu
-        .as_ref()
-        .and_then(|gpu| gpu.nonce.clone())
-        .unwrap_or_else(|| attestation.nonce.clone());
-    let gpu_attestation = raw_gpu_payload
-        .clone()
-        .map(|payload| NvidiaGpuAttestationEvidence {
-            schema: NvidiaGpuAttestationEvidence::SCHEMA.into(),
-            attestation_format: NvidiaGpuAttestationEvidence::NRAS_GPU_EVIDENCE_V3.into(),
-            nonce: gpu_nonce,
-            arch: attestation.gpu.as_ref().and_then(|gpu| gpu.arch.clone()),
-            payload_sha256: Some(sha256_digest(payload.as_bytes())),
-            raw_payload_base64: Some(payload),
-            nras_token: None,
-        });
-    let cpu_quote_sha256 = attestation
-        .cpu
-        .as_ref()
-        .and_then(|cpu| cpu.quote.as_deref())
-        .map(|quote| sha256_digest(quote.as_bytes()));
-
-    Ok(IonetConfidentialEvidence {
-        schema: IonetConfidentialEvidence::SCHEMA.into(),
-        provider: route.provider.clone(),
-        route_id: route.route_id.clone(),
-        evidence_family: route.evidence_family.clone(),
-        nonce: attestation.nonce.clone(),
-        nonce_prefix: nonce_prefix.into(),
-        signing_address: attestation.signing_address.clone(),
-        image_digest: attestation.image_digest.clone(),
-        gpu_tee: GpuTeeKind::NvidiaCc,
-        gpu_attestation,
-        cpu_quote_sha256,
-        // The provider response does not attest or echo the model identity.
-        // Preserve that absence instead of turning the requested model into proof.
-        attested_model: None,
-        workload_image_digest: attestation.image_digest.clone(),
-        model_artifacts: ionet_model_artifacts(route),
-        issued_at,
-        expires_at,
-        expires_at_epoch_ms,
-    })
-}
-
-fn ionet_model_artifacts(route: &RouteDefinition) -> Vec<ArtifactDigest> {
-    vec![ArtifactDigest {
-        kind: "provider_model".into(),
-        name: route.provider_model.clone(),
-        digest: sha256_digest(route.provider_model.as_bytes()),
-    }]
-}
-
 async fn capture_response(
     response: reqwest::Response,
     operation: &str,
 ) -> Result<HttpResponseCapture> {
     let tls_peer = response_tls_peer(&response)?;
-    let headers = response_headers(&response)?;
     let body = checked_response_bytes(response, operation).await?;
-    Ok(HttpResponseCapture {
-        body,
-        headers,
-        tls_peer,
-    })
+    Ok(HttpResponseCapture { body, tls_peer })
 }
 
 async fn checked_response_bytes(response: reqwest::Response, operation: &str) -> Result<Vec<u8>> {
@@ -783,232 +471,6 @@ async fn checked_response_bytes(response: reqwest::Response, operation: &str) ->
             message: format!("{operation}: {}", response_body_preview(&body)),
         })
     }
-}
-
-fn response_headers(response: &reqwest::Response) -> Result<BTreeMap<String, String>> {
-    let mut headers = BTreeMap::new();
-    for (name, value) in response.headers() {
-        if let Ok(value) = value.to_str() {
-            headers.insert(name.as_str().to_ascii_lowercase(), value.to_owned());
-        }
-    }
-    Ok(headers)
-}
-
-fn verify_ionet_response_headers(
-    route: &RouteDefinition,
-    state: &IonetAttestationState,
-    capture: &HttpResponseCapture,
-) -> Result<()> {
-    let signing_address = required_response_header(&capture.headers, "signing_address")?;
-    if signing_address != state.signing_address {
-        return Err(ProviderError::key_rotation(
-            route.route_id.clone(),
-            "io.net signing address changed between attestation and response",
-        ));
-    }
-    let image_digest = required_response_header(&capture.headers, "image_digest")?;
-    if image_digest != state.image_digest {
-        return Err(ProviderError::key_rotation(
-            route.route_id.clone(),
-            "io.net image digest changed between attestation and response",
-        ));
-    }
-
-    let text = required_response_header(&capture.headers, "text")?;
-    let body_text = std::str::from_utf8(&capture.body).map_err(|error| {
-        ProviderError::Compatibility(format!("io.net response body is not UTF-8: {error}"))
-    })?;
-    let body_digest = sha256_digest(&capture.body);
-    if text != body_text && text != body_digest {
-        return Err(ProviderError::Compatibility(format!(
-            "route {} io.net signed text header does not match response body",
-            route.route_id
-        )));
-    }
-
-    let signature = required_response_header(&capture.headers, "signature")?;
-    let signing_algo = required_response_header(&capture.headers, "signing_algo")?;
-    match signing_algo {
-        "fixture-sha256" => {
-            let expected = ionet_fixture_signature(text, signing_address);
-            if signature != expected {
-                return Err(ProviderError::Compatibility(format!(
-                    "route {} io.net fixture response signature is invalid",
-                    route.route_id
-                )));
-            }
-            Ok(())
-        }
-        "ecdsa" => verify_ionet_ecdsa_response_signature(text, signature, signing_address).map_err(
-            |error| {
-                ProviderError::Compatibility(format!(
-                    "route {} io.net ECDSA response signature is invalid: {error}",
-                    route.route_id
-                ))
-            },
-        ),
-        unsupported => Err(ProviderError::Compatibility(format!(
-            "route {} io.net response signature algorithm {unsupported} is not configured",
-            route.route_id
-        ))),
-    }
-}
-
-fn verify_ionet_ecdsa_response_signature(
-    text: &str,
-    signature_header: &str,
-    signing_address: &str,
-) -> std::result::Result<(), String> {
-    let signature_bytes = decode_ionet_signature(signature_header)?;
-    if signature_bytes.len() != 64 && signature_bytes.len() != 65 {
-        return Err(format!(
-            "expected 64 or 65 signature bytes, got {}",
-            signature_bytes.len()
-        ));
-    }
-
-    let expected_address = normalize_ethereum_address(signing_address)?;
-    let signature = Signature::try_from(&signature_bytes[..64])
-        .map_err(|_| "malformed secp256k1 signature".to_owned())?;
-    let recovery_ids = if signature_bytes.len() == 65 {
-        vec![ethereum_recovery_id(signature_bytes[64])
-            .ok_or_else(|| format!("unsupported Ethereum recovery id {}", signature_bytes[64]))?]
-    } else {
-        (0..=RecoveryId::MAX)
-            .filter_map(RecoveryId::from_byte)
-            .collect()
-    };
-
-    let mut recovered_any_key = false;
-    for recovery_id in recovery_ids {
-        if let Ok(recovered) = VerifyingKey::recover_from_digest(
-            ethereum_message_digest(text),
-            &signature,
-            recovery_id,
-        ) {
-            recovered_any_key = true;
-            if ethereum_address_from_verifying_key(&recovered) == expected_address {
-                return Ok(());
-            }
-        }
-    }
-
-    if recovered_any_key {
-        Err(format!(
-            "recovered address did not match expected signing address {expected_address}"
-        ))
-    } else {
-        Err("could not recover secp256k1 public key".into())
-    }
-}
-
-fn decode_ionet_signature(signature: &str) -> std::result::Result<Vec<u8>, String> {
-    let signature = signature.trim();
-    if signature.is_empty() {
-        return Err("signature header is empty".into());
-    }
-
-    if let Some(value) = signature.strip_prefix("base64:") {
-        return base64::engine::general_purpose::STANDARD
-            .decode(value)
-            .map_err(|error| format!("invalid base64 signature: {error}"));
-    }
-    if let Some(value) = signature.strip_prefix("base64url:") {
-        return base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(value)
-            .map_err(|error| format!("invalid base64url signature: {error}"));
-    }
-    if let Some(decoded) = decode_hex(signature) {
-        return Ok(decoded);
-    }
-
-    base64::engine::general_purpose::STANDARD
-        .decode(signature)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature))
-        .map_err(|error| format!("signature is not hex or base64: {error}"))
-}
-
-fn ethereum_recovery_id(value: u8) -> Option<RecoveryId> {
-    match value {
-        0..=3 => RecoveryId::from_byte(value),
-        27..=30 => RecoveryId::from_byte(value - 27),
-        _ => None,
-    }
-}
-
-fn ethereum_message_digest(text: &str) -> Keccak256 {
-    let mut digest = Keccak256::new();
-    digest.update(format!("\x19Ethereum Signed Message:\n{}", text.len()).as_bytes());
-    digest.update(text.as_bytes());
-    digest
-}
-
-fn ethereum_address_from_verifying_key(verifying_key: &VerifyingKey) -> String {
-    let encoded = verifying_key.to_encoded_point(false);
-    let public_key = encoded.as_bytes();
-    let hash = Keccak256::digest(&public_key[1..]);
-    format!("0x{}", hex_lower(&hash[12..]))
-}
-
-fn normalize_ethereum_address(value: &str) -> std::result::Result<String, String> {
-    let value = strip_hex_prefix(value.trim());
-    if value.len() != 40 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        return Err("signing address is not a 20-byte Ethereum address".into());
-    }
-    Ok(format!("0x{}", value.to_ascii_lowercase()))
-}
-
-fn decode_hex(value: &str) -> Option<Vec<u8>> {
-    let value = strip_hex_prefix(value.trim());
-    if !value.len().is_multiple_of(2) || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        return None;
-    }
-
-    let mut decoded = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
-        decoded.push(hex_nibble(pair[0])? << 4 | hex_nibble(pair[1])?);
-    }
-    Some(decoded)
-}
-
-fn strip_hex_prefix(value: &str) -> &str {
-    value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .unwrap_or(value)
-}
-
-fn hex_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
-
-fn required_response_header<'a>(
-    headers: &'a BTreeMap<String, String>,
-    name: &str,
-) -> Result<&'a str> {
-    headers.get(name).map(String::as_str).ok_or_else(|| {
-        ProviderError::Compatibility(format!("io.net response missing {name} header"))
-    })
-}
-
-fn ionet_fixture_signature(text: &str, signing_address: &str) -> String {
-    sha256_digest(format!("{text}:{signing_address}").as_bytes())
 }
 
 fn response_tls_peer(response: &reqwest::Response) -> Result<Option<LiveTlsPeer>> {
@@ -1043,14 +505,6 @@ fn install_default_rustls_provider() {
     });
 }
 
-fn now_epoch_millis() -> u64 {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    millis.min(u128::from(u64::MAX)) as u64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1063,7 +517,6 @@ mod tests {
     };
     use confidential_inference_openai::{ChatChoice, ChatMessage};
     use flate2::{write::GzEncoder, Compression};
-    use k256::ecdsa::SigningKey;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::ServerConfig;
     use serde_json::json;
@@ -1095,30 +548,6 @@ mod tests {
         "Z9Qxj/btKwDPr8hVL6AYjnEm9I2A",
     );
 
-    #[test]
-    fn ionet_normalization_does_not_promote_requested_model_to_attested_model() {
-        let route = ionet_http_test_route("http://127.0.0.1:1");
-        let request = EvidenceRequest {
-            requested_model: "llama-3.3-70b".into(),
-            policy_digest: "sha256:policy".into(),
-            nonce: Some("44".repeat(16)),
-        };
-        let attestation = IonetAttestationResponse {
-            nonce: "44".repeat(32),
-            signing_address: "0x1111111111111111111111111111111111111111".into(),
-            image_digest: "sha256:ionet-http-workload-image".into(),
-            gpu: None,
-            cpu: None,
-            issued_at: Some("2098-12-31T23:50:00Z".into()),
-            expires_at: Some("2099-01-01T00:00:00Z".into()),
-            expires_at_epoch_ms: Some(4_070_908_800_000),
-        };
-
-        let evidence =
-            normalize_ionet_evidence(&route, &request, &attestation, &"44".repeat(16)).unwrap();
-
-        assert_eq!(evidence.attested_model, None);
-    }
     const TINFOIL_TEST_KEY_DER_BASE64: &str = concat!(
         "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC2NfsWBr0tTkS9",
         "Iskz9kJWK4iPxIcsTAdpM1lLnmDCO8OFDaFUzt0MIV7mVPHf84mWm8L6weuDh/LV",
@@ -1197,114 +626,6 @@ mod tests {
         "QyB9GB4dKXjmy+26cOsABYkqDRzM3+8Dlv94G4NrRoEETL0x6hTaXo+JVI50WJ",
         "yzX2lRxy4DXVI28v+Ot5m6XEbczrZFa8bOP8iKi7P4Q2KOvg+g",
     );
-
-    #[test]
-    fn ionet_ecdsa_response_signature_verifies_ethereum_recovered_address() {
-        let text = r#"{"id":"chatcmpl-ionet-live","choices":[{"message":{"content":"ok"}}]}"#;
-        let (signing_address, signature_header, signature_without_recovery_id) =
-            ionet_ecdsa_test_signature(text);
-
-        verify_ionet_ecdsa_response_signature(text, &signature_header, &signing_address).unwrap();
-        verify_ionet_ecdsa_response_signature(
-            text,
-            &signature_without_recovery_id,
-            &signing_address,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn ionet_ecdsa_response_signature_rejects_wrong_address() {
-        let text = r#"{"id":"chatcmpl-ionet-live","choices":[{"message":{"content":"ok"}}]}"#;
-        let (_, signature_header, _) = ionet_ecdsa_test_signature(text);
-
-        let error = verify_ionet_ecdsa_response_signature(
-            text,
-            &signature_header,
-            "0x0000000000000000000000000000000000000000",
-        )
-        .unwrap_err();
-
-        assert!(error.contains("recovered address did not match"));
-    }
-
-    #[test]
-    fn ionet_response_headers_accept_ecdsa_signature() {
-        let body =
-            br#"{"id":"chatcmpl-ionet-live","choices":[{"message":{"content":"ok"}}]}"#.to_vec();
-        let text = std::str::from_utf8(&body).unwrap().to_owned();
-        let (signing_address, signature_header, _) = ionet_ecdsa_test_signature(&text);
-        let route = ionet_http_test_route("http://127.0.0.1:1");
-        let state = IonetAttestationState {
-            signing_address: signing_address.clone(),
-            image_digest: "sha256:ionet-http-workload-image".into(),
-        };
-        let capture = HttpResponseCapture {
-            body,
-            tls_peer: None,
-            headers: BTreeMap::from([
-                ("text".into(), text),
-                ("signature".into(), signature_header),
-                ("signing_address".into(), signing_address),
-                ("signing_algo".into(), "ecdsa".into()),
-                (
-                    "image_digest".into(),
-                    "sha256:ionet-http-workload-image".into(),
-                ),
-            ]),
-        };
-
-        verify_ionet_response_headers(&route, &state, &capture).unwrap();
-    }
-
-    #[test]
-    fn ionet_response_headers_classify_signing_address_rotation() {
-        let body =
-            br#"{"id":"chatcmpl-ionet-live","choices":[{"message":{"content":"ok"}}]}"#.to_vec();
-        let text = std::str::from_utf8(&body).unwrap().to_owned();
-        let (signing_address, signature_header, _) = ionet_ecdsa_test_signature(&text);
-        let route = ionet_http_test_route("http://127.0.0.1:1");
-        let state = IonetAttestationState {
-            signing_address: "0x0000000000000000000000000000000000000000".into(),
-            image_digest: "sha256:ionet-http-workload-image".into(),
-        };
-        let capture = HttpResponseCapture {
-            body,
-            tls_peer: None,
-            headers: BTreeMap::from([
-                ("text".into(), text),
-                ("signature".into(), signature_header),
-                ("signing_address".into(), signing_address),
-                ("signing_algo".into(), "ecdsa".into()),
-                (
-                    "image_digest".into(),
-                    "sha256:ionet-http-workload-image".into(),
-                ),
-            ]),
-        };
-
-        let error = verify_ionet_response_headers(&route, &state, &capture).unwrap_err();
-        assert!(error.is_key_rotation());
-        assert!(error.to_string().contains("signing address changed"));
-    }
-
-    fn ionet_ecdsa_test_signature(text: &str) -> (String, String, String) {
-        let key_bytes =
-            decode_hex("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318").unwrap();
-        let signing_key = SigningKey::from_slice(&key_bytes).unwrap();
-        let signing_address = ethereum_address_from_verifying_key(signing_key.verifying_key());
-        let (signature, recovery_id) = signing_key
-            .sign_digest_recoverable(ethereum_message_digest(text))
-            .unwrap();
-        let mut signature_bytes = signature.to_bytes().to_vec();
-        let without_recovery_id = format!("0x{}", hex_lower(&signature_bytes));
-        signature_bytes.push(recovery_id.to_byte() + 27);
-        (
-            signing_address,
-            format!("0x{}", hex_lower(&signature_bytes)),
-            without_recovery_id,
-        )
-    }
 
     #[tokio::test]
     async fn openai_http_provider_posts_chat_completion_with_bearer_token() {
@@ -1665,30 +986,6 @@ mod tests {
             base_url.trim_end_matches('/')
         );
         route
-    }
-
-    fn ionet_http_test_route(base_url: &str) -> RouteDefinition {
-        RouteDefinition {
-            route_id: "ionet-http-test:llama-3.3-70b:ionet-model-llama-3-3-70b".into(),
-            route_status: crate::RouteLifecycle::Active,
-            provider: "ionet-http-test".into(),
-            provider_model: "ionet-model-llama-3-3-70b".into(),
-            evidence_family: "ionet_confidential".into(),
-            api_base_url: format!("{}/v1/private", base_url.trim_end_matches('/')),
-            evidence_endpoint: format!("{}/v1/private/attestation", base_url.trim_end_matches('/')),
-            adapter_version: "ionet-http-confidential-adapter/0.1.0".into(),
-            freshness_class: FreshnessClass::PerSession,
-            channel_binding_kind: ChannelBindingKind::None,
-            trust_tier: TrustTier::TeeOnly,
-            request_confidentiality_requirement: BoundDataRequirement::NotRequired,
-            response_confidentiality_requirement: BoundDataRequirement::NotRequired,
-            response_integrity_requirement: ResponseIntegrityRequirement::ReceiptBound,
-            accepted_gpu_tees: vec![GpuTeeKind::NvidiaCc],
-            request_encryption: crate::EncryptionRequirement::NotRequired,
-            response_decryption: crate::EncryptionRequirement::NotRequired,
-            streaming: crate::StreamingSupport::Unsupported,
-            alias_confidence: AliasConfidence::Curated,
-        }
     }
 
     fn chutes_http_route(base_url: &str) -> RouteDefinition {

@@ -21,7 +21,7 @@ HTTP API version.
 
 Provider response booleans and absent fields never become verified facts:
 
-- Missing dstack, Chutes, or io.net model identity produces an unsupported or
+- Missing dstack or Chutes model identity produces an unsupported or
   failed model-binding result according to policy. The requested model is not
   copied into evidence.
 - dstack `request_bound` and `response_bound` default to `false` and are not

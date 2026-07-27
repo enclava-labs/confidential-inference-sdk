@@ -36,8 +36,8 @@ pub use e2ee::{
 pub use error::{AttestationError, Result};
 pub use evidence::{
     parse_dstack_workload_images, ArtifactDigest, ChannelBindingEvidence, ChutesE2eeEvidence,
-    DstackEvidence, EvidenceHardware, FixtureEvidence, IonetConfidentialEvidence,
-    NvidiaGpuAttestationEvidence, TinfoilLiveCaptureEvidence, TinfoilTlsEvidence, WorkloadImage,
+    DstackEvidence, EvidenceHardware, FixtureEvidence, NvidiaGpuAttestationEvidence,
+    TinfoilLiveCaptureEvidence, TinfoilTlsEvidence, WorkloadImage,
 };
 pub use gpu::{
     verify_nvidia_nras_jwt_with_jwks_json, FailClosedGpuAttestationVerifier,
@@ -92,8 +92,7 @@ pub use verifier::{
     verify_chutes_e2ee_evidence_with_gpu_attestation_verifier, verify_dstack_evidence,
     verify_evidence, verify_evidence_with_attestation_verifiers,
     verify_evidence_with_gpu_attestation_verifier, verify_evidence_with_tinfoil_quote_verifier,
-    verify_fixture_evidence, verify_ionet_confidential_evidence,
-    verify_ionet_confidential_evidence_with_gpu_attestation_verifier,
-    verify_tinfoil_live_capture_with_quote_verifier, verify_tinfoil_tls_evidence,
-    verify_tinfoil_tls_evidence_with_quote_verifier, VerificationRequest,
+    verify_fixture_evidence, verify_tinfoil_live_capture_with_quote_verifier,
+    verify_tinfoil_tls_evidence, verify_tinfoil_tls_evidence_with_quote_verifier,
+    VerificationRequest,
 };

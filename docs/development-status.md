@@ -12,7 +12,7 @@ provider route.
 | Policy enforcement | Fail-closed route selection and send-time revalidation |
 | Trust artifacts | Signed provider registries, compatibility profiles, and reference values |
 | Intel TDX/DCAP | Offline quote verification with caller-supplied collateral |
-| Provider evidence | dstack, Chutes/Redpill, io.net, Tinfoil, and Privatemode adapter and verifier paths |
+| Provider evidence | dstack, Chutes/Redpill, Tinfoil, and Privatemode adapter and verifier paths |
 | Request protection | SDK-managed app-E2EE envelope support for compatible routes |
 | Response integrity | Verdict and receipt binding where the selected route supports it |
 | OpenAI API shapes | Chat Completions and a text-only Responses compatibility path |

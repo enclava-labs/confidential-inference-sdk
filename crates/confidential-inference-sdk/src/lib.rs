@@ -15,10 +15,10 @@ use confidential_inference_openai::{
 };
 use confidential_inference_providers::{
     ConfidentialHttpProvider, DcapTdxCollateralResolver, DemoProvider, EncryptionRequirement,
-    EvidenceRequest, IonetHttpProvider, ModelBindingSupport, OpenAiEndpoint, OpenAiHttpProvider,
-    ProviderAdapter, ProviderCompatibility, ProviderCompatibilityMatrix, ProviderError,
-    ProviderRegistry, ProviderRegistryEnvelope, ProviderRegistryPin, RegistryModel,
-    RouteDefinition, RouteExecutionStatus, RouteLifecycle, TinfoilHttpProvider,
+    EvidenceRequest, ModelBindingSupport, OpenAiEndpoint, OpenAiHttpProvider, ProviderAdapter,
+    ProviderCompatibility, ProviderCompatibilityMatrix, ProviderError, ProviderRegistry,
+    ProviderRegistryEnvelope, ProviderRegistryPin, RegistryModel, RouteDefinition,
+    RouteExecutionStatus, RouteLifecycle, TinfoilHttpProvider,
 };
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -3288,15 +3288,6 @@ fn install_default_credential_adapters(
                 routes,
                 Some(api_key.expose().to_owned()),
             )?)
-        } else if routes
-            .iter()
-            .any(|route| route.evidence_family == "ionet_confidential")
-        {
-            Arc::new(IonetHttpProvider::with_api_key(
-                provider_id,
-                routes,
-                Some(api_key.expose().to_owned()),
-            )?)
         } else if routes.iter().any(|route| {
             matches!(
                 route.evidence_family.as_str(),
@@ -4031,7 +4022,7 @@ mod tests {
     use base64::Engine;
     use confidential_inference_attestation::{
         canonical_json, chutes_expected_report_data_prefix, AliasConfidence, ArtifactSignature,
-        CheckResult, ConfidentialityResult, CpuTeeKind, CpuTeeRequirement, DcapTdxCollateralBundle,
+        CheckResult, ConfidentialityResult, CpuTeeKind, DcapTdxCollateralBundle,
         DcapTdxCollateralSource, DcapTdxTinfoilQuoteVerifier, EvidenceHardware, FreshnessClass,
         FreshnessPolicy, Millis, ProviderReference, RouteReference, TinfoilAttestationDoc,
         TinfoilAttestationFormat, TinfoilLiveCaptureEvidence, TinfoilQuoteVerificationRequest,
@@ -4438,29 +4429,6 @@ mod tests {
                 request.expected_nonce,
                 request.evidence.attestation_format.clone(),
                 "static-client-test-verifier",
-            ))
-        }
-    }
-
-    #[derive(Clone)]
-    struct StaticIonetGpuAttestationVerifier;
-
-    impl GpuAttestationVerifier for StaticIonetGpuAttestationVerifier {
-        fn verify_nvidia_gpu_attestation(
-            &self,
-            request: &NvidiaGpuAttestationVerificationRequest<'_>,
-        ) -> confidential_inference_attestation::Result<VerifiedGpuAttestation> {
-            assert_eq!(request.expected_tee, GpuTeeKind::NvidiaCc);
-            assert_eq!(request.expected_nonce, request.evidence.nonce);
-            assert_eq!(request.provider, "ionet-http-test");
-            assert!(request
-                .route_id
-                .starts_with("ionet-http-test:llama-3.3-70b:"));
-            assert!(request.evidence.raw_payload_base64.is_some());
-            Ok(VerifiedGpuAttestation::nvidia_cc(
-                request.expected_nonce,
-                request.evidence.attestation_format.clone(),
-                "static-ionet-client-test-verifier",
             ))
         }
     }
@@ -5717,293 +5685,6 @@ mod tests {
             "expires_at": "2099-01-01T00:00:00Z",
             "expires_at_epoch_ms": 4_070_908_800_000u64
         })
-    }
-
-    const IONET_HTTP_SIGNING_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
-
-    async fn spawn_ionet_confidential_http_server() -> (
-        RouteDefinition,
-        Arc<Mutex<Vec<String>>>,
-        tokio::task::JoinHandle<std::io::Result<()>>,
-    ) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let route = ionet_http_route(&base_url);
-        let raw_chat_requests = Arc::new(Mutex::new(Vec::new()));
-        let server_route = route.clone();
-        let server_raw_chat_requests = raw_chat_requests.clone();
-        let handle = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await?;
-                let request = read_test_http_request(&mut stream).await?;
-                let request_text = String::from_utf8_lossy(&request).into_owned();
-                if !request_text.contains("authorization: Bearer sk-ionet-http-test") {
-                    return Err(std::io::Error::other(
-                        "io.net HTTP adapter did not send bearer token",
-                    ));
-                }
-                let (method, path) = test_http_request_line(&request)?;
-                match (method, path) {
-                    ("POST", "/v1/private/attestation") => {
-                        let request_value: serde_json::Value =
-                            serde_json::from_slice(test_http_body(&request))
-                                .map_err(std::io::Error::other)?;
-                        if request_value["model_id"] != server_route.provider_model {
-                            return Err(std::io::Error::other(
-                                "io.net attestation model_id did not use provider model",
-                            ));
-                        }
-                        let nonce_prefix = request_value["nonce"]
-                            .as_str()
-                            .ok_or_else(|| std::io::Error::other("missing io.net nonce"))?;
-                        let body = ionet_http_attestation_response(nonce_prefix).to_string();
-                        write_test_http_json_response(&mut stream, &body, &[]).await?;
-                    }
-                    ("POST", "/v1/private/completions") => {
-                        server_raw_chat_requests
-                            .lock()
-                            .unwrap()
-                            .push(request_text.clone());
-                        let request_value: serde_json::Value =
-                            serde_json::from_slice(test_http_body(&request))
-                                .map_err(std::io::Error::other)?;
-                        if request_value["model"] != server_route.provider_model {
-                            return Err(std::io::Error::other(
-                                "io.net provider model rewrite was not applied",
-                            ));
-                        }
-                        let prompt = request_value["messages"][0]["content"]
-                            .as_str()
-                            .unwrap_or("");
-                        let content = format!(
-                            "io.net confidential response for {}: {}",
-                            server_route.provider_model, prompt
-                        );
-                        let body = serde_json::json!({
-                            "id": "chatcmpl-ionet-http-confidential-test",
-                            "object": "chat.completion",
-                            "created": 1_783_209_600u64,
-                            "model": server_route.provider_model.clone(),
-                            "choices": [{
-                                "index": 0,
-                                "message": {"role": "assistant", "content": content},
-                                "finish_reason": "stop"
-                            }],
-                            "usage": {
-                                "prompt_tokens": prompt.split_whitespace().count(),
-                                "completion_tokens": content.split_whitespace().count(),
-                                "total_tokens": prompt.split_whitespace().count()
-                                    + content.split_whitespace().count()
-                            }
-                        })
-                        .to_string();
-                        let signed_text = sha256_digest(body.as_bytes());
-                        let signature =
-                            ionet_http_fixture_signature(&signed_text, IONET_HTTP_SIGNING_ADDRESS);
-                        let headers = [
-                            ("text", signed_text.as_str()),
-                            ("signature", signature.as_str()),
-                            ("signing_address", IONET_HTTP_SIGNING_ADDRESS),
-                            ("signing_algo", "fixture-sha256"),
-                            ("image_digest", "sha256:ionet-http-workload-image"),
-                        ];
-                        write_test_http_json_response(&mut stream, &body, &headers).await?;
-                    }
-                    _ => {
-                        let body = serde_json::json!({"error": "not found"}).to_string();
-                        write_test_http_json_response(&mut stream, &body, &[]).await?;
-                    }
-                }
-            }
-            Ok(())
-        });
-        (route, raw_chat_requests, handle)
-    }
-
-    async fn write_test_http_json_response(
-        stream: &mut tokio::net::TcpStream,
-        body: &str,
-        headers: &[(&str, &str)],
-    ) -> std::io::Result<()> {
-        let mut response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n",
-            body.len()
-        );
-        for (name, value) in headers {
-            response.push_str(name);
-            response.push_str(": ");
-            response.push_str(value);
-            response.push_str("\r\n");
-        }
-        response.push_str("\r\n");
-        response.push_str(body);
-        stream.write_all(response.as_bytes()).await
-    }
-
-    fn ionet_http_route(base_url: &str) -> RouteDefinition {
-        RouteDefinition {
-            route_id: "ionet-http-test:llama-3.3-70b:ionet-model-llama-3-3-70b".into(),
-            route_status: RouteLifecycle::Active,
-            provider: "ionet-http-test".into(),
-            provider_model: "ionet-model-llama-3-3-70b".into(),
-            evidence_family: "ionet_confidential".into(),
-            api_base_url: format!("{}/v1/private", base_url.trim_end_matches('/')),
-            evidence_endpoint: format!("{}/v1/private/attestation", base_url.trim_end_matches('/')),
-            adapter_version: "ionet-http-confidential-adapter/0.1.0".into(),
-            freshness_class: FreshnessClass::PerSession,
-            channel_binding_kind: ChannelBindingKind::None,
-            trust_tier: TrustTier::TeeOnly,
-            request_confidentiality_requirement: BoundDataRequirement::NotRequired,
-            response_confidentiality_requirement: BoundDataRequirement::NotRequired,
-            response_integrity_requirement: ResponseIntegrityRequirement::ReceiptBound,
-            accepted_gpu_tees: vec![GpuTeeKind::NvidiaCc],
-            request_encryption: EncryptionRequirement::NotRequired,
-            response_decryption: EncryptionRequirement::NotRequired,
-            streaming: StreamingSupport::Unsupported,
-            alias_confidence: AliasConfidence::Curated,
-        }
-    }
-
-    fn signed_ionet_http_registry(route: RouteDefinition) -> ProviderRegistryEnvelope {
-        let mut models = BTreeMap::new();
-        models.insert(
-            "llama-3.3-70b".into(),
-            RegistryModel {
-                canonical_model: "llama-3.3-70b".into(),
-                display_name: "Llama 3.3 70B".into(),
-                family: "Llama".into(),
-                aliases: vec!["llama-3.3-70b".into(), "Llama 3.3 70B".into()],
-                routes: vec![route],
-            },
-        );
-        let payload = ProviderRegistry {
-            schema: ProviderRegistry::SCHEMA.into(),
-            version: "2026-07-05-ionet-http-test".into(),
-            generated_at: "2026-07-05T00:00:00Z".into(),
-            source_sync_run: SourceSyncRun {
-                completed_at: "2026-07-05T00:00:00Z".into(),
-                status: "success".into(),
-                source: "client-test-ionet-http".into(),
-            },
-            models,
-        };
-        ProviderRegistryEnvelope {
-            schema: ProviderRegistryEnvelope::SCHEMA.into(),
-            signature: custom_artifact_signature(&payload),
-            payload,
-        }
-    }
-
-    fn signed_ionet_http_reference_values(route: &RouteDefinition) -> ReferenceValuesEnvelope {
-        let mut routes = BTreeMap::new();
-        routes.insert(
-            route.route_id.clone(),
-            RouteReference {
-                canonical_model: "llama-3.3-70b".into(),
-                provider_model: route.provider_model.clone(),
-                evidence_family: route.evidence_family.clone(),
-                channel_binding_kind: ChannelBindingKind::None,
-                trust_tier: TrustTier::TeeOnly,
-                accepted_cpu_tees: Vec::new(),
-                e2ee_public_key_digest: String::new(),
-                response_signing_key_digest: Some(sha256_digest(
-                    IONET_HTTP_SIGNING_ADDRESS.as_bytes(),
-                )),
-                tls_spki_sha256: None,
-                workload_images: Vec::new(),
-                workload_image_digest: "sha256:ionet-http-workload-image".into(),
-                model_artifacts: vec![confidential_inference_attestation::ArtifactDigest {
-                    kind: "provider_model".into(),
-                    name: route.provider_model.clone(),
-                    digest: sha256_digest(route.provider_model.as_bytes()),
-                }],
-                valid_until: "2099-01-01T00:00:00Z".into(),
-                valid_until_epoch_ms: 4_070_908_800_000,
-            },
-        );
-        let mut providers = BTreeMap::new();
-        providers.insert(
-            "ionet-http-test".into(),
-            ProviderReference {
-                accepted_measurements: Vec::new(),
-                routes,
-            },
-        );
-        let payload = ReferenceValuesPayload {
-            schema: ReferenceValuesPayload::SCHEMA.into(),
-            version: "2026-07-05-ionet-http-test".into(),
-            issuer: "test".into(),
-            valid_from: "2026-07-05T00:00:00Z".into(),
-            valid_until: "2099-01-01T00:00:00Z".into(),
-            valid_until_epoch_ms: 4_070_908_800_000,
-            revocation_epoch: 1,
-            minimum_acceptable_version: "2026-07-05-ionet-http-test".into(),
-            providers,
-        };
-        ReferenceValuesEnvelope {
-            schema: ReferenceValuesEnvelope::SCHEMA.into(),
-            signature: custom_artifact_signature(&payload),
-            payload,
-        }
-    }
-
-    fn ionet_http_compatibility(route: &RouteDefinition) -> ProviderCompatibilityMatrix {
-        let mut providers = BTreeMap::new();
-        providers.insert(
-            "ionet-http-test".into(),
-            ProviderCompatibility {
-                provider: "ionet-http-test".into(),
-                route_execution_status: RouteExecutionStatus::Executable,
-                api_base_url: route.api_base_url.clone(),
-                supported_openai_endpoints: vec![OpenAiEndpoint::ChatCompletions],
-                model_listing: ModelListingBehavior::SignedRegistryOnly,
-                model_id_rewrite: ModelIdRewrite::UseRouteProviderModel,
-                token_parameter_rewrite: TokenParameterRewrite::PreserveMaxTokens,
-                streaming: StreamingSupport::Unsupported,
-                request_encryption: EncryptionRequirement::NotRequired,
-                response_decryption: EncryptionRequirement::NotRequired,
-                sdk_app_e2ee: None,
-                attestation_endpoint_shape: "ionet_confidential_http_test".into(),
-                required_credentials: vec![CredentialKind::BearerToken],
-                freshness_class: FreshnessClass::PerSession,
-                cacheability_class: CacheabilityClass::PerSessionVerdict,
-                expected_trust_tier: TrustTier::TeeOnly,
-                model_binding_support: ModelBindingSupport::Verified,
-                known_unsupported_modes: vec!["streaming".into()],
-            },
-        );
-        ProviderCompatibilityMatrix {
-            schema: ProviderCompatibilityMatrix::SCHEMA.into(),
-            providers,
-        }
-    }
-
-    fn ionet_http_attestation_response(nonce_prefix: &str) -> serde_json::Value {
-        let nonce = format!("{nonce_prefix}{}", "00".repeat(16));
-        serde_json::json!({
-            "nonce": nonce,
-            "gpu": {
-                "arch": "gpu-hopper-h100",
-                "nonce": nonce,
-                "evidence_list": [{
-                    "evidence": base64::engine::general_purpose::STANDARD
-                        .encode(br#"{"gpu":"nvidia_cc","provider":"ionet-http-test"}"#)
-                }]
-            },
-            "cpu": {
-                "quote": base64::engine::general_purpose::STANDARD
-                    .encode(br#"fixture-ionet-cpu-quote"#)
-            },
-            "signing_address": IONET_HTTP_SIGNING_ADDRESS,
-            "image_digest": "sha256:ionet-http-workload-image",
-            "issued_at": "2098-12-31T23:50:00Z",
-            "expires_at": "2099-01-01T00:00:00Z",
-            "expires_at_epoch_ms": 4_070_908_800_000u64
-        })
-    }
-
-    fn ionet_http_fixture_signature(text: &str, signing_address: &str) -> String {
-        sha256_digest(format!("{text}:{signing_address}").as_bytes())
     }
 
     async fn spawn_chutes_e2ee_http_server() -> (
@@ -8101,90 +7782,6 @@ mod tests {
             assert!(raw_chat_requests[0].contains("authorization: Bearer sk-phala-http-test"));
             assert!(raw_chat_requests[0].contains("confidential-inference.sdk-encrypted-chat.v1"));
             assert!(!raw_chat_requests[0].contains("direct Phala encrypted provider"));
-        }
-        server.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn api_key_auto_registers_ionet_confidential_http_provider() {
-        let (route, raw_chat_requests, server) = spawn_ionet_confidential_http_server().await;
-        let registry = signed_ionet_http_registry(route.clone());
-        let reference_values = signed_ionet_http_reference_values(&route);
-        let mut policy = VerificationPolicy::require_hardware();
-        policy.hardware.cpu = CpuTeeRequirement::NotRequired;
-        policy.hardware.gpu = GpuTeeRequirement::one_of(vec![GpuTeeKind::NvidiaCc]);
-        policy.response_integrity_requirement = ResponseIntegrityRequirement::ReceiptBound;
-        policy.model_binding_requirement = ModelBindingRequirement::IfProviderSupports;
-        policy.provenance.workload_image = true;
-        policy.provenance.model_artifacts = true;
-        let client = ConfidentialInference::builder()
-            .registry(registry)
-            .reference_values(reference_values)
-            .trusted_artifact_signing_key(custom_trusted_signing_key())
-            .compatibility_matrix(ionet_http_compatibility(&route))
-            .api_key("ionet-http-test", "sk-ionet-http-test")
-            .gpu_attestation_verifier(StaticIonetGpuAttestationVerifier)
-            .policy(policy)
-            .build()
-            .await
-            .unwrap();
-
-        let confidential_models = client.confidential_models();
-        assert_eq!(confidential_models.len(), 1);
-        assert_eq!(confidential_models[0].canonical_model, "llama-3.3-70b");
-        assert_eq!(confidential_models[0].routes.len(), 1);
-        assert_eq!(confidential_models[0].routes[0].provider, "ionet-http-test");
-        assert!(confidential_models[0].routes[0].chat_executable);
-
-        let response = client
-            .chat_completions()
-            .model("llama-3.3-70b")
-            .message(ChatMessage::user("io.net receipt-bound provider"))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.provider, "ionet-http-test");
-        assert_eq!(response.provider_model, "ionet-model-llama-3-3-70b");
-        assert_eq!(response.verdict.status, VerificationStatus::Verified);
-        assert_eq!(
-            response.verdict.response_integrity_result,
-            ResponseIntegrityResult::ReceiptBound
-        );
-        assert_eq!(
-            response.verdict.request_confidentiality_result,
-            ConfidentialityResult::Unknown
-        );
-        assert_eq!(
-            response.verdict.response_confidentiality_result,
-            ConfidentialityResult::Unknown
-        );
-        assert!(!response.verdict.request_channel_bound);
-        assert!(!response.verdict.response_channel_bound);
-        for check in [
-            "gpu_tee",
-            "nonce_binding",
-            "response_signing_key_binding",
-            "response_receipt",
-            "response_channel_binding",
-            "image_provenance",
-            "model_artifact_provenance",
-        ] {
-            assert_eq!(response.verdict.check(check), Some(&CheckResult::Verified));
-        }
-        assert_eq!(
-            response.verdict.check("model_binding"),
-            Some(&CheckResult::NotSupported)
-        );
-        assert!(response.response.choices[0]
-            .message
-            .content
-            .contains("io.net receipt-bound provider"));
-        {
-            let raw_chat_requests = raw_chat_requests.lock().unwrap();
-            assert_eq!(raw_chat_requests.len(), 1);
-            assert!(raw_chat_requests[0].contains("authorization: Bearer sk-ionet-http-test"));
-            assert!(raw_chat_requests[0].contains("io.net receipt-bound provider"));
         }
         server.await.unwrap().unwrap();
     }
