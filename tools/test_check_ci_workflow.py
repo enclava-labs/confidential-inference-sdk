@@ -55,6 +55,28 @@ class CheckCiWorkflowTests(unittest.TestCase):
                 [check_ci_workflow.DEMO_PIPEFAIL_SNIPPET],
             )
 
+    def test_rustup_components_must_use_one_comma_separated_argument(self) -> None:
+        malformed = (
+            "rustup toolchain install stable --profile minimal "
+            "--component clippy rustfmt"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            workflow = Path(temp) / "ci.yml"
+            workflow.write_text(
+                "\n".join(check_ci_workflow.REQUIRED_SNIPPETS).replace(
+                    check_ci_workflow.RUSTUP_COMPONENT_INSTALL_SNIPPET,
+                    malformed,
+                ),
+                encoding="utf-8",
+            )
+
+            report = check_ci_workflow.check_workflow(workflow)
+
+            self.assertIn(
+                check_ci_workflow.RUSTUP_COMPONENT_INSTALL_SNIPPET,
+                report["missing"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

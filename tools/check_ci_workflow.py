@@ -10,6 +10,9 @@ from pathlib import Path
 
 
 SCHEMA = "confidential-inference.ci-workflow-policy.v1"
+RUSTUP_COMPONENT_INSTALL_SNIPPET = (
+    "rustup toolchain install stable --profile minimal --component clippy,rustfmt"
+)
 DEMO_PIPEFAIL_SNIPPET = (
     "set -o pipefail\n"
     "          cargo run -p confidential-demo --locked | tee target/confidential-demo.out\n"
@@ -23,7 +26,7 @@ REQUIRED_SNIPPETS = [
     "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0",
     'python-version: "3.11"',
     'python-version: "3.12"',
-    "rustup toolchain install stable --profile minimal --component clippy rustfmt",
+    RUSTUP_COMPONENT_INSTALL_SNIPPET,
     "cargo fmt --all -- --check",
     "cargo clippy --workspace --all-targets --locked -- -D warnings",
     "cargo test --workspace --locked --quiet",

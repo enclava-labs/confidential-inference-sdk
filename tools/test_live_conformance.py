@@ -63,6 +63,23 @@ def tamper_base64url_value(value: str) -> str:
 
 
 class LiveConformanceTests(unittest.TestCase):
+    def test_env_example_covers_every_credentialed_live_provider(self):
+        plan = live_conformance.load_plan(
+            Path("fixtures/providers/live-conformance-plan.json")
+        )
+        expected = {
+            provider["auth_env"]
+            for provider in plan["providers"]
+            if provider.get("auth_env")
+        }
+        configured = {
+            line.split("=", 1)[0].strip()
+            for line in Path(".env.example").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and "=" in line
+        }
+
+        self.assertEqual(configured, expected)
+
     def test_load_env_file_loads_credentials_without_overwriting_environment(self):
         with tempfile.TemporaryDirectory() as temp:
             env_path = Path(temp) / ".env"
