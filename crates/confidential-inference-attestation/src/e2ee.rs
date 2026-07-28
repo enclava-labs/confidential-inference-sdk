@@ -10,6 +10,16 @@ pub enum ChutesE2eeReportDataBinding {
     ReportDataMismatch,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChutesLiveReportDataBinding {
+    Verified,
+    InvalidNonce,
+    MissingPublicKey,
+    InvalidCertificateDigest,
+    ReportDataMismatch,
+}
+
 pub fn chutes_expected_report_data_prefix(nonce_hex: &str, e2e_public_key: &str) -> Option<String> {
     if !is_canonical_nonce_hex(nonce_hex) {
         return None;
@@ -55,6 +65,40 @@ pub fn verify_chutes_e2ee_report_data_binding(
         ChutesE2eeReportDataBinding::Verified
     } else {
         ChutesE2eeReportDataBinding::ReportDataMismatch
+    }
+}
+
+pub fn verify_chutes_live_report_data_binding(
+    report_data_hex: &str,
+    nonce_hex: &str,
+    e2e_public_key_base64: &str,
+    certificate_spki_sha256_hex: &str,
+) -> ChutesLiveReportDataBinding {
+    if !is_canonical_nonce_hex(nonce_hex) {
+        return ChutesLiveReportDataBinding::InvalidNonce;
+    }
+    if e2e_public_key_base64.is_empty() {
+        return ChutesLiveReportDataBinding::MissingPublicKey;
+    }
+    if certificate_spki_sha256_hex.len() != 64
+        || !certificate_spki_sha256_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return ChutesLiveReportDataBinding::InvalidCertificateDigest;
+    }
+
+    let expected_prefix = chutes_expected_report_data_prefix(nonce_hex, e2e_public_key_base64)
+        .expect("nonce and public key were prevalidated");
+    let expected = format!(
+        "{}{}",
+        expected_prefix,
+        certificate_spki_sha256_hex.to_ascii_lowercase()
+    );
+    if report_data_hex.eq_ignore_ascii_case(&expected) {
+        ChutesLiveReportDataBinding::Verified
+    } else {
+        ChutesLiveReportDataBinding::ReportDataMismatch
     }
 }
 
@@ -126,5 +170,36 @@ mod tests {
         assert_eq!(derived.len(), 64);
         assert!(derived.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(derived, derived.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn chutes_live_binding_covers_dynamic_key_and_certificate() {
+        let nonce = "11".repeat(32);
+        let public_key = "base64-ml-kem-public-key";
+        let cert_digest = "22".repeat(32);
+        let report_data = format!(
+            "{}{}",
+            chutes_expected_report_data_prefix(&nonce, public_key).unwrap(),
+            cert_digest
+        );
+
+        assert_eq!(
+            verify_chutes_live_report_data_binding(
+                &report_data,
+                &nonce,
+                public_key,
+                &"22".repeat(32)
+            ),
+            ChutesLiveReportDataBinding::Verified
+        );
+        assert_eq!(
+            verify_chutes_live_report_data_binding(
+                &report_data,
+                &nonce,
+                public_key,
+                &"33".repeat(32)
+            ),
+            ChutesLiveReportDataBinding::ReportDataMismatch
+        );
     }
 }

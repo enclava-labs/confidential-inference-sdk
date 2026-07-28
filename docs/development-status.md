@@ -12,8 +12,8 @@ provider route.
 | Policy enforcement | Fail-closed route selection and send-time revalidation |
 | Trust artifacts | Signed provider registries, compatibility profiles, and reference values |
 | Intel TDX/DCAP | Offline quote verification with caller-supplied collateral |
-| Provider evidence | dstack, Chutes/Redpill, Tinfoil, and Privatemode adapter and verifier paths |
-| Request protection | SDK-managed app-E2EE envelope support for compatible routes |
+| Provider evidence | dstack, Chutes/Redpill, Chutes live, NEAR live, Tinfoil, and Privatemode adapter and verifier paths |
+| Request protection | SDK-managed app-E2EE plus Chutes adapter-managed ML-KEM-768/ChaCha20-Poly1305 |
 | Response integrity | Verdict and receipt binding where the selected route supports it |
 | OpenAI API shapes | Chat Completions and a text-only Responses compatibility path |
 | Integrations | Rust, C ABI, Python, Node.js, middleware, and proxy surfaces |
@@ -46,8 +46,11 @@ CI fixture signing key cannot satisfy that production gate.
 ## Known limitations
 
 - SEV-SNP does not have a production-supported verifier backend.
-- The checked-in provider compatibility profiles are fixtures or
-  verification-only profiles unless explicitly documented otherwise.
+- The checked-in provider compatibility profiles include executable Chutes and
+  NEAR transport profiles, but they are not substitutes for a signed live
+  provider registry and signed deployment reference values.
+- Chutes and NEAR confidential streaming is not yet supported. Their live
+  adapters reject streaming instead of weakening the verified channel.
 - Live provider routes require provider-issued trust artifacts and real evidence
   captures; the checked-in fixtures are not substitutes.
 - Confidential streaming is rejected for the current profiles rather than

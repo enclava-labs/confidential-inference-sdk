@@ -99,8 +99,6 @@
       "display_name": "Gemma 3 27B",
       "family": "Gemma",
       "must_not_match": [
-        "gemma-4-31b",
-        "Gemma 4 31B",
         "Gemma 3 27B Thinking",
         "TEE/gemma-3-27b"
       ],
@@ -120,8 +118,6 @@
       "display_name": "GLM 5",
       "family": "GLM",
       "must_not_match": [
-        "glm-5.1",
-        "GLM 5.1",
         "GLM 5 Thinking",
         "private/glm-5"
       ],
@@ -129,6 +125,205 @@
         {
           "provider": "matrix",
           "provider_model": "e2ee-glm-5-p"
+        },
+        {
+          "provider": "chutes",
+          "provider_model": "zai-org/GLM-5-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "deepseek-v3.2"
+      ],
+      "canonical_model": "deepseek-v3.2",
+      "display_name": "DeepSeek V3.2",
+      "family": "DeepSeek",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "deepseek-ai/DeepSeek-V3.2-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "gemma-4-31b"
+      ],
+      "canonical_model": "gemma-4-31b",
+      "display_name": "Gemma 4 31B",
+      "family": "Gemma",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "google/gemma-4-31B-turbo-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "minimax-m2.5"
+      ],
+      "canonical_model": "minimax-m2.5",
+      "display_name": "MiniMax M2.5",
+      "family": "MiniMax",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "MiniMaxAI/MiniMax-M2.5-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "kimi-k2.5"
+      ],
+      "canonical_model": "kimi-k2.5",
+      "display_name": "Kimi K2.5",
+      "family": "Kimi",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "moonshotai/Kimi-K2.5-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "kimi-k2.6"
+      ],
+      "canonical_model": "kimi-k2.6",
+      "display_name": "Kimi K2.6",
+      "family": "Kimi",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "moonshotai/Kimi-K2.6-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "nemotron-3-nano-omni-30b"
+      ],
+      "canonical_model": "nemotron-3-nano-omni-30b",
+      "display_name": "Nemotron 3 Nano Omni 30B",
+      "family": "Nemotron",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "Nemotron-3-Nano-Omni-30B-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "qwen3-235b-a22b-thinking-2507"
+      ],
+      "canonical_model": "qwen3-235b-a22b-thinking-2507",
+      "display_name": "Qwen3 235B A22B Thinking 2507",
+      "family": "Qwen",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "Qwen/Qwen3-235B-A22B-Thinking-2507-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "qwen3-32b"
+      ],
+      "canonical_model": "qwen3-32b",
+      "display_name": "Qwen3 32B",
+      "family": "Qwen",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "Qwen/Qwen3-32B-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "qwen3.5-397b-a17b"
+      ],
+      "canonical_model": "qwen3.5-397b-a17b",
+      "display_name": "Qwen3.5 397B A17B",
+      "family": "Qwen",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "Qwen/Qwen3.5-397B-A17B-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "qwen3.6-27b"
+      ],
+      "canonical_model": "qwen3.6-27b",
+      "display_name": "Qwen3.6 27B",
+      "family": "Qwen",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "Qwen/Qwen3.6-27B-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "mistral-nemo-instruct-2407"
+      ],
+      "canonical_model": "mistral-nemo-instruct-2407",
+      "display_name": "Mistral Nemo Instruct 2407",
+      "family": "Mistral",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "unsloth/Mistral-Nemo-Instruct-2407-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "glm-5.1"
+      ],
+      "canonical_model": "glm-5.1",
+      "display_name": "GLM 5.1",
+      "family": "GLM",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "zai-org/GLM-5.1-TEE"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "glm-5.2"
+      ],
+      "canonical_model": "glm-5.2",
+      "display_name": "GLM 5.2",
+      "family": "GLM",
+      "must_not_match": [],
+      "provider_routes": [
+        {
+          "provider": "chutes",
+          "provider_model": "zai-org/GLM-5.2-TEE"
         }
       ]
     }

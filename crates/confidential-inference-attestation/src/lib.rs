@@ -31,13 +31,14 @@ pub use aci::{
 pub use canonical::{canonical_digest, canonical_json, sha256_digest, MAX_SAFE_JSON_INT};
 pub use e2ee::{
     chutes_expected_report_data_prefix, chutes_provider_nonce,
-    verify_chutes_e2ee_report_data_binding, ChutesE2eeReportDataBinding,
+    verify_chutes_e2ee_report_data_binding, verify_chutes_live_report_data_binding,
+    ChutesE2eeReportDataBinding, ChutesLiveReportDataBinding,
 };
 pub use error::{AttestationError, Result};
 pub use evidence::{
     parse_dstack_workload_images, ArtifactDigest, ChannelBindingEvidence, ChutesE2eeEvidence,
-    DstackEvidence, EvidenceHardware, FixtureEvidence, NvidiaGpuAttestationEvidence,
-    TinfoilLiveCaptureEvidence, TinfoilTlsEvidence, WorkloadImage,
+    ChutesLiveEvidence, DstackEvidence, EvidenceHardware, FixtureEvidence, NearLiveEvidence,
+    NvidiaGpuAttestationEvidence, TinfoilLiveCaptureEvidence, TinfoilTlsEvidence, WorkloadImage,
 };
 pub use gpu::{
     verify_nvidia_nras_jwt_with_jwks_json, FailClosedGpuAttestationVerifier,
@@ -72,7 +73,7 @@ pub use tdx::{
 pub use tinfoil::{
     decode_tinfoil_attestation_body, parse_tinfoil_live_capture, FailClosedTinfoilQuoteVerifier,
     ParsedTinfoilLiveCapture, TinfoilAttestationDoc, TinfoilAttestationFormat,
-    TinfoilQuoteVerificationRequest, TinfoilQuoteVerifier, VerifiedTinfoilQuote,
+    TinfoilQuoteVerificationRequest, TinfoilQuoteVerifier, VerifiedTdxQuote, VerifiedTinfoilQuote,
     TINFOIL_SEV_SNP_GUEST_V2_FORMAT, TINFOIL_TDX_GUEST_V2_FORMAT,
 };
 pub use tls::{
@@ -89,10 +90,11 @@ pub use verdict::{
 };
 pub use verifier::{
     format_utc_timestamp_millis, parse_utc_timestamp_millis, verify_chutes_e2ee_evidence,
-    verify_chutes_e2ee_evidence_with_gpu_attestation_verifier, verify_dstack_evidence,
+    verify_chutes_e2ee_evidence_with_gpu_attestation_verifier,
+    verify_chutes_live_evidence_with_attestation_verifiers, verify_dstack_evidence,
     verify_evidence, verify_evidence_with_attestation_verifiers,
     verify_evidence_with_gpu_attestation_verifier, verify_evidence_with_tinfoil_quote_verifier,
-    verify_fixture_evidence, verify_tinfoil_live_capture_with_quote_verifier,
-    verify_tinfoil_tls_evidence, verify_tinfoil_tls_evidence_with_quote_verifier,
-    VerificationRequest,
+    verify_fixture_evidence, verify_near_live_evidence_with_attestation_verifiers,
+    verify_tinfoil_live_capture_with_quote_verifier, verify_tinfoil_tls_evidence,
+    verify_tinfoil_tls_evidence_with_quote_verifier, VerificationRequest,
 };

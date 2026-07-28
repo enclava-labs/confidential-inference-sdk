@@ -119,11 +119,35 @@ impl VerifiedTinfoilQuote {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedTdxQuote {
+    pub tee_measurement: String,
+    pub mr_td: String,
+    pub mr_config_id: String,
+    pub rtmr0: String,
+    pub rtmr1: String,
+    pub rtmr2: String,
+    pub rtmr3: String,
+    pub report_data: String,
+    pub issued_at: String,
+    pub expires_at: String,
+    pub expires_at_epoch_ms: u64,
+}
+
 pub trait TinfoilQuoteVerifier: Send + Sync {
     fn verify_tinfoil_quote(
         &self,
         request: &TinfoilQuoteVerificationRequest<'_>,
     ) -> Result<VerifiedTinfoilQuote>;
+
+    /// Verify a raw Intel TDX quote using the same authenticated collateral
+    /// machinery. The default remains fail-closed so existing custom Tinfoil
+    /// verifiers cannot accidentally authorize another provider's evidence.
+    fn verify_tdx_quote(&self, _quote_bytes: &[u8]) -> Result<VerifiedTdxQuote> {
+        Err(AttestationError::InvalidEvidence(
+            "raw TDX quote verification is not configured".into(),
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

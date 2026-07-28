@@ -35,29 +35,37 @@ assert CHECK_SPEC.loader is not None
 CHECK_SPEC.loader.exec_module(check_release_manifest)
 
 
-LIVE_PROVIDER_IDS = ("tinfoil", "venice", "redpill", "phala")
+LIVE_PROVIDER_IDS = ("tinfoil", "venice", "redpill", "chutes", "near", "phala")
 LIVE_COMPATIBILITY_PROVIDER_IDS = {
     "tinfoil": "tinfoil-fixture",
     "venice": "venice-fixture",
     "redpill": "redpill-fixture",
+    "chutes": "chutes",
+    "near": "near",
     "phala": "phala-direct-fixture",
 }
 LIVE_AUTH_ENVS = {
     "tinfoil": "TINFOIL_API_KEY",
     "venice": "VENICE_API_KEY",
     "redpill": "REDPILL_API_KEY",
+    "chutes": "CHUTES_API_KEY",
+    "near": "NEAR_API_KEY",
     "phala": "PHALA_API_KEY",
 }
 LIVE_MODEL_LIST_URLS = {
     "tinfoil": "https://inference.tinfoil.sh/v1/models",
     "venice": "https://api.venice.ai/api/v1/models",
     "redpill": "https://api.redpill.ai/v1/models",
+    "chutes": "https://llm.chutes.ai/v1/models",
+    "near": "https://gpt-oss-120b.completions.near.ai/v1/models",
     "phala": "https://inference.phala.com/v1/models",
 }
 LIVE_ATTESTATION_URLS = {
     "tinfoil": "https://inference.tinfoil.sh/.well-known/tinfoil-attestation",
     "venice": "https://api.venice.ai/api/v1/confidentiality",
     "redpill": "https://api.redpill.ai/v1/attestation/report",
+    "chutes": "https://api.chutes.ai/chutes/test/evidence",
+    "near": "https://gpt-oss-120b.completions.near.ai/v1/attestation/report",
     "phala": "https://inference.phala.com/v1/aci/attestation",
 }
 COMPATIBILITY_FIXTURE_SEED = bytes([47]) * 32
@@ -318,6 +326,8 @@ def production_compatibility_matrix(matrix: dict[str, object]) -> dict[str, obje
         "tinfoil-fixture": "tinfoil_hw_verified_tls_live",
         "venice-fixture": "dstack_app_e2ee_live",
         "redpill-fixture": "chutes_e2ee_gpu_live",
+        "chutes": "chutes_tee_evidence_live",
+        "near": "near_tdx_gpu_tls_live",
         "phala-direct-fixture": "phala_dstack_app_e2ee_live",
     }
     for provider_id, attestation_shape in live_shapes.items():
@@ -332,7 +342,12 @@ def production_compatibility_matrix(matrix: dict[str, object]) -> dict[str, obje
         profile["known_unsupported_modes"] = [
             mode
             for mode in unsupported_modes
-            if mode not in ("live_execution", "live_tdx_quote")
+            if mode
+            not in (
+                "live_execution",
+                "live_tdx_quote",
+                "cryptographic_attestation_verification",
+            )
         ]
     return matrix
 

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("live_conformance.py")
@@ -62,6 +63,39 @@ def tamper_base64url_value(value: str) -> str:
 
 
 class LiveConformanceTests(unittest.TestCase):
+    def test_load_env_file_loads_credentials_without_overwriting_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env_path = Path(temp) / ".env"
+            env_path.write_text(
+                "# provider credentials\n"
+                "CHUTES_API_KEY='chutes-test-key'\n"
+                "export NEAR_API_KEY=\"near-test-key\"\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"CHUTES_API_KEY": "process-key"},
+                clear=False,
+            ):
+                os.environ.pop("NEAR_API_KEY", None)
+
+                loaded = live_conformance.load_env_file(env_path)
+
+                self.assertEqual(loaded, ["NEAR_API_KEY"])
+                self.assertEqual(os.environ["CHUTES_API_KEY"], "process-key")
+                self.assertEqual(os.environ["NEAR_API_KEY"], "near-test-key")
+
+    def test_load_env_file_rejects_invalid_syntax_without_echoing_values(self):
+        secret = "secret-that-must-not-leak"
+        with tempfile.TemporaryDirectory() as temp:
+            env_path = Path(temp) / ".env"
+            env_path.write_text(f"INVALID-NAME={secret}\n", encoding="utf-8")
+
+            with self.assertRaises(live_conformance.LiveConformanceError) as raised:
+                live_conformance.load_env_file(env_path)
+
+        self.assertNotIn(secret, str(raised.exception))
+
     def test_python_canonical_json_matches_rust_policy_vector(self):
         vector = json.loads(Path("fixtures/policy/canonical-vectors.json").read_text())[
             "vectors"
@@ -134,6 +168,22 @@ class LiveConformanceTests(unittest.TestCase):
         self.assertEqual(
             providers_by_id["venice"]["compatibility_profile"]["request_encryption"],
             "required",
+        )
+        self.assertEqual(
+            providers_by_id["near"]["expected_model_ids"],
+            ["openai/gpt-oss-120b"],
+        )
+        self.assertIn(
+            "Qwen/Qwen3-32B-TEE",
+            providers_by_id["chutes"]["expected_model_ids"],
+        )
+        self.assertEqual(
+            providers_by_id["chutes"]["compatibility_profile"]["provider"],
+            "chutes",
+        )
+        self.assertEqual(
+            providers_by_id["near"]["compatibility_profile"]["provider"],
+            "near",
         )
         alias_matrix = report["model_alias_matrix"]
         self.assertEqual(alias_matrix["path"], plan["model_alias_matrix_path"])

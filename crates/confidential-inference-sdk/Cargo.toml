@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22"
 confidential-inference-attestation = { version = "0.1.0", path = "../confidential-inference-attestation" }
 confidential-inference-openai = { version = "0.1.0", path = "../confidential-inference-openai" }
 confidential-inference-providers = { version = "0.1.0", path = "../confidential-inference-providers" }

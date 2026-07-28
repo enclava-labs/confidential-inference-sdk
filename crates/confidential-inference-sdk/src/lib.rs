@@ -1,21 +1,23 @@
+use base64::Engine;
 use confidential_inference_attestation::{
     chutes_provider_nonce, parse_tinfoil_live_capture, sha256_digest,
     verify_evidence_with_attestation_verifiers, ArtifactSignature, AttestationError,
-    AttestationVerdict, AttestedRoute, BoundDataRequirement, ChannelBindingKind, CpuTeeRequirement,
-    EnforcementMode, FailClosedGpuAttestationVerifier, FailClosedTinfoilQuoteVerifier,
-    FreshnessPolicy, GpuAttestationVerifier, GpuTeeRequirement, ModelBindingRequirement,
-    ReferenceValuesEnvelope, ReferenceValuesPayload, ReferenceValuesPin,
-    ResponseIntegrityRequirement, ResponseIntegrityResult, SignatureMetadata, StaleVerdictPolicy,
-    TinfoilAttestationFormat, TinfoilQuoteVerifier, TrustTier, TrustedSigningKey,
-    VerificationPolicy, VerificationRequest,
+    AttestationVerdict, AttestedRoute, BoundDataRequirement, ChannelBindingKind,
+    ChutesLiveEvidence, CpuTeeRequirement, EnforcementMode, FailClosedGpuAttestationVerifier,
+    FailClosedTinfoilQuoteVerifier, FreshnessPolicy, GpuAttestationVerifier, GpuTeeRequirement,
+    ModelBindingRequirement, NearLiveEvidence, ReferenceValuesEnvelope, ReferenceValuesPayload,
+    ReferenceValuesPin, ResponseIntegrityRequirement, ResponseIntegrityResult, SignatureMetadata,
+    StaleVerdictPolicy, TinfoilAttestationFormat, TinfoilQuoteVerifier, TrustTier,
+    TrustedSigningKey, VerificationPolicy, VerificationRequest,
 };
 use confidential_inference_openai::{
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Model, ModelList,
     ResponseCompatibilityError, ResponseCreateRequest, ResponseInput, ResponseObject,
 };
 use confidential_inference_providers::{
-    ConfidentialHttpProvider, DcapTdxCollateralResolver, DemoProvider, EncryptionRequirement,
-    EvidenceRequest, ModelBindingSupport, OpenAiEndpoint, OpenAiHttpProvider, ProviderAdapter,
+    ChutesHttpProvider, ConfidentialHttpProvider, DcapTdxCollateralResolver, DemoProvider,
+    EncryptionRequirement, EvidenceRequest, ModelBindingSupport, NearHttpProvider,
+    NvidiaNrasRemoteClient, OpenAiEndpoint, OpenAiHttpProvider, ProviderAdapter,
     ProviderCompatibility, ProviderCompatibilityMatrix, ProviderError, ProviderRegistry,
     ProviderRegistryEnvelope, ProviderRegistryPin, RegistryModel, RouteDefinition,
     RouteExecutionStatus, RouteLifecycle, TinfoilHttpProvider,
@@ -700,6 +702,7 @@ struct ClientInner {
     adapters: BTreeMap<String, Arc<dyn ProviderAdapter>>,
     tinfoil_quote_verifier: Arc<dyn TinfoilQuoteVerifier>,
     gpu_attestation_verifier: Arc<dyn GpuAttestationVerifier>,
+    gpu_attestation_verifier_is_custom: bool,
     tinfoil_dcap_tdx_collateral_resolver: Option<DcapTdxCollateralResolver>,
     time_source: TimeSource,
     audit_sink: Arc<dyn AuditSink>,
@@ -2088,6 +2091,9 @@ impl ConfidentialInference {
                 attested_route,
             )
             .await?;
+        let gpu_attestation_verifier = self
+            .gpu_attestation_verifier_for_raw_evidence(&raw_evidence)
+            .await?;
         let verification = VerificationRequest {
             route: attested_route.clone(),
             route_execution_status,
@@ -2121,7 +2127,7 @@ impl ConfidentialInference {
         let verdict = verify_evidence_with_attestation_verifiers(
             verification,
             tinfoil_quote_verifier.as_ref(),
-            self.inner.gpu_attestation_verifier.as_ref(),
+            gpu_attestation_verifier.as_ref(),
         );
         self.record_latency(
             ConfidentialInferenceRouteMetricLabels::from_route(route_definition, attested_route),
@@ -2149,31 +2155,20 @@ impl ConfidentialInference {
             tracing::debug!("using configured generic Tinfoil quote verifier");
             return Ok(self.inner.tinfoil_quote_verifier.clone());
         };
-        if raw_schema(raw_evidence).as_deref()
-            != Some(confidential_inference_attestation::TinfoilLiveCaptureEvidence::SCHEMA)
-        {
-            tracing::debug!("raw evidence is not a live Tinfoil capture");
+        let Some(quote_bytes) = raw_tdx_quote_bytes(raw_evidence)? else {
+            tracing::debug!("raw evidence does not contain a supported live TDX quote");
             return Ok(self.inner.tinfoil_quote_verifier.clone());
-        }
+        };
 
-        let parsed = parse_tinfoil_live_capture(raw_evidence)?;
-        if parsed.attestation_format != TinfoilAttestationFormat::TdxGuestV2 {
-            tracing::debug!(
-                attestation_format = %parsed.attestation_format.as_str(),
-                "live Tinfoil capture is not TDX"
-            );
-            return Ok(self.inner.tinfoil_quote_verifier.clone());
-        }
-
-        let quote_digest = sha256_digest(&parsed.quote_bytes);
+        let quote_digest = sha256_digest(&quote_bytes);
         let resolver_started_at = Instant::now();
         let verifier = resolver
-            .verifier_for_quote_at(&parsed.quote_bytes, self.now_epoch_millis())
+            .verifier_for_quote_at(&quote_bytes, self.now_epoch_millis())
             .instrument(tracing::info_span!(
                 "confidential-inference.tinfoil_dcap_tdx_collateral_resolve",
-                provider = %parsed.capture.provider,
-                route_id = %parsed.capture.route_id,
-                evidence_family = %parsed.capture.evidence_family,
+                provider = %attested_route.provider,
+                route_id = %attested_route.route_id,
+                evidence_family = %attested_route.evidence_family,
                 quote_sha256 = %quote_digest
             ))
             .await;
@@ -2185,6 +2180,29 @@ impl ConfidentialInference {
         );
         let verifier = verifier?;
         tracing::debug!(quote_sha256 = %quote_digest, "using DCAP TDX quote verifier");
+        Ok(Arc::new(verifier))
+    }
+
+    async fn gpu_attestation_verifier_for_raw_evidence(
+        &self,
+        raw_evidence: &[u8],
+    ) -> Result<Arc<dyn GpuAttestationVerifier>> {
+        if self.inner.gpu_attestation_verifier_is_custom
+            || matches!(
+                &self.inner.policy.hardware.gpu,
+                GpuTeeRequirement::NotRequired
+            )
+            || !matches!(
+                raw_schema(raw_evidence).as_deref(),
+                Some(ChutesLiveEvidence::SCHEMA) | Some(NearLiveEvidence::SCHEMA)
+            )
+        {
+            return Ok(self.inner.gpu_attestation_verifier.clone());
+        }
+
+        let verifier = NvidiaNrasRemoteClient::with_default_http()?
+            .fetch_jwt_verifier()
+            .await?;
         Ok(Arc::new(verifier))
     }
 
@@ -2525,8 +2543,82 @@ fn raw_schema(raw: &[u8]) -> Option<String> {
         })
 }
 
+fn raw_tdx_quote_bytes(raw: &[u8]) -> Result<Option<Vec<u8>>> {
+    match raw_schema(raw).as_deref() {
+        Some(confidential_inference_attestation::TinfoilLiveCaptureEvidence::SCHEMA) => {
+            let parsed = parse_tinfoil_live_capture(raw)?;
+            if parsed.attestation_format == TinfoilAttestationFormat::TdxGuestV2 {
+                Ok(Some(parsed.quote_bytes))
+            } else {
+                Ok(None)
+            }
+        }
+        Some(ChutesLiveEvidence::SCHEMA) => {
+            let capture: ChutesLiveEvidence = serde_json::from_slice(raw).map_err(|error| {
+                AttestationError::InvalidEvidence(format!(
+                    "invalid Chutes live evidence capture: {error}"
+                ))
+            })?;
+            let quote = base64::engine::general_purpose::STANDARD
+                .decode(&capture.quote_base64)
+                .map_err(|error| {
+                    AttestationError::InvalidEvidence(format!(
+                        "Chutes TDX quote is not base64: {error}"
+                    ))
+                })?;
+            Ok(Some(quote))
+        }
+        Some(NearLiveEvidence::SCHEMA) => {
+            let capture: NearLiveEvidence = serde_json::from_slice(raw).map_err(|error| {
+                AttestationError::InvalidEvidence(format!(
+                    "invalid NEAR live evidence capture: {error}"
+                ))
+            })?;
+            let body = base64::engine::general_purpose::STANDARD
+                .decode(&capture.raw_attestation_body_base64)
+                .map_err(|error| {
+                    AttestationError::InvalidEvidence(format!(
+                        "NEAR raw attestation body is not base64: {error}"
+                    ))
+                })?;
+            let value: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+                AttestationError::InvalidEvidence(format!(
+                    "NEAR raw attestation body is not JSON: {error}"
+                ))
+            })?;
+            let quote_hex = value
+                .get("intel_quote")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    AttestationError::InvalidEvidence(
+                        "NEAR raw attestation body has no intel_quote".into(),
+                    )
+                })?;
+            Ok(Some(decode_hex_bytes("NEAR TDX quote", quote_hex)?))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn decode_hex_bytes(field: &str, value: &str) -> std::result::Result<Vec<u8>, AttestationError> {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "{field} is not canonical hex"
+        )));
+    }
+    Ok(value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16).expect("validated hex") as u8;
+            let low = (pair[1] as char).to_digit(16).expect("validated hex") as u8;
+            (high << 4) | low
+        })
+        .collect())
+}
+
 fn fresh_evidence_nonce() -> String {
-    let mut bytes = [0_u8; 16];
+    let mut bytes = [0_u8; 32];
     OsRng.fill_bytes(&mut bytes);
     lower_hex(&bytes)
 }
@@ -2903,6 +2995,7 @@ pub struct ConfidentialInferenceBuilder {
     adapters: BTreeMap<String, Arc<dyn ProviderAdapter>>,
     tinfoil_quote_verifier: Arc<dyn TinfoilQuoteVerifier>,
     gpu_attestation_verifier: Arc<dyn GpuAttestationVerifier>,
+    gpu_attestation_verifier_is_custom: bool,
     tinfoil_dcap_tdx_collateral_resolver: Option<DcapTdxCollateralResolver>,
     time_source: TimeSource,
     audit_sink: Arc<dyn AuditSink>,
@@ -2926,6 +3019,7 @@ impl ConfidentialInferenceBuilder {
             adapters: BTreeMap::new(),
             tinfoil_quote_verifier: Arc::new(FailClosedTinfoilQuoteVerifier),
             gpu_attestation_verifier: Arc::new(FailClosedGpuAttestationVerifier),
+            gpu_attestation_verifier_is_custom: false,
             tinfoil_dcap_tdx_collateral_resolver: None,
             time_source: Arc::new(now_epoch_millis),
             audit_sink: Arc::new(NoopAuditSink),
@@ -3127,6 +3221,7 @@ impl ConfidentialInferenceBuilder {
         V: GpuAttestationVerifier + 'static,
     {
         self.gpu_attestation_verifier = Arc::new(verifier);
+        self.gpu_attestation_verifier_is_custom = true;
         self
     }
 
@@ -3135,6 +3230,7 @@ impl ConfidentialInferenceBuilder {
         verifier: Arc<dyn GpuAttestationVerifier>,
     ) -> Self {
         self.gpu_attestation_verifier = verifier;
+        self.gpu_attestation_verifier_is_custom = true;
         self
     }
 
@@ -3221,6 +3317,22 @@ impl ConfidentialInferenceBuilder {
         compatibility_matrix.validate_registry_routes(&registry)?;
         let mut adapters = self.adapters;
         install_default_credential_adapters(&registry, &self.api_keys, &mut adapters)?;
+        let needs_live_tdx_collateral = registry.models.values().any(|model| {
+            model.routes.iter().any(|route| {
+                route.route_status == RouteLifecycle::Active
+                    && matches!(
+                        route.evidence_family.as_str(),
+                        "chutes_live_e2ee" | "near_hw_verified_tls"
+                    )
+            })
+        });
+        let tinfoil_dcap_tdx_collateral_resolver = match self.tinfoil_dcap_tdx_collateral_resolver {
+            Some(resolver) => Some(resolver),
+            None if needs_live_tdx_collateral => {
+                Some(DcapTdxCollateralResolver::with_phala_pccs()?)
+            }
+            None => None,
+        };
         validate_provider_routing(
             &self.provider_routing,
             &registry,
@@ -3255,7 +3367,8 @@ impl ConfidentialInferenceBuilder {
                 adapters,
                 tinfoil_quote_verifier: self.tinfoil_quote_verifier,
                 gpu_attestation_verifier: self.gpu_attestation_verifier,
-                tinfoil_dcap_tdx_collateral_resolver: self.tinfoil_dcap_tdx_collateral_resolver,
+                gpu_attestation_verifier_is_custom: self.gpu_attestation_verifier_is_custom,
+                tinfoil_dcap_tdx_collateral_resolver,
                 time_source,
                 audit_sink: self.audit_sink,
                 verdict_store: self.verdict_store,
@@ -3282,7 +3395,27 @@ fn install_default_credential_adapters(
             continue;
         }
 
-        let adapter: Arc<dyn ProviderAdapter> = if provider_id == "tinfoil" {
+        let adapter: Arc<dyn ProviderAdapter> = if provider_id == "chutes"
+            && routes
+                .iter()
+                .any(|route| route.evidence_family == "chutes_live_e2ee")
+        {
+            Arc::new(ChutesHttpProvider::new(
+                provider_id,
+                routes,
+                api_key.expose().to_owned(),
+            )?)
+        } else if provider_id == "near"
+            && routes
+                .iter()
+                .any(|route| route.evidence_family == "near_hw_verified_tls")
+        {
+            Arc::new(NearHttpProvider::new(
+                provider_id,
+                routes,
+                api_key.expose().to_owned(),
+            )?)
+        } else if provider_id == "tinfoil" {
             Arc::new(TinfoilHttpProvider::with_provider_id(
                 provider_id,
                 routes,
@@ -4835,6 +4968,7 @@ mod tests {
                 adapters,
                 tinfoil_quote_verifier: Arc::new(FailClosedTinfoilQuoteVerifier),
                 gpu_attestation_verifier: Arc::new(FailClosedGpuAttestationVerifier),
+                gpu_attestation_verifier_is_custom: false,
                 tinfoil_dcap_tdx_collateral_resolver: None,
                 time_source: Arc::new(now_epoch_millis),
                 audit_sink: Arc::new(NoopAuditSink),
@@ -5316,6 +5450,7 @@ mod tests {
                 request_encryption: EncryptionRequirement::Required,
                 response_decryption: EncryptionRequirement::Required,
                 sdk_app_e2ee: Some(secret_key.public_config().unwrap()),
+                adapter_managed_encryption: false,
                 attestation_endpoint_shape: "dstack_app_e2ee_http_test".into(),
                 required_credentials: Vec::new(),
                 freshness_class: FreshnessClass::PerSession,
@@ -5618,6 +5753,7 @@ mod tests {
                 request_encryption: EncryptionRequirement::Required,
                 response_decryption: EncryptionRequirement::Required,
                 sdk_app_e2ee: Some(secret_key.public_config().unwrap()),
+                adapter_managed_encryption: false,
                 attestation_endpoint_shape: "phala_dstack_app_e2ee_http_test".into(),
                 required_credentials: vec![CredentialKind::BearerToken],
                 freshness_class: FreshnessClass::PerSession,
@@ -5843,6 +5979,7 @@ mod tests {
                 request_encryption: EncryptionRequirement::Required,
                 response_decryption: EncryptionRequirement::Required,
                 sdk_app_e2ee: None,
+                adapter_managed_encryption: false,
                 attestation_endpoint_shape: "chutes_e2ee_http_test".into(),
                 required_credentials: Vec::new(),
                 freshness_class: FreshnessClass::PerSession,
@@ -8924,7 +9061,7 @@ mod tests {
         let second = nonces[1].as_deref().expect("second fetch missing nonce");
         assert_ne!(first, second);
         for nonce in [first, second] {
-            assert_eq!(nonce.len(), 32);
+            assert_eq!(nonce.len(), 64);
             assert!(nonce.chars().all(|ch| ch.is_ascii_hexdigit()));
             assert_eq!(nonce, nonce.to_ascii_lowercase());
         }

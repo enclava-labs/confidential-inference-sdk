@@ -47,6 +47,41 @@
       "model_list_url": "https://api.redpill.ai/v1/models"
     },
     {
+      "attestation_url": "https://api.chutes.ai/chutes/ac059e33-eb27-541c-b9a9-24b214036475/evidence?nonce=0000000000000000000000000000000000000000000000000000000000000000",
+      "auth_env": "CHUTES_API_KEY",
+      "compatibility_provider": "chutes",
+      "enabled": false,
+      "expected_attestation": {
+        "content_type_contains": "application/json",
+        "json_fields": [
+          "evidence",
+          "failed_instance_ids"
+        ]
+      },
+      "expected_model_ids_from_alias_matrix": true,
+      "id": "chutes",
+      "model_list_url": "https://llm.chutes.ai/v1/models"
+    },
+    {
+      "attestation_url": "https://gpt-oss-120b.completions.near.ai/v1/attestation/report?signing_algo=ecdsa&nonce=0000000000000000000000000000000000000000000000000000000000000000&include_tls_fingerprint=true",
+      "auth_env": "NEAR_API_KEY",
+      "compatibility_provider": "near",
+      "enabled": false,
+      "expected_attestation": {
+        "content_type_contains": "application/json",
+        "json_fields": [
+          "intel_quote",
+          "nvidia_payload",
+          "request_nonce",
+          "signing_address",
+          "tls_cert_fingerprint"
+        ]
+      },
+      "expected_model_ids_from_alias_matrix": true,
+      "id": "near",
+      "model_list_url": "https://gpt-oss-120b.completions.near.ai/v1/models"
+    },
+    {
       "attestation_url": "https://inference.phala.com/v1/aci/attestation",
       "auth_env": "PHALA_API_KEY",
       "compatibility_provider": "phala-direct-fixture",

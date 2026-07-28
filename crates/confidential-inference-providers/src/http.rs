@@ -121,10 +121,20 @@ impl OpenAiHttpProvider {
         request: &ProviderChatRequest,
     ) -> Result<HttpResponseCapture> {
         ensure_route_provider(route, &self.provider_id)?;
-        if request.confidentiality() == &ProviderRequestConfidentiality::FixtureEncrypted {
-            return Err(ProviderError::Adapter(
-                "fixture-encrypted requests cannot be sent through live HTTP providers".into(),
-            ));
+        match request.confidentiality() {
+            ProviderRequestConfidentiality::FixtureEncrypted => {
+                return Err(ProviderError::Adapter(
+                    "fixture-encrypted requests cannot be sent through live HTTP providers".into(),
+                ));
+            }
+            ProviderRequestConfidentiality::AdapterManagedEncrypted => {
+                return Err(ProviderError::Adapter(
+                    "adapter-managed encrypted requests require a provider-specific live adapter"
+                        .into(),
+                ));
+            }
+            ProviderRequestConfidentiality::Plaintext
+            | ProviderRequestConfidentiality::SdkEncrypted => {}
         }
         let url = chat_completions_url(&route.api_base_url)?;
         let response = self
@@ -392,9 +402,9 @@ struct HttpResponseCapture {
 }
 
 #[derive(Clone, Debug)]
-struct LiveTlsPeer {
-    spki_sha256: String,
-    leaf_certificate_der: Vec<u8>,
+pub(crate) struct LiveTlsPeer {
+    pub(crate) spki_sha256: String,
+    pub(crate) leaf_certificate_der: Vec<u8>,
 }
 
 fn ensure_route_provider(route: &RouteDefinition, provider: &str) -> Result<()> {
@@ -456,7 +466,10 @@ async fn capture_response(
     Ok(HttpResponseCapture { body, tls_peer })
 }
 
-async fn checked_response_bytes(response: reqwest::Response, operation: &str) -> Result<Vec<u8>> {
+pub(crate) async fn checked_response_bytes(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<Vec<u8>> {
     let status = response.status();
     let body = response
         .bytes()
@@ -487,7 +500,10 @@ fn response_tls_peer(response: &reqwest::Response) -> Result<Option<LiveTlsPeer>
     }))
 }
 
-fn require_tls_peer(response: &reqwest::Response, operation: &str) -> Result<LiveTlsPeer> {
+pub(crate) fn require_tls_peer(
+    response: &reqwest::Response,
+    operation: &str,
+) -> Result<LiveTlsPeer> {
     response_tls_peer(response)?.ok_or_else(|| {
         ProviderError::Compatibility(format!("{operation} did not expose a live TLS certificate"))
     })
@@ -791,6 +807,26 @@ mod tests {
             .to_string();
 
         assert!(error.contains("fixture-encrypted requests cannot be sent"));
+    }
+
+    #[tokio::test]
+    async fn openai_http_provider_rejects_adapter_managed_encrypted_requests() {
+        let route = http_route("http://127.0.0.1:9");
+        let provider = OpenAiHttpProvider::new("tinfoil-http-test", vec![route.clone()]).unwrap();
+
+        let error = provider
+            .chat(
+                &route,
+                ProviderChatRequest::adapter_managed_encrypt(json!({
+                    "model": "llama-3.3-70b",
+                    "messages": [{"role": "user", "content": "hello"}]
+                })),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("provider-specific live adapter"));
     }
 
     #[tokio::test]

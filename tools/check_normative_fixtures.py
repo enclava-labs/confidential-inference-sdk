@@ -33,7 +33,7 @@ PRODUCTION_EXECUTABLE_ROUTE_STATUS = "executable"
 TINFOIL_FIXTURE_ATTESTATION_SHAPE = "tinfoil_tls_fixture"
 TINFOIL_LIVE_TDX_UNSUPPORTED_MODE = "live_tdx_quote"
 FIXTURE_ONLY_COMPATIBILITY_PROFILE_PATTERNS = {
-    "chutes": "Chutes/Redpill E2EE+GPU",
+    "chutes_e2ee_gpu_fixture": "Chutes/Redpill E2EE+GPU",
     "phala": "Direct Phala dstack",
     "ehbp": "PPQ EHBP",
 }

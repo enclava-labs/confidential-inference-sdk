@@ -76,6 +76,25 @@ impl ProviderCompatibilityMatrix {
                     "provider {provider_id} does not support chat completions"
                 )));
             }
+            if provider.adapter_managed_encryption {
+                if provider.route_execution_status != RouteExecutionStatus::Executable {
+                    return Err(ProviderError::Compatibility(format!(
+                        "provider {provider_id} enables adapter-managed encryption but is not executable"
+                    )));
+                }
+                if provider.request_encryption != EncryptionRequirement::Required
+                    || provider.response_decryption != EncryptionRequirement::Required
+                {
+                    return Err(ProviderError::Compatibility(format!(
+                        "provider {provider_id} enables adapter-managed encryption without requiring encrypted requests and responses"
+                    )));
+                }
+                if provider.sdk_app_e2ee.is_some() {
+                    return Err(ProviderError::Compatibility(format!(
+                        "provider {provider_id} selects both SDK-managed and adapter-managed encryption"
+                    )));
+                }
+            }
             seen_api_bases.insert(provider.api_base_url.clone());
         }
 
@@ -198,6 +217,8 @@ pub struct ProviderCompatibility {
     pub response_decryption: EncryptionRequirement,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdk_app_e2ee: Option<SdkAppE2eeConfig>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub adapter_managed_encryption: bool,
     pub attestation_endpoint_shape: String,
     pub required_credentials: Vec<CredentialKind>,
     pub freshness_class: FreshnessClass,
@@ -310,6 +331,9 @@ impl ProviderCompatibility {
             ChatRequestConfidentiality::SdkEncrypted(config) => {
                 ProviderChatRequest::sdk_encrypt(route, body, config)
             }
+            ChatRequestConfidentiality::AdapterManagedEncrypted => {
+                Ok(ProviderChatRequest::adapter_managed_encrypt(body))
+            }
         }
     }
 
@@ -354,16 +378,18 @@ impl ProviderCompatibility {
                 "provider {} is verification-only until SDK-managed app encryption is implemented",
                 self.provider
             ))),
-            RouteExecutionStatus::Executable => self
-                .sdk_app_e2ee
-                .as_ref()
-                .map(ChatRequestConfidentiality::SdkEncrypted)
-                .ok_or_else(|| {
-                    ProviderError::Compatibility(format!(
-                        "provider {} requires an SDK-managed app encryption profile before encrypted chat execution",
+            RouteExecutionStatus::Executable => {
+                if let Some(config) = self.sdk_app_e2ee.as_ref() {
+                    Ok(ChatRequestConfidentiality::SdkEncrypted(config))
+                } else if self.adapter_managed_encryption {
+                    Ok(ChatRequestConfidentiality::AdapterManagedEncrypted)
+                } else {
+                    Err(ProviderError::Compatibility(format!(
+                        "provider {} requires SDK-managed app encryption or an explicit adapter-managed encryption profile",
                         self.provider
-                    ))
-                }),
+                    )))
+                }
+            }
         }
     }
 }
@@ -372,6 +398,11 @@ enum ChatRequestConfidentiality<'a> {
     Plaintext,
     FixtureEncrypted,
     SdkEncrypted(&'a SdkAppE2eeConfig),
+    AdapterManagedEncrypted,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn reject_url_credentials(
@@ -488,7 +519,7 @@ mod tests {
     use confidential_inference_openai::ChatMessage;
 
     const COMPATIBILITY_MATRIX_DIGEST: &str =
-        "sha256:1a39eb4b2cad6c6abcb6703e905e41f80b5dce8c33937b9caa8fb60399bf576a";
+        "sha256:5008d0d601c359aa0c1aa4effd6988e3e4830abdfc9166b6dc8fb296bc2ed4fa";
 
     #[test]
     fn bundled_compatibility_matrix_validates() {
@@ -500,6 +531,8 @@ mod tests {
         assert!(matrix.provider("venice-fixture").is_ok());
         assert!(matrix.provider("phala-direct-fixture").is_ok());
         assert!(matrix.provider("redpill-fixture").is_ok());
+        assert!(matrix.provider("chutes").is_ok());
+        assert!(matrix.provider("near").is_ok());
         assert!(matrix.provider("ppq-private-fixture").is_ok());
     }
 
@@ -798,6 +831,23 @@ mod tests {
         let (decrypted, _) = request.sdk_decrypted_body(route, &secret_key).unwrap();
         assert_eq!(decrypted["model"], "e2ee-gpt-oss-120b-p");
         assert_eq!(decrypted["max_tokens"], 64);
+    }
+
+    #[test]
+    fn executable_adapter_managed_route_requires_explicit_profile_and_adapter() {
+        let matrix = ProviderCompatibilityMatrix::bundled().unwrap();
+        let provider = matrix.provider("chutes").unwrap();
+        let request = provider
+            .adapt_chat_request(
+                &fixture_route("chutes", "Qwen/Qwen3-32B-TEE", "https://llm.chutes.ai/v1"),
+                &chat_request(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            request.confidentiality(),
+            &ProviderRequestConfidentiality::AdapterManagedEncrypted
+        );
     }
 
     #[test]

@@ -2,7 +2,8 @@ use crate::{
     format_utc_timestamp_millis, parse_utc_timestamp_millis, sha256_digest,
     verify_artifact_signature, verify_artifact_signature_with_keys, ArtifactSignature,
     AttestationError, CpuTeeKind, EvidenceHardware, Result, TinfoilAttestationFormat,
-    TinfoilQuoteVerificationRequest, TinfoilQuoteVerifier, TrustedSigningKey, VerifiedTinfoilQuote,
+    TinfoilQuoteVerificationRequest, TinfoilQuoteVerifier, TrustedSigningKey, VerifiedTdxQuote,
+    VerifiedTinfoilQuote,
 };
 use dcap_qvl::{
     quote::{Quote, Report, TDReport10},
@@ -315,22 +316,38 @@ impl TinfoilQuoteVerifier for DcapTdxTinfoilQuoteVerifier {
         &self,
         request: &TinfoilQuoteVerificationRequest<'_>,
     ) -> Result<VerifiedTinfoilQuote> {
-        let quote_digest = sha256_digest(request.quote_bytes);
-        let _span = tracing::info_span!(
-            "confidential-inference.tdx_dcap.quote_verify",
-            attestation_format = %request.attestation_format.as_str(),
-            quote_sha256 = %quote_digest,
-            quote_bytes = request.quote_bytes.len(),
-            now_epoch_millis = self.now_epoch_millis
-        )
-        .entered();
         if request.attestation_format != TinfoilAttestationFormat::TdxGuestV2 {
             return Err(AttestationError::InvalidEvidence(format!(
                 "DCAP TDX verifier cannot verify {} Tinfoil captures",
                 request.attestation_format.quote_kind()
             )));
         }
+        let verified = self.verify_tdx_quote(request.quote_bytes)?;
 
+        Ok(VerifiedTinfoilQuote::from_verified_quote(
+            TinfoilAttestationFormat::TdxGuestV2,
+            EvidenceHardware {
+                cpu: CpuTeeKind::Tdx,
+                gpu: None,
+            },
+            verified.tee_measurement,
+            verified.report_data,
+            verified.issued_at,
+            verified.expires_at,
+            verified.expires_at_epoch_ms,
+        ))
+    }
+
+    fn verify_tdx_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedTdxQuote> {
+        let quote_digest = sha256_digest(quote_bytes);
+        let _span = tracing::info_span!(
+            "confidential-inference.tdx_dcap.quote_verify",
+            attestation_format = "intel-tdx-dcap",
+            quote_sha256 = %quote_digest,
+            quote_bytes = quote_bytes.len(),
+            now_epoch_millis = self.now_epoch_millis
+        )
+        .entered();
         let expires_at_epoch_ms = self.collateral_valid_until_epoch_millis()?;
         if self.now_epoch_millis >= expires_at_epoch_ms {
             return Err(AttestationError::InvalidEvidence(format!(
@@ -338,13 +355,8 @@ impl TinfoilQuoteVerifier for DcapTdxTinfoilQuoteVerifier {
                 format_utc_timestamp_millis(expires_at_epoch_ms)
             )));
         }
-
         let verified = catch_unwind(AssertUnwindSafe(|| {
-            dcap_qvl::verify::verify(
-                request.quote_bytes,
-                &self.collateral,
-                self.now_epoch_millis / 1000,
-            )
+            dcap_qvl::verify::verify(quote_bytes, &self.collateral, self.now_epoch_millis / 1000)
         }))
         .map_err(|_| {
             AttestationError::InvalidEvidence("TDX DCAP quote verification panicked".into())
@@ -371,7 +383,7 @@ impl TinfoilQuoteVerifier for DcapTdxTinfoilQuoteVerifier {
             )));
         }
 
-        let quote = Quote::parse(request.quote_bytes).map_err(|err| {
+        let quote = Quote::parse(quote_bytes).map_err(|err| {
             AttestationError::InvalidEvidence(format!("TDX quote parse failed: {err}"))
         })?;
         let report = tdx_report(&quote)?;
@@ -381,18 +393,19 @@ impl TinfoilQuoteVerifier for DcapTdxTinfoilQuoteVerifier {
             "TDX DCAP quote verified"
         );
 
-        Ok(VerifiedTinfoilQuote::from_verified_quote(
-            TinfoilAttestationFormat::TdxGuestV2,
-            EvidenceHardware {
-                cpu: CpuTeeKind::Tdx,
-                gpu: None,
-            },
-            format!("tdx:mr_td:{}", hex_bytes(&report.mr_td)),
-            hex_bytes(&report.report_data),
-            format_utc_timestamp_millis(self.now_epoch_millis),
-            format_utc_timestamp_millis(expires_at_epoch_ms),
+        Ok(VerifiedTdxQuote {
+            tee_measurement: format!("tdx:mr_td:{}", hex_bytes(&report.mr_td)),
+            mr_td: hex_bytes(&report.mr_td),
+            mr_config_id: hex_bytes(&report.mr_config_id),
+            rtmr0: hex_bytes(&report.rt_mr0),
+            rtmr1: hex_bytes(&report.rt_mr1),
+            rtmr2: hex_bytes(&report.rt_mr2),
+            rtmr3: hex_bytes(&report.rt_mr3),
+            report_data: hex_bytes(&report.report_data),
+            issued_at: format_utc_timestamp_millis(self.now_epoch_millis),
+            expires_at: format_utc_timestamp_millis(expires_at_epoch_ms),
             expires_at_epoch_ms,
-        ))
+        })
     }
 }
 

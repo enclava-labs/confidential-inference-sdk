@@ -267,6 +267,34 @@ impl ChutesE2eeEvidence {
     pub const SCHEMA: &'static str = "confidential-inference.chutes-e2ee-evidence.v1";
 }
 
+/// A verifier-originated capture of Chutes' production single-instance TEE
+/// evidence. The dynamic ML-KEM key is deliberately carried in the evidence
+/// instead of pinned as a static route reference: the verified TDX quote binds
+/// the fresh challenge, that key, and the instance certificate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChutesLiveEvidence {
+    pub schema: String,
+    pub provider: String,
+    pub route_id: String,
+    pub evidence_family: String,
+    pub requested_model: String,
+    pub policy_digest: String,
+    pub request_nonce: String,
+    pub evidence_endpoint: String,
+    pub chute_id: String,
+    pub instance_id: String,
+    pub e2e_public_key_base64: String,
+    pub quote_base64: String,
+    pub certificate_der_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_attestation: Option<NvidiaGpuAttestationEvidence>,
+}
+
+impl ChutesLiveEvidence {
+    pub const SCHEMA: &'static str = "confidential-inference.chutes-live-evidence.v1";
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TinfoilLiveCaptureEvidence {
@@ -286,6 +314,30 @@ pub struct TinfoilLiveCaptureEvidence {
 
 impl TinfoilLiveCaptureEvidence {
     pub const SCHEMA: &'static str = "confidential-inference.tinfoil-live-capture.v1";
+}
+
+/// A capture of NEAR AI Cloud's direct-endpoint TDX report and the leaf
+/// certificate observed on the same TLS exchange.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NearLiveEvidence {
+    pub schema: String,
+    pub provider: String,
+    pub route_id: String,
+    pub evidence_family: String,
+    pub requested_model: String,
+    pub policy_digest: String,
+    pub request_nonce: String,
+    pub evidence_endpoint: String,
+    pub live_tls_spki_sha256: String,
+    pub live_tls_leaf_certificate_der_base64: String,
+    pub raw_attestation_body_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_attestation: Option<NvidiaGpuAttestationEvidence>,
+}
+
+impl NearLiveEvidence {
+    pub const SCHEMA: &'static str = "confidential-inference.near-live-evidence.v1";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

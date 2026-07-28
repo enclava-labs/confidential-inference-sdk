@@ -15,6 +15,8 @@ import datetime
 import hashlib
 import json
 import os
+import re
+import shlex
 import sys
 import time
 import urllib.error
@@ -40,6 +42,7 @@ BASE64URL_NO_PAD_ALPHABET = set(
 )
 ED25519_SIGNATURE_BYTE_LEN = 64
 MAX_SAFE_JSON_INT = 9_007_199_254_740_991
+ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 COMPATIBILITY_REQUIRED_STRING_FIELDS = (
     "route_execution_status",
     "api_base_url",
@@ -102,6 +105,7 @@ COMPATIBILITY_PROFILE_REPORT_FIELDS = (
     "streaming",
     "request_encryption",
     "response_decryption",
+    "adapter_managed_encryption",
     "supported_openai_endpoints",
     "attestation_endpoint_shape",
     "required_credentials",
@@ -205,6 +209,49 @@ class HttpClient:
                 headers={key.lower(): value for key, value in response.headers.items()},
                 body=response.read(),
             )
+
+
+def load_env_file(path: Path) -> list[str]:
+    """Load dotenv-style values without overwriting the process environment."""
+    loaded: list[str] = []
+    for line_number, source_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        line = source_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            raise LiveConformanceError(
+                f"{path}:{line_number} must use NAME=VALUE dotenv syntax"
+            )
+        name, raw_value = line.split("=", 1)
+        name = name.strip()
+        if not ENV_NAME_PATTERN.fullmatch(name):
+            raise LiveConformanceError(
+                f"{path}:{line_number} has an invalid environment variable name"
+            )
+        raw_value = raw_value.strip()
+        if raw_value.startswith(("'", '"')):
+            try:
+                parsed = shlex.split(raw_value, comments=False, posix=True)
+            except ValueError as error:
+                raise LiveConformanceError(
+                    f"{path}:{line_number} has an invalid quoted value"
+                ) from error
+            if len(parsed) != 1:
+                raise LiveConformanceError(
+                    f"{path}:{line_number} has an invalid quoted value"
+                )
+            value = parsed[0]
+        else:
+            value = raw_value
+        if name not in os.environ:
+            os.environ[name] = value
+            loaded.append(name)
+    return loaded
 
 
 def load_plan(path: Path) -> dict[str, Any]:
@@ -658,6 +705,21 @@ def _validate_compatibility_profile(provider_id: str, profile: dict[str, Any]) -
     if "chat_completions" not in profile["supported_openai_endpoints"]:
         raise LiveConformanceError(
             f"compatibility matrix provider {provider_id} must support chat_completions"
+        )
+    adapter_managed_encryption = profile.get("adapter_managed_encryption", False)
+    if not isinstance(adapter_managed_encryption, bool):
+        raise LiveConformanceError(
+            f"compatibility matrix provider {provider_id} field "
+            "adapter_managed_encryption must be boolean"
+        )
+    if adapter_managed_encryption and (
+        profile["route_execution_status"] != "executable"
+        or profile["request_encryption"] != "required"
+        or profile["response_decryption"] != "required"
+    ):
+        raise LiveConformanceError(
+            f"compatibility matrix provider {provider_id} enables adapter-managed "
+            "encryption without an executable encrypted request/response profile"
         )
     if (
         profile["streaming"] == "unsupported"
@@ -1130,6 +1192,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Actually call configured live provider endpoints.",
     )
     parser.add_argument(
+        "--env-file",
+        type=Path,
+        help=(
+            "Load provider credentials from a dotenv file. Existing process "
+            "environment variables take precedence."
+        ),
+    )
+    parser.add_argument(
         "--enable-provider",
         action="append",
         default=[],
@@ -1175,6 +1245,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.env_file is not None:
+            load_env_file(args.env_file)
         plan = load_plan(args.plan)
         report = run_conformance(
             plan,

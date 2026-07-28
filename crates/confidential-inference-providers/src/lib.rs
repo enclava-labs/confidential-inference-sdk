@@ -1,10 +1,12 @@
 mod chutes;
+mod chutes_live;
 mod compatibility;
 mod contrast;
 mod dcap_tdx;
 mod demo;
 mod dstack;
 mod http;
+mod near;
 mod nvidia;
 mod phase2_fixtures;
 mod provider;
@@ -14,6 +16,7 @@ mod reference_values_generator;
 mod registry;
 mod registry_generator;
 
+pub use chutes_live::ChutesHttpProvider;
 pub use compatibility::{
     CacheabilityClass, CredentialKind, ModelBindingSupport, ModelIdRewrite, ModelListingBehavior,
     OpenAiEndpoint, ProviderCompatibility, ProviderCompatibilityMatrix,
@@ -42,6 +45,7 @@ pub use http::{
     ConfidentialHttpProvider, DstackHttpProvider, OpenAiHttpProvider, PhalaHttpProvider,
     TinfoilHttpProvider,
 };
+pub use near::NearHttpProvider;
 #[allow(deprecated)]
 pub use nvidia::{
     extract_nras_token, NvidiaNrasRemoteClient, NVIDIA_NRAS_ATTEST_GPU_V3_URL,

@@ -210,6 +210,13 @@ impl ProviderChatRequest {
         }
     }
 
+    pub fn adapter_managed_encrypt(body: Value) -> Self {
+        Self::with_confidentiality(
+            body,
+            ProviderRequestConfidentiality::AdapterManagedEncrypted,
+        )
+    }
+
     pub fn fixture_encrypt(route: &RouteDefinition, body: Value) -> Result<Self> {
         let plaintext = serde_json::to_vec(&body)?;
         let ciphertext = fixture_xor(route, &plaintext);
@@ -376,6 +383,7 @@ pub enum ProviderRequestConfidentiality {
     Plaintext,
     FixtureEncrypted,
     SdkEncrypted,
+    AdapterManagedEncrypted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

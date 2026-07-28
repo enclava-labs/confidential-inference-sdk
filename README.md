@@ -8,7 +8,7 @@ after the selected route satisfies an explicit attestation policy.
 
 ## Supported providers
 
-**Tinfoil · Venice · RedPill (Chutes E2EE) · Phala · Privatemode**
+**Tinfoil · Venice · RedPill (Chutes E2EE) · Phala · Chutes · NEAR · Privatemode**
 
 | Provider | SDK integration | Current scope |
 | --- | --- | --- |
@@ -16,11 +16,16 @@ after the selected route satisfies an explicit attestation policy.
 | **Venice** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Live adapter and evidence path |
 | **RedPill** | OpenAI-compatible HTTP execution, Chutes E2EE evidence, nonce/public-key report-data binding, and NVIDIA CC verification through NRAS | Live adapter and verifier path |
 | **Phala** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Live adapter and evidence path |
+| **Chutes** | Dedicated ML-KEM-768/ChaCha20-Poly1305 E2EE adapter, per-instance TDX/certificate/key binding, DCAP verification, and NVIDIA CC verification through NRAS | Live non-streaming adapter and verifier path |
+| **NEAR** | Model-direct adapter with same-connection TLS certificate capture, TDX nonce/signing-address/TLS/model binding, DCAP verification, and NVIDIA CC verification through NRAS | Live non-streaming adapter and verifier path |
 | **Privatemode** | Contrast manifest, initdata, image-pin, coordinator-attestation, and model-path verification | Verification component; the caller supplies live transport |
 
-The first four providers have concrete HTTP integrations and credentialed
-live-conformance definitions. Privatemode support currently covers verification
-of Contrast deployment evidence rather than a turn-key HTTP adapter.
+Tinfoil, Venice, RedPill, Phala, Chutes, and NEAR have provider-specific HTTP
+integrations. Chutes invocations are encrypted for the selected attested
+instance and consume one-use invocation nonces. NEAR requests use the
+model-direct TLS connection whose leaf-certificate SPKI was bound into the
+verified quote. Privatemode support covers verification of Contrast deployment
+evidence rather than a turn-key HTTP adapter.
 
 Provider support does not make an arbitrary deployment trusted. Production
 routes still require provider-issued signed metadata and reference values, the
@@ -44,8 +49,9 @@ layers call the same verification path.
 - Fail-closed policy enforcement before a provider request is sent.
 - Signed provider registries, compatibility profiles, and reference values.
 - Offline Intel TDX/DCAP quote verification with supplied collateral.
-- Evidence paths for dstack, Chutes/Redpill, Tinfoil, and Privatemode.
-- SDK-managed app-E2EE for routes with a compatible encryption profile.
+- Evidence paths for dstack, Chutes/Redpill, Chutes live, NEAR live, Tinfoil,
+  and Privatemode.
+- SDK-managed app-E2EE for compatible routes and adapter-managed Chutes E2EE.
 - OpenAI-shaped Chat Completions and a text-only Responses compatibility path.
 - Structured verdicts, audit records, metrics, and optional verdict caching.
 - Rust, C ABI, Python, Node.js, middleware, and proxy integration surfaces.
@@ -195,6 +201,38 @@ python3 -m unittest discover -s bindings/python/tests
 (cd bindings/node && npm ci && npm test)
 python3 tools/check_release_packaging.py
 ```
+
+Credentialed Chutes and NEAR attestation checks can load the ignored local
+`.env` directly:
+
+```bash
+python3 tools/live_conformance.py \
+  --env-file .env \
+  --allow-network \
+  --enable-provider chutes \
+  --enable-provider near \
+  --timeout-seconds 60 \
+  --output target/chutes-near-live-conformance.json
+```
+
+These checks perform model discovery and fetch provider evidence shapes. They
+do not submit an inference request or consume inference balance. Run the
+ignored Rust live tests for the stronger provider-specific capture, NRAS, and
+TDX/DCAP gate:
+
+```bash
+cargo test -p confidential-inference-providers \
+  --test live_chutes_near \
+  --locked \
+  -- --ignored --test-threads=1
+```
+
+The Rust live tests load `CHUTES_API_KEY` and `NEAR_API_KEY` from the process
+environment or the ignored workspace `.env`. A passing result proves the live
+cryptographic evidence path; production inference additionally requires an
+operator-trusted signed registry and reference values. A positive provider
+balance is needed only when the provider charges for the inference request,
+not for these evidence-verification calls.
 
 Supply-chain gates:
 

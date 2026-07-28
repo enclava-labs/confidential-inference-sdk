@@ -4,20 +4,24 @@ use crate::policy::{
 };
 use crate::verdict::cpu_allowed;
 use crate::{
-    canonical_digest, certificate_spki_sha256_hex, sha256_digest,
-    verify_chutes_e2ee_report_data_binding, verify_dstack_tcb_compose_hash,
-    verify_tls_spki_report_data_binding, AttestationError, AttestationVerdict, AttestedRoute,
-    AttributionSource, CheckOutcome, CheckResult, ChutesE2eeEvidence, ChutesE2eeReportDataBinding,
-    ConfidentialityResult, DstackEvidence, FailClosedGpuAttestationVerifier,
-    FailClosedTinfoilQuoteVerifier, FixtureEvidence, GpuAttestationVerifier, ModelBindingResult,
+    canonical_digest, certificate_spki_sha256_hex, certificate_validity_epoch_millis,
+    sha256_digest, verify_chutes_e2ee_report_data_binding, verify_chutes_live_report_data_binding,
+    verify_dstack_tcb_compose_hash, verify_tls_spki_report_data_binding, AttestationError,
+    AttestationVerdict, AttestedRoute, AttributionSource, CheckOutcome, CheckResult,
+    ChutesE2eeEvidence, ChutesE2eeReportDataBinding, ChutesLiveEvidence,
+    ChutesLiveReportDataBinding, ConfidentialityResult, CpuTeeKind, DstackEvidence,
+    EvidenceHardware, FailClosedGpuAttestationVerifier, FailClosedTinfoilQuoteVerifier,
+    FixtureEvidence, GpuAttestationVerifier, ModelBindingResult, NearLiveEvidence,
     NvidiaGpuAttestationEvidence, NvidiaGpuAttestationVerificationRequest,
     ParsedTinfoilLiveCapture, ReferenceValuesPayload, ResponseIntegrityResult, Result,
     RouteAttribution, RoutePartyAttribution, RoutePartyRole, SignatureMetadata,
     TcbComposeHashBinding, TinfoilLiveCaptureEvidence, TinfoilQuoteVerificationRequest,
     TinfoilQuoteVerifier, TinfoilTlsEvidence, TrustTier, ValidityWindow, VerdictArtifacts,
-    VerdictError, VerificationStatus, VerifiedTinfoilQuote,
+    VerdictError, VerificationStatus, VerifiedTdxQuote, VerifiedTinfoilQuote,
 };
 use base64::Engine;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
@@ -92,12 +96,819 @@ pub fn verify_evidence_with_attestation_verifiers(
             request,
             gpu_attestation_verifier,
         ),
+        "chutes_live_e2ee" => verify_chutes_live_evidence_with_attestation_verifiers(
+            request,
+            tinfoil_quote_verifier,
+            gpu_attestation_verifier,
+        ),
+        "near_hw_verified_tls" => verify_near_live_evidence_with_attestation_verifiers(
+            request,
+            tinfoil_quote_verifier,
+            gpu_attestation_verifier,
+        ),
         "tinfoil_hw_verified_tls" => {
             verify_tinfoil_tls_evidence_with_quote_verifier(request, tinfoil_quote_verifier)
         }
         evidence_family => Err(AttestationError::InvalidEvidence(format!(
             "unsupported evidence family {evidence_family}"
         ))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct NearAttestationReport {
+    intel_quote: String,
+    request_nonce: String,
+    signing_address: String,
+    signing_algo: String,
+    tls_cert_fingerprint: String,
+    #[serde(default)]
+    model_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct VerifiedLiveEvidenceDigest<'a, T: Serialize> {
+    schema: &'static str,
+    capture: &'a T,
+    verified_quote: &'a VerifiedTdxQuote,
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedProviderLiveEvidence {
+    provider: String,
+    route_id: String,
+    evidence_family: String,
+    tee_measurement: String,
+    hardware: EvidenceHardware,
+    gpu_attestation: Option<NvidiaGpuAttestationEvidence>,
+    gpu_nonce: String,
+    report_data: String,
+    nonce_binding_verified: bool,
+    channel_binding_verified: bool,
+    channel_check: &'static str,
+    channel_error: &'static str,
+    confidentiality_result: ConfidentialityResult,
+    attested_model: Option<String>,
+    issued_at: String,
+    expires_at: String,
+    expires_at_epoch_ms: u64,
+    evidence_digest: String,
+    signing_public_key: Option<String>,
+    e2ee_capability: Option<String>,
+}
+
+struct LiveCaptureMetadata<'a> {
+    provider: &'a str,
+    route_id: &'a str,
+    evidence_family: &'a str,
+    requested_model: &'a str,
+    policy_digest: &'a str,
+    evidence_endpoint: &'a str,
+}
+
+pub fn verify_chutes_live_evidence_with_attestation_verifiers(
+    request: VerificationRequest,
+    tdx_quote_verifier: &dyn TinfoilQuoteVerifier,
+    gpu_attestation_verifier: &dyn GpuAttestationVerifier,
+) -> Result<AttestationVerdict> {
+    let capture: ChutesLiveEvidence = serde_json::from_slice(&request.raw_evidence)?;
+    if capture.schema != ChutesLiveEvidence::SCHEMA {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "unsupported schema {}",
+            capture.schema
+        )));
+    }
+    validate_live_capture_metadata(
+        LiveCaptureMetadata {
+            provider: &capture.provider,
+            route_id: &capture.route_id,
+            evidence_family: &capture.evidence_family,
+            requested_model: &capture.requested_model,
+            policy_digest: &capture.policy_digest,
+            evidence_endpoint: &capture.evidence_endpoint,
+        },
+        &request,
+        "Chutes",
+    )?;
+    validate_nonce_hex("Chutes request nonce", &capture.request_nonce)?;
+
+    let e2e_public_key = decode_base64("Chutes ML-KEM public key", &capture.e2e_public_key_base64)?;
+    if e2e_public_key.len() != 1_184 {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "Chutes ML-KEM-768 public key has {} bytes, expected 1184",
+            e2e_public_key.len()
+        )));
+    }
+    let quote_bytes = decode_base64("Chutes TDX quote", &capture.quote_base64)?;
+    let verified_quote = tdx_quote_verifier.verify_tdx_quote(&quote_bytes)?;
+    let certificate_der = decode_base64(
+        "Chutes instance certificate",
+        &capture.certificate_der_base64,
+    )?;
+    let certificate_spki = certificate_spki_sha256_hex(&certificate_der)?;
+    let certificate_expires_at =
+        validate_live_certificate(&certificate_der, &verified_quote.issued_at, "Chutes")?;
+
+    let report_data_binding = verify_chutes_live_report_data_binding(
+        &verified_quote.report_data,
+        &capture.request_nonce,
+        &capture.e2e_public_key_base64,
+        &certificate_spki,
+    );
+    let freshness_matches = freshness_nonce_matches_policy(
+        &request.policy,
+        request.expected_freshness_nonce.as_deref(),
+        &capture.request_nonce,
+    );
+    let nonce_binding_verified =
+        report_data_binding == ChutesLiveReportDataBinding::Verified && freshness_matches;
+    let gpu_nonce = crate::chutes_expected_report_data_prefix(
+        &capture.request_nonce,
+        &capture.e2e_public_key_base64,
+    )
+    .ok_or_else(|| {
+        AttestationError::InvalidEvidence(
+            "Chutes request nonce or ML-KEM public key is malformed".into(),
+        )
+    })?;
+    if capture
+        .gpu_attestation
+        .as_ref()
+        .is_some_and(|gpu| !gpu.nonce.eq_ignore_ascii_case(&gpu_nonce))
+    {
+        return Err(AttestationError::InvalidEvidence(
+            "Chutes GPU evidence nonce does not match the quote-bound E2EE key challenge".into(),
+        ));
+    }
+
+    let tee_measurement = format!(
+        "tdx:mr_td:{}:rtmr0:{}:rtmr1:{}:rtmr2:{}:rtmr3:{}",
+        verified_quote.mr_td,
+        verified_quote.rtmr0,
+        verified_quote.rtmr1,
+        verified_quote.rtmr2,
+        verified_quote.rtmr3
+    );
+    let expires_at_epoch_ms = verified_quote
+        .expires_at_epoch_ms
+        .min(certificate_expires_at);
+    let evidence_digest = canonical_digest(&VerifiedLiveEvidenceDigest {
+        schema: "confidential-inference.chutes-live-verified-evidence.v1",
+        capture: &capture,
+        verified_quote: &verified_quote,
+    })?;
+    let channel_binding_verified = nonce_binding_verified;
+    let evidence = VerifiedProviderLiveEvidence {
+        provider: capture.provider,
+        route_id: capture.route_id,
+        evidence_family: capture.evidence_family,
+        tee_measurement,
+        hardware: EvidenceHardware {
+            cpu: CpuTeeKind::Tdx,
+            gpu: capture
+                .gpu_attestation
+                .as_ref()
+                .map(|_| GpuTeeKind::NvidiaCc),
+        },
+        gpu_attestation: capture.gpu_attestation,
+        gpu_nonce,
+        report_data: verified_quote.report_data,
+        nonce_binding_verified,
+        channel_binding_verified,
+        channel_check: "e2ee_key_binding",
+        channel_error: "Chutes ML-KEM key and instance certificate are not bound to the fresh verified TDX quote",
+        confidentiality_result: if channel_binding_verified {
+            ConfidentialityResult::EncryptedBound
+        } else {
+            ConfidentialityResult::NotBound
+        },
+        attested_model: None,
+        issued_at: verified_quote.issued_at,
+        expires_at: format_utc_timestamp_millis(expires_at_epoch_ms),
+        expires_at_epoch_ms,
+        evidence_digest,
+        signing_public_key: Some(sha256_digest(&e2e_public_key)),
+        e2ee_capability: Some("chutes-ml-kem-768-e2ee".into()),
+    };
+
+    verify_provider_live_evidence(request, evidence, gpu_attestation_verifier)
+}
+
+pub fn verify_near_live_evidence_with_attestation_verifiers(
+    request: VerificationRequest,
+    tdx_quote_verifier: &dyn TinfoilQuoteVerifier,
+    gpu_attestation_verifier: &dyn GpuAttestationVerifier,
+) -> Result<AttestationVerdict> {
+    let capture: NearLiveEvidence = serde_json::from_slice(&request.raw_evidence)?;
+    if capture.schema != NearLiveEvidence::SCHEMA {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "unsupported schema {}",
+            capture.schema
+        )));
+    }
+    validate_live_capture_metadata(
+        LiveCaptureMetadata {
+            provider: &capture.provider,
+            route_id: &capture.route_id,
+            evidence_family: &capture.evidence_family,
+            requested_model: &capture.requested_model,
+            policy_digest: &capture.policy_digest,
+            evidence_endpoint: &capture.evidence_endpoint,
+        },
+        &request,
+        "NEAR",
+    )?;
+    validate_nonce_hex("NEAR request nonce", &capture.request_nonce)?;
+
+    let certificate_der = decode_base64(
+        "NEAR live TLS certificate",
+        &capture.live_tls_leaf_certificate_der_base64,
+    )?;
+    let certificate_spki = certificate_spki_sha256_hex(&certificate_der)?;
+    if !certificate_spki.eq_ignore_ascii_case(&capture.live_tls_spki_sha256) {
+        return Err(AttestationError::InvalidEvidence(
+            "NEAR live TLS SPKI does not match the captured certificate".into(),
+        ));
+    }
+    let raw_attestation = decode_base64(
+        "NEAR raw attestation body",
+        &capture.raw_attestation_body_base64,
+    )?;
+    let report: NearAttestationReport =
+        serde_json::from_slice(&raw_attestation).map_err(|error| {
+            AttestationError::InvalidEvidence(format!(
+                "NEAR attestation response is not valid JSON: {error}"
+            ))
+        })?;
+    if report.signing_algo != "ecdsa" {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "NEAR attestation used unsupported signing algorithm {}",
+            report.signing_algo
+        )));
+    }
+    if !report
+        .request_nonce
+        .eq_ignore_ascii_case(&capture.request_nonce)
+    {
+        return Err(AttestationError::InvalidEvidence(
+            "NEAR attestation request_nonce does not match the verifier challenge".into(),
+        ));
+    }
+
+    let quote_bytes = decode_hex("NEAR TDX quote", &report.intel_quote)?;
+    let verified_quote = tdx_quote_verifier.verify_tdx_quote(&quote_bytes)?;
+    if verified_quote.mr_config_id.len() != 96 || !verified_quote.mr_config_id.starts_with("01") {
+        return Err(AttestationError::InvalidEvidence(
+            "NEAR TDX mr_config_id is not a v1 compose measurement".into(),
+        ));
+    }
+
+    let attested_tls_fingerprint = normalize_sha256_hex(
+        "NEAR attested TLS fingerprint",
+        &report.tls_cert_fingerprint,
+    )?;
+    if !attested_tls_fingerprint.eq_ignore_ascii_case(&certificate_spki) {
+        return Err(AttestationError::InvalidEvidence(
+            "NEAR attested TLS fingerprint does not match the live TLS certificate".into(),
+        ));
+    }
+    let signing_address = decode_hex(
+        "NEAR ECDSA signing address",
+        report.signing_address.trim_start_matches("0x"),
+    )?;
+    if signing_address.len() != 20 {
+        return Err(AttestationError::InvalidEvidence(
+            "NEAR ECDSA signing address is not 20 bytes".into(),
+        ));
+    }
+    let mut report_binding_input = signing_address.clone();
+    report_binding_input.extend_from_slice(&decode_hex(
+        "NEAR TLS fingerprint",
+        &attested_tls_fingerprint,
+    )?);
+    let expected_first32 = Sha256::digest(&report_binding_input);
+    let report_data = decode_hex("NEAR TDX report_data", &verified_quote.report_data)?;
+    let nonce_bytes = decode_hex("NEAR request nonce", &capture.request_nonce)?;
+    let report_data_matches = report_data.len() == 64
+        && report_data[..32] == expected_first32[..]
+        && report_data[32..] == nonce_bytes;
+    let freshness_matches = freshness_nonce_matches_policy(
+        &request.policy,
+        request.expected_freshness_nonce.as_deref(),
+        &capture.request_nonce,
+    );
+    let nonce_binding_verified = report_data_matches && freshness_matches;
+    if capture
+        .gpu_attestation
+        .as_ref()
+        .is_some_and(|gpu| !gpu.nonce.eq_ignore_ascii_case(&capture.request_nonce))
+    {
+        return Err(AttestationError::InvalidEvidence(
+            "NEAR GPU evidence nonce does not match the verifier challenge".into(),
+        ));
+    }
+    let model_binding_verified = report.model_name.as_deref().is_some_and(|model| {
+        model == request.route.provider_model || model == request.route.canonical_model
+    });
+    let attested_model = model_binding_verified.then(|| request.route.canonical_model.clone());
+
+    let certificate_expires_at =
+        validate_live_certificate(&certificate_der, &verified_quote.issued_at, "NEAR")?;
+    let expires_at_epoch_ms = verified_quote
+        .expires_at_epoch_ms
+        .min(certificate_expires_at);
+    let evidence_digest = canonical_digest(&VerifiedLiveEvidenceDigest {
+        schema: "confidential-inference.near-live-verified-evidence.v1",
+        capture: &capture,
+        verified_quote: &verified_quote,
+    })?;
+    let channel_binding_verified = nonce_binding_verified;
+    let evidence = VerifiedProviderLiveEvidence {
+        provider: capture.provider,
+        route_id: capture.route_id,
+        evidence_family: capture.evidence_family,
+        tee_measurement: format!("tdx:mr_config_id:{}", verified_quote.mr_config_id),
+        hardware: EvidenceHardware {
+            cpu: CpuTeeKind::Tdx,
+            gpu: capture
+                .gpu_attestation
+                .as_ref()
+                .map(|_| GpuTeeKind::NvidiaCc),
+        },
+        gpu_attestation: capture.gpu_attestation,
+        gpu_nonce: capture.request_nonce,
+        report_data: verified_quote.report_data,
+        nonce_binding_verified,
+        channel_binding_verified,
+        channel_check: "tls_binding",
+        channel_error:
+            "NEAR live TLS certificate, signing address, and nonce are not bound to the verified TDX quote",
+        confidentiality_result: if channel_binding_verified {
+            ConfidentialityResult::ChannelBound
+        } else {
+            ConfidentialityResult::NotBound
+        },
+        attested_model,
+        issued_at: verified_quote.issued_at,
+        expires_at: format_utc_timestamp_millis(expires_at_epoch_ms),
+        expires_at_epoch_ms,
+        evidence_digest,
+        signing_public_key: Some(format!("ecdsa:{}", report.signing_address)),
+        e2ee_capability: None,
+    };
+
+    verify_provider_live_evidence(request, evidence, gpu_attestation_verifier)
+}
+
+fn verify_provider_live_evidence(
+    request: VerificationRequest,
+    evidence: VerifiedProviderLiveEvidence,
+    gpu_attestation_verifier: &dyn GpuAttestationVerifier,
+) -> Result<AttestationVerdict> {
+    let provider_reference = request
+        .reference_values
+        .providers
+        .get(&request.route.provider)
+        .ok_or_else(|| AttestationError::MissingProviderReference {
+            provider: request.route.provider.clone(),
+        })?;
+    let route_reference = provider_reference
+        .routes
+        .get(&request.route.route_id)
+        .ok_or_else(|| AttestationError::MissingRouteReference {
+            route_id: request.route.route_id.clone(),
+        })?;
+    let mut checks = BTreeMap::new();
+    let mut errors = Vec::new();
+
+    push_check(
+        &mut checks,
+        &mut errors,
+        "route_metadata_binding",
+        evidence.provider == request.route.provider
+            && evidence.route_id == request.route.route_id
+            && evidence.evidence_family == request.route.evidence_family
+            && route_reference.provider_model == request.route.provider_model
+            && route_reference.canonical_model == request.route.canonical_model
+            && route_reference.evidence_family == request.route.evidence_family,
+        "evidence route metadata does not match registry/reference route",
+    );
+    mark_request_route_unproven(&mut checks);
+
+    let measurement_accepted = provider_reference
+        .accepted_measurements
+        .iter()
+        .any(|measurement| measurement == &evidence.tee_measurement);
+    let hardware_verified = match &request.policy.hardware.cpu {
+        CpuTeeRequirement::NotRequired => {
+            checks.insert("cpu_tee".into(), CheckResult::NotApplicable);
+            true
+        }
+        CpuTeeRequirement::AnyCpuTee => {
+            let ok = cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
+                && measurement_accepted;
+            push_check(
+                &mut checks,
+                &mut errors,
+                "cpu_tee",
+                ok,
+                "verified TDX identity is not accepted by signed reference values",
+            );
+            ok
+        }
+        CpuTeeRequirement::OneOf { allowed } => {
+            let ok = allowed.contains(&evidence.hardware.cpu)
+                && cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
+                && measurement_accepted;
+            push_check(
+                &mut checks,
+                &mut errors,
+                "cpu_tee",
+                ok,
+                "verified TDX identity is not accepted by policy and signed reference values",
+            );
+            ok
+        }
+    };
+
+    let gpu_verified = match &request.policy.hardware.gpu {
+        GpuTeeRequirement::NotRequired => {
+            checks.insert("gpu_tee".into(), CheckResult::NotApplicable);
+            true
+        }
+        GpuTeeRequirement::OneOf { allowed } => {
+            let result = verify_live_nvidia_gpu_attestation(
+                evidence.gpu_attestation.as_ref(),
+                &evidence.gpu_nonce,
+                allowed,
+                gpu_attestation_verifier,
+                &request.route.provider,
+                &request.route.route_id,
+            );
+            let ok = result.is_ok();
+            push_check(
+                &mut checks,
+                &mut errors,
+                "gpu_tee",
+                ok,
+                &result
+                    .err()
+                    .unwrap_or_else(|| "NVIDIA GPU attestation verified".into()),
+            );
+            ok
+        }
+    };
+
+    let route_channel_matches = request.route.channel_binding_kind
+        == route_reference.channel_binding_kind
+        && request
+            .route
+            .channel_binding_kind
+            .satisfies(&request.policy.channel_binding_requirement)
+        && route_reference
+            .channel_binding_kind
+            .satisfies(&request.policy.channel_binding_requirement);
+    let channel_verified = evidence.channel_binding_verified && route_channel_matches;
+    push_check(
+        &mut checks,
+        &mut errors,
+        evidence.channel_check,
+        channel_verified,
+        evidence.channel_error,
+    );
+    let other_channel_check = if evidence.channel_check == "tls_binding" {
+        "e2ee_key_binding"
+    } else {
+        "tls_binding"
+    };
+    checks.insert(other_channel_check.into(), CheckResult::NotApplicable);
+    push_check(
+        &mut checks,
+        &mut errors,
+        "nonce_binding",
+        evidence.nonce_binding_verified,
+        "fresh provider challenge is not bound to verified TDX report_data",
+    );
+
+    let confidentiality_result = if channel_verified {
+        evidence.confidentiality_result.clone()
+    } else {
+        ConfidentialityResult::NotBound
+    };
+    let response_integrity_result = if channel_verified {
+        ResponseIntegrityResult::ChannelBound
+    } else {
+        ResponseIntegrityResult::NotBound
+    };
+    push_check(
+        &mut checks,
+        &mut errors,
+        "request_key_binding",
+        confidentiality_result.satisfies(&request.policy.request_confidentiality_requirement),
+        "request confidentiality is not bound to the attested workload",
+    );
+    checks.insert(
+        "request_encryption".into(),
+        if channel_verified {
+            CheckResult::Verified
+        } else {
+            CheckResult::Failed
+        },
+    );
+    push_check(
+        &mut checks,
+        &mut errors,
+        "response_key_binding",
+        confidentiality_result.satisfies(&request.policy.response_confidentiality_requirement),
+        "response confidentiality is not bound to the attested workload",
+    );
+    checks.insert(
+        "response_encryption".into(),
+        if channel_verified {
+            CheckResult::Verified
+        } else {
+            CheckResult::Failed
+        },
+    );
+    push_check(
+        &mut checks,
+        &mut errors,
+        "response_channel_binding",
+        response_integrity_result.satisfies(&request.policy.response_integrity_requirement),
+        "response bytes are not cryptographically bound as required by policy",
+    );
+    checks.insert("response_receipt".into(), CheckResult::NotApplicable);
+
+    let model_binding_verified = evidence.attested_model.as_deref()
+        == Some(request.route.canonical_model.as_str())
+        && route_reference.canonical_model == request.route.canonical_model;
+    let model_binding_result = push_model_binding_check(
+        &mut checks,
+        &mut errors,
+        &request.policy.model_binding_requirement,
+        evidence.attested_model.is_some(),
+        model_binding_verified,
+    );
+
+    let provenance_required =
+        request.policy.provenance.workload_image || request.policy.provenance.model_artifacts;
+    if provenance_required {
+        push_check(
+            &mut checks,
+            &mut errors,
+            "image_provenance",
+            false,
+            "live provider evidence does not contain signed workload image provenance",
+        );
+        push_check(
+            &mut checks,
+            &mut errors,
+            "model_artifact_provenance",
+            false,
+            "live provider evidence does not contain signed model artifact provenance",
+        );
+    } else {
+        checks.insert("image_provenance".into(), CheckResult::NotApplicable);
+        checks.insert(
+            "model_artifact_provenance".into(),
+            CheckResult::NotApplicable,
+        );
+    }
+    push_unsupported_provenance_checks(&mut checks, &mut errors, &request.policy);
+    push_per_request_freshness_check(&mut checks, &mut errors, &request.policy);
+
+    let failed_required = checks.values().any(|check| *check == CheckResult::Failed);
+    let request_allowed = match request.policy.enforcement {
+        EnforcementMode::Disabled | EnforcementMode::Observe => true,
+        EnforcementMode::Enforce => !failed_required,
+    };
+    let status = match request.policy.enforcement {
+        EnforcementMode::Disabled => VerificationStatus::Disabled,
+        _ if failed_required => VerificationStatus::Failed,
+        _ if hardware_verified && gpu_verified && channel_verified => VerificationStatus::Verified,
+        _ => VerificationStatus::Partial,
+    };
+    let policy_digest = request.policy.digest()?;
+    let raw_evidence_digest = sha256_digest(&request.raw_evidence);
+    let validity = compute_validity_bounds(
+        &evidence.issued_at,
+        request.policy.verdict_ttl_millis.0,
+        [
+            ValidityCandidate {
+                epoch_ms: evidence.expires_at_epoch_ms,
+                timestamp: &evidence.expires_at,
+            },
+            ValidityCandidate {
+                epoch_ms: route_reference.valid_until_epoch_ms,
+                timestamp: &route_reference.valid_until,
+            },
+            ValidityCandidate {
+                epoch_ms: request.reference_values.valid_until_epoch_ms,
+                timestamp: &request.reference_values.valid_until,
+            },
+        ],
+    )?;
+
+    let verdict = AttestationVerdict {
+        schema: AttestationVerdict::SCHEMA.into(),
+        required: Vec::new(),
+        check_outcomes: build_check_outcomes(&checks, &errors, &request.policy),
+        route_attribution: Some(build_route_attribution(
+            &request,
+            Some(evidence.hardware.cpu.as_policy_str()),
+        )),
+        policy_schema: VerificationPolicy::SCHEMA.into(),
+        reference_values_schema: ReferenceValuesPayload::SCHEMA.into(),
+        provider_registry_schema: "confidential-inference.provider-registry.v1".into(),
+        status,
+        enforcement: request.policy.enforcement.clone(),
+        request_allowed,
+        would_block_under_enforce: failed_required,
+        trust_tier: request.route.trust_tier.clone(),
+        provider: request.route.provider.clone(),
+        requested_model: request.route.requested_model.clone(),
+        provider_model: request.route.provider_model.clone(),
+        canonical_model: request.route.canonical_model.clone(),
+        route_id: request.route.route_id.clone(),
+        evidence_family: request.route.evidence_family.clone(),
+        alias_confidence: request.route.alias_confidence.clone(),
+        adapter_version: request.route.adapter_version.clone(),
+        api_endpoint: request.route.api_endpoint.clone(),
+        evidence_endpoint: request.route.evidence_endpoint.clone(),
+        freshness_class: request.route.freshness_class.clone(),
+        streaming_allowed: request.route.streaming_allowed,
+        route_execution_status: request.route_execution_status,
+        chat_executable: request.chat_executable,
+        known_unsupported_modes: request.known_unsupported_modes,
+        channel_binding_kind: request.route.channel_binding_kind.clone(),
+        model_binding_result,
+        request_channel_bound: channel_verified,
+        request_confidentiality_result: confidentiality_result.clone(),
+        response_confidentiality_result: confidentiality_result,
+        response_channel_bound: channel_verified,
+        response_integrity_result,
+        policy_digest,
+        provider_registry_digest: request.registry_digest,
+        registry_version: request.registry_version,
+        registry_source: request.registry_source,
+        registry_sync_completed_at: request.registry_sync_completed_at,
+        registry_signature: request.registry_signature,
+        reference_values_digest: request.reference_values_digest,
+        reference_values_version: request.reference_values.version.clone(),
+        reference_values_source: request.reference_values_source,
+        reference_values_signature: request.reference_signature,
+        raw_evidence_digest,
+        evidence_digest: evidence.evidence_digest,
+        verified_at: evidence.issued_at,
+        expires_at: validity.expires_at.clone(),
+        expires_at_epoch_ms: validity.expires_at_epoch_ms,
+        validity: ValidityWindow {
+            policy_ttl_until: validity.policy_ttl_until,
+            collateral_valid_until: evidence.expires_at.clone(),
+            certificate_valid_until: evidence.expires_at.clone(),
+            quote_valid_until: evidence.expires_at.clone(),
+            tcb_valid_until: evidence.expires_at.clone(),
+            reference_values_valid_until: request.reference_values.valid_until,
+            computed_expires_at: validity.expires_at,
+        },
+        checks,
+        artifacts: VerdictArtifacts {
+            source_url: Some(request.route.evidence_endpoint),
+            tee_measurement: Some(evidence.tee_measurement),
+            report_data: Some(evidence.report_data),
+            signing_public_key: evidence.signing_public_key,
+            e2ee_capability: evidence.e2ee_capability,
+            model_manifest: evidence.attested_model,
+            model_artifacts: Vec::new(),
+        },
+        errors,
+    };
+    verdict.validate_summary_consistency()?;
+    trace_verdict_completed(&verdict);
+    Ok(verdict)
+}
+
+fn verify_live_nvidia_gpu_attestation(
+    evidence: Option<&NvidiaGpuAttestationEvidence>,
+    expected_nonce: &str,
+    allowed: &[GpuTeeKind],
+    verifier: &dyn GpuAttestationVerifier,
+    provider: &str,
+    route_id: &str,
+) -> std::result::Result<(), String> {
+    if !allowed.contains(&GpuTeeKind::NvidiaCc) {
+        return Err("NVIDIA confidential-computing GPU is not accepted by policy".into());
+    }
+    let evidence =
+        evidence.ok_or_else(|| "NVIDIA GPU attestation evidence is missing".to_owned())?;
+    if evidence.schema != NvidiaGpuAttestationEvidence::SCHEMA {
+        return Err(format!(
+            "unsupported NVIDIA GPU attestation schema {}",
+            evidence.schema
+        ));
+    }
+    if !evidence.nonce.eq_ignore_ascii_case(expected_nonce) {
+        return Err("NVIDIA GPU evidence nonce does not match the TDX-bound challenge".into());
+    }
+    let verified = verifier
+        .verify_nvidia_gpu_attestation(&NvidiaGpuAttestationVerificationRequest {
+            evidence,
+            expected_nonce,
+            expected_tee: GpuTeeKind::NvidiaCc,
+            provider,
+            route_id,
+        })
+        .map_err(|error| format!("NVIDIA GPU attestation verification failed: {error}"))?;
+    if verified.tee != GpuTeeKind::NvidiaCc
+        || !verified.nonce.eq_ignore_ascii_case(expected_nonce)
+        || verified.attestation_format != evidence.attestation_format
+    {
+        return Err("NVIDIA GPU verifier returned inconsistent verified claims".into());
+    }
+    Ok(())
+}
+
+fn validate_live_capture_metadata(
+    metadata: LiveCaptureMetadata<'_>,
+    request: &VerificationRequest,
+    provider_name: &str,
+) -> Result<()> {
+    let expected_policy_digest = request.policy.digest()?;
+    if metadata.provider != request.route.provider
+        || metadata.route_id != request.route.route_id
+        || metadata.evidence_family != request.route.evidence_family
+        || metadata.requested_model != request.route.requested_model
+        || metadata.policy_digest != expected_policy_digest
+        || metadata.evidence_endpoint != request.route.evidence_endpoint
+    {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "{provider_name} live capture metadata does not match verification request"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_live_certificate(
+    certificate_der: &[u8],
+    verified_at: &str,
+    provider_name: &str,
+) -> Result<u64> {
+    let (not_before, not_after) = certificate_validity_epoch_millis(certificate_der)?;
+    let verified_at = parse_utc_timestamp_millis(verified_at)?;
+    if verified_at < not_before || verified_at >= not_after {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "{provider_name} certificate is not valid at quote verification time"
+        )));
+    }
+    Ok(not_after)
+}
+
+fn validate_nonce_hex(field: &str, value: &str) -> Result<()> {
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(AttestationError::InvalidEvidence(format!(
+            "{field} must be exactly 32 bytes of hex"
+        )))
+    }
+}
+
+fn normalize_sha256_hex(field: &str, value: &str) -> Result<String> {
+    validate_nonce_hex(field, value)?;
+    Ok(value.to_ascii_lowercase())
+}
+
+fn decode_base64(field: &str, value: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|error| {
+            AttestationError::InvalidEvidence(format!("{field} is not valid base64: {error}"))
+        })
+}
+
+fn decode_hex(field: &str, value: &str) -> Result<Vec<u8>> {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "{field} is not canonical hex"
+        )));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_nibble(pair[0]).expect("hex was validated");
+            let low = hex_nibble(pair[1]).expect("hex was validated");
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -3281,6 +4092,351 @@ mod tests {
             assert_eq!(request.capture.provider, "tinfoil-fixture");
             Ok(self.quote.clone())
         }
+    }
+
+    #[derive(Clone)]
+    struct StaticTdxQuoteVerifier {
+        quote: VerifiedTdxQuote,
+    }
+
+    impl TinfoilQuoteVerifier for StaticTdxQuoteVerifier {
+        fn verify_tinfoil_quote(
+            &self,
+            _request: &TinfoilQuoteVerificationRequest<'_>,
+        ) -> Result<VerifiedTinfoilQuote> {
+            Err(AttestationError::InvalidEvidence(
+                "test verifier only supports raw TDX quotes".into(),
+            ))
+        }
+
+        fn verify_tdx_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedTdxQuote> {
+            assert_eq!(quote_bytes, &[7_u8; 48]);
+            Ok(self.quote.clone())
+        }
+    }
+
+    #[test]
+    fn chutes_live_evidence_verifies_dynamic_ml_kem_and_certificate_binding() {
+        let route = AttestedRoute {
+            provider: "chutes".into(),
+            route_id: "chutes:qwen3-32b:Qwen-Qwen3-32B-TEE".into(),
+            evidence_family: "chutes_live_e2ee".into(),
+            requested_model: "qwen3-32b".into(),
+            provider_model: "Qwen/Qwen3-32B-TEE".into(),
+            canonical_model: "qwen3-32b".into(),
+            api_endpoint: "https://llm.chutes.ai/v1".into(),
+            evidence_endpoint: "https://api.chutes.ai".into(),
+            adapter_version: "chutes-live-e2ee/1".into(),
+            freshness_class: FreshnessClass::PerRequest,
+            channel_binding_kind: ChannelBindingKind::AttestedAppE2ee,
+            trust_tier: TrustTier::AppE2ee,
+            alias_confidence: AliasConfidence::Curated,
+            request_confidentiality_requirement: BoundDataRequirement::BoundToAttestedWorkload,
+            response_confidentiality_requirement: BoundDataRequirement::BoundToAttestedWorkload,
+            response_integrity_requirement: ResponseIntegrityRequirement::AnyBound,
+            streaming_allowed: false,
+        };
+        let nonce = "44".repeat(32);
+        let e2e_key = base64::engine::general_purpose::STANDARD.encode([9_u8; 1_184]);
+        let cert_der = base64::engine::general_purpose::STANDARD
+            .decode(crate::tls::TEST_CERT_DER_BASE64)
+            .unwrap();
+        let report_data = format!(
+            "{}{}",
+            crate::chutes_expected_report_data_prefix(&nonce, &e2e_key).unwrap(),
+            crate::certificate_spki_sha256_hex(&cert_der).unwrap()
+        );
+        let measurement = format!(
+            "tdx:mr_td:{}:rtmr0:{}:rtmr1:{}:rtmr2:{}:rtmr3:{}",
+            "11".repeat(48),
+            "22".repeat(48),
+            "33".repeat(48),
+            "44".repeat(48),
+            "55".repeat(48)
+        );
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "chutes".into(),
+            ProviderReference {
+                accepted_measurements: vec![measurement.clone()],
+                routes: BTreeMap::from([(
+                    route.route_id.clone(),
+                    RouteReference {
+                        canonical_model: route.canonical_model.clone(),
+                        provider_model: route.provider_model.clone(),
+                        evidence_family: route.evidence_family.clone(),
+                        channel_binding_kind: route.channel_binding_kind.clone(),
+                        trust_tier: route.trust_tier.clone(),
+                        accepted_cpu_tees: vec![CpuTeeKind::Tdx],
+                        e2ee_public_key_digest: String::new(),
+                        response_signing_key_digest: None,
+                        tls_spki_sha256: None,
+                        workload_images: Vec::new(),
+                        workload_image_digest: String::new(),
+                        model_artifacts: Vec::new(),
+                        valid_until: "2099-01-01T00:00:00Z".into(),
+                        valid_until_epoch_ms: 4_070_908_800_000,
+                    },
+                )]),
+            },
+        );
+        let references = ReferenceValuesPayload {
+            schema: ReferenceValuesPayload::SCHEMA.into(),
+            version: "test".into(),
+            issuer: "test".into(),
+            valid_from: "2026-07-05T00:00:00Z".into(),
+            valid_until: "2099-01-01T00:00:00Z".into(),
+            valid_until_epoch_ms: 4_070_908_800_000,
+            revocation_epoch: 1,
+            minimum_acceptable_version: "test".into(),
+            providers,
+        };
+        let registry_digest = sha256_digest(b"registry");
+        let reference_values_digest = references.digest().unwrap();
+        let mut policy = VerificationPolicy::require_attested_e2ee()
+            .with_artifact_digests(registry_digest.clone(), reference_values_digest.clone());
+        policy.freshness = FreshnessPolicy::PerRequest;
+        let capture = ChutesLiveEvidence {
+            schema: ChutesLiveEvidence::SCHEMA.into(),
+            provider: route.provider.clone(),
+            route_id: route.route_id.clone(),
+            evidence_family: route.evidence_family.clone(),
+            requested_model: route.requested_model.clone(),
+            policy_digest: policy.digest().unwrap(),
+            request_nonce: nonce.clone(),
+            evidence_endpoint: route.evidence_endpoint.clone(),
+            chute_id: "00000000-0000-0000-0000-000000000001".into(),
+            instance_id: "00000000-0000-0000-0000-000000000002".into(),
+            e2e_public_key_base64: e2e_key,
+            quote_base64: base64::engine::general_purpose::STANDARD.encode([7_u8; 48]),
+            certificate_der_base64: base64::engine::general_purpose::STANDARD.encode(cert_der),
+            gpu_attestation: None,
+        };
+        let request = VerificationRequest {
+            route,
+            route_execution_status: "executable".into(),
+            chat_executable: true,
+            known_unsupported_modes: vec!["streaming".into()],
+            expected_freshness_nonce: Some(nonce),
+            policy,
+            reference_values: references,
+            reference_signature: SignatureMetadata {
+                signer: "test".into(),
+                key_id: "test".into(),
+                alg: "ed25519".into(),
+            },
+            reference_values_digest,
+            registry_digest,
+            registry_version: "test".into(),
+            registry_source: "test".into(),
+            registry_sync_completed_at: "2026-07-05T00:00:00Z".into(),
+            registry_signature: SignatureMetadata {
+                signer: "test".into(),
+                key_id: "test".into(),
+                alg: "ed25519".into(),
+            },
+            reference_values_source: "test".into(),
+            raw_evidence: serde_json::to_vec(&capture).unwrap(),
+        };
+        let verifier = StaticTdxQuoteVerifier {
+            quote: VerifiedTdxQuote {
+                tee_measurement: format!("tdx:mr_td:{}", "11".repeat(48)),
+                mr_td: "11".repeat(48),
+                mr_config_id: format!("01{}", "00".repeat(47)),
+                rtmr0: "22".repeat(48),
+                rtmr1: "33".repeat(48),
+                rtmr2: "44".repeat(48),
+                rtmr3: "55".repeat(48),
+                report_data,
+                issued_at: "2026-07-05T12:00:00Z".into(),
+                expires_at: "2026-07-06T00:00:00Z".into(),
+                expires_at_epoch_ms: 1_783_296_000_000,
+            },
+        };
+
+        let verdict = verify_chutes_live_evidence_with_attestation_verifiers(
+            request,
+            &verifier,
+            &FailClosedGpuAttestationVerifier,
+        )
+        .unwrap();
+
+        assert_eq!(verdict.status, VerificationStatus::Verified);
+        assert!(verdict.request_allowed);
+        assert_eq!(
+            verdict.check("e2ee_key_binding"),
+            Some(&CheckResult::Verified)
+        );
+        assert_eq!(
+            verdict.check("per_request_freshness"),
+            Some(&CheckResult::Verified)
+        );
+    }
+
+    #[test]
+    fn near_live_evidence_verifies_nonce_model_and_live_tls_binding() {
+        let route = AttestedRoute {
+            provider: "near".into(),
+            route_id: "near:gpt-oss-120b:openai-gpt-oss-120b".into(),
+            evidence_family: "near_hw_verified_tls".into(),
+            requested_model: "gpt-oss-120b".into(),
+            provider_model: "openai/gpt-oss-120b".into(),
+            canonical_model: "gpt-oss-120b".into(),
+            api_endpoint: "https://gpt-oss-120b.completions.near.ai/v1".into(),
+            evidence_endpoint: "https://gpt-oss-120b.completions.near.ai/v1/attestation/report"
+                .into(),
+            adapter_version: "near-live-tls/1".into(),
+            freshness_class: FreshnessClass::PerRequest,
+            channel_binding_kind: ChannelBindingKind::TeeTerminatedTls,
+            trust_tier: TrustTier::HwVerifiedTls,
+            alias_confidence: AliasConfidence::Curated,
+            request_confidentiality_requirement: BoundDataRequirement::BoundToAttestedWorkload,
+            response_confidentiality_requirement: BoundDataRequirement::BoundToAttestedWorkload,
+            response_integrity_requirement: ResponseIntegrityRequirement::ChannelBound,
+            streaming_allowed: false,
+        };
+        let nonce = "66".repeat(32);
+        let certificate_der = base64::engine::general_purpose::STANDARD
+            .decode(crate::tls::TEST_CERT_DER_BASE64)
+            .unwrap();
+        let tls_spki = crate::certificate_spki_sha256_hex(&certificate_der).unwrap();
+        let signing_address = [0xaa_u8; 20];
+        let mut binding_input = signing_address.to_vec();
+        binding_input.extend_from_slice(&decode_hex("test TLS SPKI", &tls_spki).unwrap());
+        let binding_digest = Sha256::digest(&binding_input)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let report_data = format!("{binding_digest}{nonce}");
+        let mr_config_id = format!("01{}", "00".repeat(47));
+        let measurement = format!("tdx:mr_config_id:{mr_config_id}");
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "near".into(),
+            ProviderReference {
+                accepted_measurements: vec![measurement],
+                routes: BTreeMap::from([(
+                    route.route_id.clone(),
+                    RouteReference {
+                        canonical_model: route.canonical_model.clone(),
+                        provider_model: route.provider_model.clone(),
+                        evidence_family: route.evidence_family.clone(),
+                        channel_binding_kind: route.channel_binding_kind.clone(),
+                        trust_tier: route.trust_tier.clone(),
+                        accepted_cpu_tees: vec![CpuTeeKind::Tdx],
+                        e2ee_public_key_digest: String::new(),
+                        response_signing_key_digest: None,
+                        tls_spki_sha256: None,
+                        workload_images: Vec::new(),
+                        workload_image_digest: String::new(),
+                        model_artifacts: Vec::new(),
+                        valid_until: "2099-01-01T00:00:00Z".into(),
+                        valid_until_epoch_ms: 4_070_908_800_000,
+                    },
+                )]),
+            },
+        );
+        let references = ReferenceValuesPayload {
+            schema: ReferenceValuesPayload::SCHEMA.into(),
+            version: "test".into(),
+            issuer: "test".into(),
+            valid_from: "2026-07-05T00:00:00Z".into(),
+            valid_until: "2099-01-01T00:00:00Z".into(),
+            valid_until_epoch_ms: 4_070_908_800_000,
+            revocation_epoch: 1,
+            minimum_acceptable_version: "test".into(),
+            providers,
+        };
+        let registry_digest = sha256_digest(b"registry");
+        let reference_values_digest = references.digest().unwrap();
+        let mut policy = VerificationPolicy::require_hw_verified_tls()
+            .with_artifact_digests(registry_digest.clone(), reference_values_digest.clone());
+        policy.freshness = FreshnessPolicy::PerRequest;
+        policy.model_binding_requirement = ModelBindingRequirement::Required;
+        let raw_report = serde_json::to_vec(&serde_json::json!({
+            "intel_quote": "07".repeat(48),
+            "request_nonce": nonce,
+            "signing_address": format!(
+                "0x{}",
+                signing_address
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ),
+            "signing_algo": "ecdsa",
+            "tls_cert_fingerprint": tls_spki,
+            "model_name": route.provider_model,
+        }))
+        .unwrap();
+        let capture = NearLiveEvidence {
+            schema: NearLiveEvidence::SCHEMA.into(),
+            provider: route.provider.clone(),
+            route_id: route.route_id.clone(),
+            evidence_family: route.evidence_family.clone(),
+            requested_model: route.requested_model.clone(),
+            policy_digest: policy.digest().unwrap(),
+            request_nonce: nonce.clone(),
+            evidence_endpoint: route.evidence_endpoint.clone(),
+            live_tls_spki_sha256: tls_spki,
+            live_tls_leaf_certificate_der_base64: base64::engine::general_purpose::STANDARD
+                .encode(certificate_der),
+            raw_attestation_body_base64: base64::engine::general_purpose::STANDARD
+                .encode(raw_report),
+            gpu_attestation: None,
+        };
+        let request = VerificationRequest {
+            route,
+            route_execution_status: "executable".into(),
+            chat_executable: true,
+            known_unsupported_modes: vec!["streaming".into()],
+            expected_freshness_nonce: Some(nonce),
+            policy,
+            reference_values: references,
+            reference_signature: SignatureMetadata {
+                signer: "test".into(),
+                key_id: "test".into(),
+                alg: "ed25519".into(),
+            },
+            reference_values_digest,
+            registry_digest,
+            registry_version: "test".into(),
+            registry_source: "test".into(),
+            registry_sync_completed_at: "2026-07-05T00:00:00Z".into(),
+            registry_signature: SignatureMetadata {
+                signer: "test".into(),
+                key_id: "test".into(),
+                alg: "ed25519".into(),
+            },
+            reference_values_source: "test".into(),
+            raw_evidence: serde_json::to_vec(&capture).unwrap(),
+        };
+        let verifier = StaticTdxQuoteVerifier {
+            quote: VerifiedTdxQuote {
+                tee_measurement: format!("tdx:mr_td:{}", "11".repeat(48)),
+                mr_td: "11".repeat(48),
+                mr_config_id,
+                rtmr0: "22".repeat(48),
+                rtmr1: "33".repeat(48),
+                rtmr2: "44".repeat(48),
+                rtmr3: "55".repeat(48),
+                report_data,
+                issued_at: "2026-07-05T12:00:00Z".into(),
+                expires_at: "2026-07-06T00:00:00Z".into(),
+                expires_at_epoch_ms: 1_783_296_000_000,
+            },
+        };
+
+        let verdict = verify_near_live_evidence_with_attestation_verifiers(
+            request,
+            &verifier,
+            &FailClosedGpuAttestationVerifier,
+        )
+        .unwrap();
+
+        assert_eq!(verdict.status, VerificationStatus::Verified);
+        assert!(verdict.request_allowed);
+        assert_eq!(verdict.check("tls_binding"), Some(&CheckResult::Verified));
+        assert_eq!(verdict.model_binding_result, ModelBindingResult::Verified);
     }
 
     fn verified_tinfoil_quote(report_data: String) -> VerifiedTinfoilQuote {

@@ -1709,7 +1709,7 @@ mod tests {
     const DEMO_REGISTRY_DIGEST: &str =
         "sha256:5f7d7f58d2198ccabbdd1c90e9d0ec0030d9934d80895007244971e3e61b7373";
     const MODEL_ALIAS_MATRIX_DIGEST: &str =
-        "sha256:9ecd9fbfe2aa438a43271902192bf79ee26dc47c48ef2a37e5e66eeb8710d387";
+        "sha256:ec781dc92a5cfe4c2725c0b9301c1684c361e11cb52a9d8591d3bfbb94e95ffb";
 
     #[test]
     fn bundled_registry_preserves_provider_model_id() {
@@ -2011,11 +2011,24 @@ mod tests {
     fn model_alias_matrix_preserves_required_roster() {
         let matrix = model_alias_matrix();
         let expected_roster = BTreeSet::from([
+            "deepseek-v3.2",
             "gemma-3-27b",
+            "gemma-4-31b",
             "glm-5",
+            "glm-5.1",
+            "glm-5.2",
             "gpt-oss-120b",
+            "kimi-k2.5",
+            "kimi-k2.6",
             "llama-3.3-70b",
+            "minimax-m2.5",
+            "mistral-nemo-instruct-2407",
+            "nemotron-3-nano-omni-30b",
+            "qwen3-235b-a22b-thinking-2507",
+            "qwen3-32b",
             "qwen3-vl-30b-a3b",
+            "qwen3.5-397b-a17b",
+            "qwen3.6-27b",
         ]);
         let actual_roster = matrix
             .models

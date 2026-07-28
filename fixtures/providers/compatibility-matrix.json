@@ -1,5 +1,33 @@
 {
   "providers": {
+    "chutes": {
+      "api_base_url": "https://llm.chutes.ai/v1",
+      "attestation_endpoint_shape": "chutes_tee_evidence_live",
+      "adapter_managed_encryption": true,
+      "cacheability_class": "per_request_only",
+      "expected_trust_tier": "app-e2ee",
+      "freshness_class": "per_request",
+      "known_unsupported_modes": [
+        "streaming"
+      ],
+      "model_binding_support": "partial",
+      "model_id_rewrite": "use_route_provider_model",
+      "model_listing": "live_catalog",
+      "provider": "chutes",
+      "request_encryption": "required",
+      "required_credentials": [
+        "bearer_token"
+      ],
+      "response_decryption": "required",
+      "route_execution_status": "executable",
+      "streaming": "unsupported",
+      "supported_openai_endpoints": [
+        "chat_completions",
+        "models",
+        "confidentiality"
+      ],
+      "token_parameter_rewrite": "preserve_max_tokens"
+    },
     "demo": {
       "api_base_url": "http://127.0.0.1/demo/v1",
       "attestation_endpoint_shape": "fixture_dstack",
@@ -20,6 +48,33 @@
       "streaming": "unsupported",
       "supported_openai_endpoints": [
         "chat_completions"
+      ],
+      "token_parameter_rewrite": "preserve_max_tokens"
+    },
+    "near": {
+      "api_base_url": "https://gpt-oss-120b.completions.near.ai/v1",
+      "attestation_endpoint_shape": "near_tdx_gpu_tls_live",
+      "cacheability_class": "per_request_only",
+      "expected_trust_tier": "hw-verified-tls",
+      "freshness_class": "per_request",
+      "known_unsupported_modes": [
+        "streaming"
+      ],
+      "model_binding_support": "verified",
+      "model_id_rewrite": "use_route_provider_model",
+      "model_listing": "live_catalog",
+      "provider": "near",
+      "request_encryption": "not_required",
+      "required_credentials": [
+        "bearer_token"
+      ],
+      "response_decryption": "not_required",
+      "route_execution_status": "executable",
+      "streaming": "unsupported",
+      "supported_openai_endpoints": [
+        "chat_completions",
+        "models",
+        "confidentiality"
       ],
       "token_parameter_rewrite": "preserve_max_tokens"
     },
