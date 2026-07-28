@@ -11,7 +11,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1"
 async-trait.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 chacha20poly1305 = { version = "0.10.1", features = ["std"] }
 dcap-qvl = { version = "0.6.1", default-features = false, features = ["std", "ring", "default-x509", "report"] }
 confidential-inference-attestation = { version = "0.1.0", path = "../confidential-inference-attestation" }
