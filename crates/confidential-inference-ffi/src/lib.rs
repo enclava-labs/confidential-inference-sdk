@@ -5,8 +5,8 @@
 //! `confidential-inference-sdk` and lower crates.
 
 use confidential_inference_sdk::{
-    ChatCompletionRequestPayload, ClientError, ConfidentialInference, ModelRef,
-    ProviderRoutingConfig, ResponseCreateRequestPayload,
+    ChatCompletionRequestPayload, ClientError, ConfidentialInference, ProviderRoutingConfig,
+    ResponseCreateRequestPayload,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1675,7 +1675,7 @@ async fn response_result_json(request: ResponseCreateRequestPayload) -> Result<S
 async fn verify_result_json(request: VerifyRequest) -> Result<String, String> {
     let client = current_operation_client().ok_or_else(|| "operation client missing".to_owned())?;
     let verified = client
-        .verify_route(request.provider, ModelRef::canonical(request.model))
+        .verify_route(request.provider, request.model)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(verified.verdict())

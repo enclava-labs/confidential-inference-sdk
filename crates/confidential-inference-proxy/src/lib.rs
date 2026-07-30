@@ -7,9 +7,7 @@
 use confidential_inference_openai::{
     ChatCompletionRequest, ChatCompletionResponse, ResponseCreateRequest,
 };
-use confidential_inference_sdk::{
-    ClientError, ConfidentialInference, ConfidentialResponse, ModelRef,
-};
+use confidential_inference_sdk::{ClientError, ConfidentialInference, ConfidentialResponse};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -153,11 +151,7 @@ impl ConfidentialInferenceProxy {
             );
         };
 
-        match self
-            .client
-            .verify_route(provider, ModelRef::canonical(model))
-            .await
-        {
+        match self.client.verify_route(provider, model).await {
             Ok(verified) => json_response(200, verified.verdict()),
             Err(error) => client_error_response(&error),
         }

@@ -159,28 +159,6 @@ pub enum ClientError {
     InsecurePolicyRequiresOptIn { enforcement: EnforcementMode },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ModelRef {
-    Canonical(String),
-    Provider(String),
-}
-
-impl ModelRef {
-    pub fn canonical(model: impl Into<String>) -> Self {
-        Self::Canonical(model.into())
-    }
-
-    pub fn provider(model: impl Into<String>) -> Self {
-        Self::Provider(model.into())
-    }
-
-    fn as_str(&self) -> &str {
-        match self {
-            ModelRef::Canonical(model) | ModelRef::Provider(model) => model,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub enum RegistrySource {
     Bundled,
@@ -1579,11 +1557,11 @@ impl ConfidentialInference {
     pub async fn verify_route(
         &self,
         provider: impl AsRef<str>,
-        model: ModelRef,
+        model: impl AsRef<str>,
     ) -> Result<VerifiedRoute> {
         let (route_definition, attested_route) = self.select_route(
             Some(provider.as_ref()),
-            model.as_str(),
+            model.as_ref(),
             RouteSelectionPurpose::Verify,
         )?;
         self.verify_selected_route(
@@ -6225,10 +6203,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         let error = verified
             .chat(ChatCompletionRequest::new(
@@ -6708,7 +6683,7 @@ mod tests {
             .unwrap();
 
         let verified = client
-            .verify_route("tinfoil-fixture", ModelRef::canonical("llama-3.3-70b"))
+            .verify_route("tinfoil-fixture", "llama-3.3-70b")
             .await
             .unwrap();
 
@@ -6744,7 +6719,7 @@ mod tests {
             .unwrap();
 
         let error = match client
-            .verify_route("tinfoil-fixture", ModelRef::canonical("llama-3.3-70b"))
+            .verify_route("tinfoil-fixture", "llama-3.3-70b")
             .await
         {
             Ok(_) => panic!("expected DCAP collateral resolver failure"),
@@ -6780,7 +6755,7 @@ mod tests {
             .unwrap();
 
         let error = match client
-            .verify_route("tinfoil-fixture", ModelRef::canonical("llama-3.3-70b"))
+            .verify_route("tinfoil-fixture", "llama-3.3-70b")
             .await
         {
             Ok(_) => panic!("expected real DCAP quote to fail TLS binding policy"),
@@ -6818,7 +6793,7 @@ mod tests {
             .unwrap();
 
         let verified = client
-            .verify_route("venice-fixture", ModelRef::canonical("gpt-oss-120b"))
+            .verify_route("venice-fixture", "gpt-oss-120b")
             .await
             .unwrap();
 
@@ -6874,10 +6849,7 @@ mod tests {
             .await
             .unwrap();
 
-        let error = match client
-            .verify_route("venice-fixture", ModelRef::canonical("gpt-oss-120b"))
-            .await
-        {
+        let error = match client.verify_route("venice-fixture", "gpt-oss-120b").await {
             Ok(_) => panic!("expected strict app-E2EE policy denial"),
             Err(error) => error,
         };
@@ -7634,19 +7606,13 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
         let mut durations = Vec::new();
         for _ in 0..32 {
             let started = Instant::now();
-            let route = client
-                .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-                .await
-                .unwrap();
+            let route = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
             assert_eq!(route.verdict.status, VerificationStatus::Verified);
             durations.push(started.elapsed().as_millis());
         }
@@ -7948,7 +7914,7 @@ mod tests {
             .unwrap();
 
         let verified = client
-            .verify_route("redpill-http-test", ModelRef::canonical("gpt-oss-120b"))
+            .verify_route("redpill-http-test", "gpt-oss-120b")
             .await
             .unwrap();
 
@@ -7993,7 +7959,7 @@ mod tests {
             .unwrap();
 
         let verified = client
-            .verify_route("redpill-http-test", ModelRef::canonical("gpt-oss-120b"))
+            .verify_route("redpill-http-test", "gpt-oss-120b")
             .await
             .unwrap();
 
@@ -8192,10 +8158,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(verified.verdict().registry_source, format!("remote:{url}"));
     }
@@ -8213,10 +8176,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(client.registry_digest(), fallback_digest);
         assert_eq!(
@@ -8258,7 +8218,7 @@ mod tests {
             .unwrap();
 
         let verified = cached_client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
+            .verify_route("demo", "gpt-oss-120b")
             .await
             .unwrap();
 
@@ -8289,10 +8249,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(client.registry_digest(), cached_digest);
         assert_eq!(
@@ -8322,10 +8279,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(client.registry_digest(), fallback_digest);
         assert_eq!(
@@ -8356,10 +8310,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(client.registry_digest(), fallback_digest);
         assert_eq!(
@@ -8383,10 +8334,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(client.reference_values_digest(), remote_digest);
         assert_eq!(client.reference_values_source(), expected_source);
@@ -8418,10 +8366,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(client.reference_values_digest(), remote_digest);
         assert_eq!(client.reference_values_source(), expected_source);
@@ -8443,10 +8388,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(client.reference_values_digest(), fallback_digest);
         assert_eq!(client.reference_values_source(), expected_source);
@@ -8493,7 +8435,7 @@ mod tests {
             .unwrap();
 
         let verified = cached_client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
+            .verify_route("demo", "gpt-oss-120b")
             .await
             .unwrap();
 
@@ -8530,10 +8472,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(client.reference_values_digest(), cached_digest);
         assert_eq!(client.reference_values_source(), expected_source);
@@ -8605,10 +8544,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(
             verified.verdict().registry_source,
@@ -8632,10 +8568,7 @@ mod tests {
             .await
             .unwrap();
 
-        let verified = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
 
         assert_eq!(
             client.reference_values_source(),
@@ -8798,17 +8731,11 @@ mod tests {
             .unwrap();
 
         let first_client = client.clone();
-        let first = tokio::spawn(async move {
-            first_client
-                .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-                .await
-        });
+        let first =
+            tokio::spawn(async move { first_client.verify_route("demo", "gpt-oss-120b").await });
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let second = client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        let second = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         let first = first.await.unwrap().unwrap();
 
         assert_eq!(first.verdict().status, VerificationStatus::Verified);
@@ -8911,10 +8838,7 @@ mod tests {
             },
         );
 
-        let error = match client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-        {
+        let error = match client.verify_route("demo", "gpt-oss-120b").await {
             Ok(_) => panic!("queue-full verification unexpectedly succeeded"),
             Err(error) => error,
         };
@@ -8955,11 +8879,8 @@ mod tests {
             .unwrap();
 
         let owner_client = client.clone();
-        let owner = tokio::spawn(async move {
-            owner_client
-                .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-                .await
-        });
+        let owner =
+            tokio::spawn(async move { owner_client.verify_route("demo", "gpt-oss-120b").await });
 
         for _ in 0..20 {
             if !client
@@ -8980,10 +8901,7 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        let error = match client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-        {
+        let error = match client.verify_route("demo", "gpt-oss-120b").await {
             Ok(_) => panic!("wait-timeout verification unexpectedly succeeded"),
             Err(error) => error,
         };
@@ -9080,10 +8998,7 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
         mutate_first_cached_verdict(&client, |cached| {
@@ -9092,10 +9007,7 @@ mod tests {
                 .unwrap();
         });
 
-        client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
     }
 
@@ -9112,10 +9024,7 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
         now.fetch_add(
@@ -9123,10 +9032,7 @@ mod tests {
             Ordering::SeqCst,
         );
 
-        client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
     }
 
@@ -9143,10 +9049,7 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
         now.fetch_sub(
@@ -9154,10 +9057,7 @@ mod tests {
             Ordering::SeqCst,
         );
 
-        client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
     }
 
@@ -9171,20 +9071,14 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
         mutate_first_cached_verdict(&client, |cached| {
             set_cached_verdict_expiry(cached, now_epoch_millis().saturating_sub(10));
         });
 
-        client
-            .verify_route("demo", ModelRef::canonical("gpt-oss-120b"))
-            .await
-            .unwrap();
+        client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
     }
 
