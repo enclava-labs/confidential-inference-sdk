@@ -64,7 +64,6 @@ pub use reference_values_generator::{
 pub use registry::{
     EncryptionRequirement, ModelAliasCase, ModelAliasMatrix, ModelAliasMatrixEnvelope,
     ModelAliasProviderRoute, ProviderRegistry, ProviderRegistryDiffReport,
-    ProviderRegistryEnvelope, ProviderRegistryPin, ProviderRegistrySigningIdentity,
-    RegistryDiffChange, RegistryDiffKind, RegistryModel, RouteDefinition, RouteLifecycle,
-    SourceSyncRun, StreamingSupport,
+    ProviderRegistryEnvelope, ProviderRegistryPin, RegistryDiffChange, RegistryDiffKind,
+    RegistryModel, RouteDefinition, RouteLifecycle, SourceSyncRun, StreamingSupport,
 };

@@ -45,7 +45,7 @@ pub use policy::{
 };
 pub use reference_values::{
     ProviderReference, ReferenceSignature, ReferenceValuesEnvelope, ReferenceValuesPayload,
-    ReferenceValuesPin, ReferenceValuesSigningIdentity, RouteReference,
+    ReferenceValuesPin, RouteReference,
 };
 pub use signature::{
     default_trusted_signing_keys, verify_artifact_signature, verify_artifact_signature_with_keys,

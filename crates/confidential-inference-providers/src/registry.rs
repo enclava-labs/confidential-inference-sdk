@@ -2,7 +2,7 @@ use confidential_inference_attestation::{
     canonical_digest, parse_utc_timestamp_millis, verify_artifact_signature_with_keys,
     AliasConfidence, ArtifactSignature, AttestationError, AttestedRoute, BoundDataRequirement,
     ChannelBindingKind, FreshnessClass, GpuTeeKind, ResponseIntegrityRequirement,
-    Result as AttestationResult, TrustTier, TrustedSigningKey,
+    Result as AttestationResult, SignatureMetadata, TrustTier, TrustedSigningKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -829,40 +829,9 @@ pub struct ProviderRegistryPin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum_version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub accepted_signing_identities: Vec<ProviderRegistrySigningIdentity>,
+    pub accepted_signing_identities: Vec<SignatureMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_millis: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderRegistrySigningIdentity {
-    pub signer: String,
-    pub key_id: String,
-    pub alg: String,
-}
-
-impl ProviderRegistrySigningIdentity {
-    pub fn new(
-        signer: impl Into<String>,
-        key_id: impl Into<String>,
-        alg: impl Into<String>,
-    ) -> Self {
-        Self {
-            signer: signer.into(),
-            key_id: key_id.into(),
-            alg: alg.into(),
-        }
-    }
-
-    pub fn ed25519(signer: impl Into<String>, key_id: impl Into<String>) -> Self {
-        Self::new(signer, key_id, "ed25519")
-    }
-
-    fn matches_signature(&self, signature: &ArtifactSignature) -> bool {
-        self.signer == signature.signer
-            && self.key_id == signature.key_id
-            && self.alg == signature.alg
-    }
 }
 
 impl ProviderRegistryPin {
@@ -901,10 +870,7 @@ impl ProviderRegistryPin {
         self
     }
 
-    pub fn with_accepted_signing_identity(
-        mut self,
-        identity: ProviderRegistrySigningIdentity,
-    ) -> Self {
+    pub fn with_accepted_signing_identity(mut self, identity: SignatureMetadata) -> Self {
         self.accepted_signing_identities.push(identity);
         self
     }
@@ -914,9 +880,7 @@ impl ProviderRegistryPin {
         signer: impl Into<String>,
         key_id: impl Into<String>,
     ) -> Self {
-        self.with_accepted_signing_identity(ProviderRegistrySigningIdentity::ed25519(
-            signer, key_id,
-        ))
+        self.with_accepted_signing_identity(SignatureMetadata::ed25519(signer, key_id))
     }
 
     pub fn with_max_age_millis(mut self, millis: u64) -> Self {
@@ -1000,10 +964,11 @@ impl ProviderRegistryPin {
         now_epoch_millis: u64,
     ) -> AttestationResult<()> {
         if !self.accepted_signing_identities.is_empty()
-            && !self
-                .accepted_signing_identities
-                .iter()
-                .any(|identity| identity.matches_signature(&envelope.signature))
+            && !self.accepted_signing_identities.iter().any(|identity| {
+                identity.signer == envelope.signature.signer
+                    && identity.key_id == envelope.signature.key_id
+                    && identity.alg == envelope.signature.alg
+            })
         {
             return Err(AttestationError::InvalidRegistryUpdate(format!(
                 "registry signing identity pin mismatch: got {}/{}/{}",

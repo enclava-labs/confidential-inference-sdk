@@ -1,7 +1,7 @@
 use crate::{
     canonical_digest, parse_utc_timestamp_millis, verify_artifact_signature_with_keys,
     ArtifactDigest, ArtifactSignature, AttestationError, ChannelBindingKind, CpuTeeKind, Result,
-    TrustTier, TrustedSigningKey,
+    SignatureMetadata, TrustTier, TrustedSigningKey,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -263,40 +263,9 @@ pub struct ReferenceValuesPin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum_revocation_epoch: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub accepted_signing_identities: Vec<ReferenceValuesSigningIdentity>,
+    pub accepted_signing_identities: Vec<SignatureMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_millis: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReferenceValuesSigningIdentity {
-    pub signer: String,
-    pub key_id: String,
-    pub alg: String,
-}
-
-impl ReferenceValuesSigningIdentity {
-    pub fn new(
-        signer: impl Into<String>,
-        key_id: impl Into<String>,
-        alg: impl Into<String>,
-    ) -> Self {
-        Self {
-            signer: signer.into(),
-            key_id: key_id.into(),
-            alg: alg.into(),
-        }
-    }
-
-    pub fn ed25519(signer: impl Into<String>, key_id: impl Into<String>) -> Self {
-        Self::new(signer, key_id, "ed25519")
-    }
-
-    fn matches_signature(&self, signature: &ReferenceSignature) -> bool {
-        self.signer == signature.signer
-            && self.key_id == signature.key_id
-            && self.alg == signature.alg
-    }
 }
 
 impl ReferenceValuesPin {
@@ -344,10 +313,7 @@ impl ReferenceValuesPin {
         self
     }
 
-    pub fn with_accepted_signing_identity(
-        mut self,
-        identity: ReferenceValuesSigningIdentity,
-    ) -> Self {
+    pub fn with_accepted_signing_identity(mut self, identity: SignatureMetadata) -> Self {
         self.accepted_signing_identities.push(identity);
         self
     }
@@ -357,7 +323,7 @@ impl ReferenceValuesPin {
         signer: impl Into<String>,
         key_id: impl Into<String>,
     ) -> Self {
-        self.with_accepted_signing_identity(ReferenceValuesSigningIdentity::ed25519(signer, key_id))
+        self.with_accepted_signing_identity(SignatureMetadata::ed25519(signer, key_id))
     }
 
     pub fn with_max_age_millis(mut self, millis: u64) -> Self {
@@ -450,10 +416,11 @@ impl ReferenceValuesPin {
         now_epoch_millis: u64,
     ) -> Result<()> {
         if !self.accepted_signing_identities.is_empty()
-            && !self
-                .accepted_signing_identities
-                .iter()
-                .any(|identity| identity.matches_signature(&envelope.signature))
+            && !self.accepted_signing_identities.iter().any(|identity| {
+                identity.signer == envelope.signature.signer
+                    && identity.key_id == envelope.signature.key_id
+                    && identity.alg == envelope.signature.alg
+            })
         {
             return Err(AttestationError::InvalidReferenceValuesUpdate(format!(
                 "reference values signing identity pin mismatch: got {}/{}/{}",
