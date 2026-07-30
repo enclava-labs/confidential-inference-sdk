@@ -40,19 +40,6 @@ FIXTURE_ONLY_COMPATIBILITY_PROFILE_PATTERNS = {
 FIXTURE_ONLY_COMPATIBILITY_PROVIDERS = {
     "venice-fixture": "Venice dstack app-E2EE",
 }
-FIXTURE_ONLY_LIVE_SYNC_PROVIDER_PATTERNS = {
-    "venice": "Venice dstack app-E2EE",
-    "phala": "Direct Phala dstack",
-    "redpill": "Chutes/Redpill E2EE+GPU",
-    "tinfoil": "Tinfoil hw-verified TLS",
-}
-FIXTURE_ONLY_LIVE_SYNC_EVIDENCE_FAMILIES = {
-    "dstack_app_e2ee": "dstack app-E2EE",
-    "chutes_e2ee": "Chutes/Redpill E2EE+GPU",
-    "tinfoil_hw_verified_tls": "Tinfoil hw-verified TLS",
-}
-ACTIVE_REGISTRY_ROUTE_STATUS = "active"
-NEW_UNVERIFIED_REGISTRY_ROUTE_STATUS = "new_unverified"
 UTC_TIMESTAMP_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$"
 )
@@ -75,9 +62,6 @@ COMPATIBILITY_MATRIX_ENVELOPE_FIXTURE = Path(
 )
 LIVE_CONFORMANCE_PLAN_FIXTURES = (
     Path("fixtures/providers/live-conformance-plan.json"),
-)
-LIVE_SYNC_CORPUS_FIXTURES = (
-    Path("fixtures/providers/live-sync-corpus.json"),
 )
 
 VERDICT_REQUIRED_FIELDS = (
@@ -813,125 +797,6 @@ def validate_live_conformance_plan(path: Path, payload: Any, root: Path) -> list
     return violations
 
 
-def validate_live_sync_corpus(path: Path, payload: Any) -> list[str]:
-    violations: list[str] = []
-    subject = path.as_posix()
-    if not isinstance(payload, dict):
-        return [f"{subject}: live-sync corpus must be an object"]
-    if payload.get("schema") != "confidential-inference.provider-live-sync-corpus.v1":
-        violations.append(
-            f"{subject}: schema must be confidential-inference.provider-live-sync-corpus.v1"
-        )
-    cases = payload.get("cases")
-    if not isinstance(cases, list) or not cases:
-        violations.append(f"{subject}: cases must be a non-empty array")
-        return violations
-
-    for index, case in enumerate(cases):
-        fallback_subject = f"{subject}: cases[{index}]"
-        if not isinstance(case, dict):
-            violations.append(f"{fallback_subject}: case must be an object")
-            continue
-        case_id = case.get("id")
-        if not non_empty_string(case_id):
-            violations.append(f"{fallback_subject}: id must be non-empty")
-            case_subject = fallback_subject
-        else:
-            case_subject = f"{subject}: case {case_id}"
-        provider = case.get("provider")
-        if not non_empty_string(provider):
-            violations.append(f"{case_subject}: provider must be non-empty")
-
-        expected = case.get("expected")
-        expected_error = case.get("expected_error_contains")
-        if (expected is None) == (expected_error is None):
-            violations.append(
-                f"{case_subject}: define exactly one of expected or "
-                "expected_error_contains"
-            )
-        elif expected_error is not None and not non_empty_string(expected_error):
-            violations.append(
-                f"{case_subject}: expected_error_contains must be non-empty"
-            )
-
-        fixture_label = live_sync_fixture_only_label(case)
-        if fixture_label is not None:
-            validate_live_sync_route_status_collection(
-                f"{case_subject}: enrichments",
-                case.get("enrichments"),
-                fixture_label,
-                violations,
-                require_new_unverified=False,
-            )
-
-        if expected is None:
-            continue
-        if not isinstance(expected, dict):
-            violations.append(f"{case_subject}: expected must be an object")
-            continue
-        if fixture_label is None:
-            continue
-        for field in ("reviewed_routes", "unreviewed_routes"):
-            validate_live_sync_route_status_collection(
-                f"{case_subject}: expected.{field}",
-                expected.get(field),
-                fixture_label,
-                violations,
-                require_new_unverified=(field == "unreviewed_routes"),
-            )
-    return violations
-
-
-def live_sync_fixture_only_label(case: dict[str, Any]) -> str | None:
-    provider = case.get("provider")
-    if isinstance(provider, str):
-        for pattern, label in FIXTURE_ONLY_LIVE_SYNC_PROVIDER_PATTERNS.items():
-            if pattern in provider:
-                return label
-    evidence_family = case.get("evidence_family")
-    if isinstance(evidence_family, str):
-        return FIXTURE_ONLY_LIVE_SYNC_EVIDENCE_FAMILIES.get(evidence_family)
-    return None
-
-
-def validate_live_sync_route_status_collection(
-    subject: str,
-    routes: Any,
-    fixture_label: str,
-    violations: list[str],
-    *,
-    require_new_unverified: bool,
-) -> None:
-    if routes is None:
-        return
-    if not isinstance(routes, list):
-        violations.append(f"{subject}: routes must be an array")
-        return
-    for index, route in enumerate(routes):
-        route_subject = f"{subject}[{index}]"
-        if not isinstance(route, dict):
-            violations.append(f"{route_subject}: route must be an object")
-            continue
-        route_status = route.get("route_status")
-        if not non_empty_string(route_status):
-            violations.append(f"{route_subject}: route_status must be non-empty")
-            continue
-        if route_status == ACTIVE_REGISTRY_ROUTE_STATUS:
-            violations.append(
-                f"{route_subject}: live-sync fixture routes for {fixture_label} "
-                "must not be active before credentialed live conformance and "
-                "signed reference values exist"
-            )
-        if (
-            require_new_unverified
-            and route_status != NEW_UNVERIFIED_REGISTRY_ROUTE_STATUS
-        ):
-            violations.append(
-                f"{route_subject}: unreviewed live-sync discoveries must remain "
-                f"{NEW_UNVERIFIED_REGISTRY_ROUTE_STATUS}"
-            )
-
-
 def validate_compatibility_matrix_envelope(path: Path, envelope: Any, root: Path) -> list[str]:
     violations: list[str] = []
     subject = path.as_posix()
@@ -1252,18 +1117,6 @@ def check_fixtures(root: Path) -> dict[str, Any]:
             violations.append(f"{relative_path.as_posix()}: invalid JSON: {error}")
             continue
         violations.extend(validate_live_conformance_plan(relative_path, payload, root))
-    for relative_path in LIVE_SYNC_CORPUS_FIXTURES:
-        path = root / relative_path
-        checked.append(relative_path.as_posix())
-        if not path.exists():
-            violations.append(f"{relative_path.as_posix()}: file does not exist")
-            continue
-        try:
-            payload = load_json(path)
-        except json.JSONDecodeError as error:
-            violations.append(f"{relative_path.as_posix()}: invalid JSON: {error}")
-            continue
-        violations.extend(validate_live_sync_corpus(relative_path, payload))
     return {
         "schema": SCHEMA,
         "checked": checked,

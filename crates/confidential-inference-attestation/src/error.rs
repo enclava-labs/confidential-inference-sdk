@@ -16,9 +16,6 @@ pub enum AttestationError {
     #[error("invalid fixture evidence: {0}")]
     InvalidEvidence(String),
 
-    #[error("ACI evidence is invalid: {0}")]
-    InvalidAciEvidence(String),
-
     #[error("invalid X.509 certificate: {0}")]
     InvalidCertificate(String),
 

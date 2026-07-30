@@ -29,7 +29,7 @@ class CheckNormativeFixturesTests(unittest.TestCase):
         report = check_normative_fixtures.check_fixtures(Path("."))
 
         self.assertEqual(report["schema"], "confidential-inference.normative-fixture-policy.v1")
-        self.assertEqual(report["checked_count"], 10)
+        self.assertEqual(report["checked_count"], 9)
         self.assertEqual(report["violations"], [])
 
     def test_verdict_signature_metadata_is_required(self) -> None:
@@ -216,29 +216,6 @@ class CheckNormativeFixturesTests(unittest.TestCase):
         self.assertIn("expected_model_ids must be imported", joined)
         self.assertIn("expected_model_ids_from_alias_matrix must be true", joined)
         self.assertIn("missing from the compatibility matrix", joined)
-
-    def test_live_sync_corpus_must_not_mark_fixture_only_routes_active(self) -> None:
-        corpus = copy.deepcopy(
-            check_normative_fixtures.load_json(
-                Path("fixtures/providers/live-sync-corpus.json")
-            )
-        )
-        case = corpus["cases"][0]
-        case["enrichments"][0]["route_status"] = "active"
-        case["expected"]["reviewed_routes"][0]["route_status"] = "active"
-        case["expected"]["unreviewed_routes"][0]["route_status"] = "active"
-
-        violations = check_normative_fixtures.validate_live_sync_corpus(
-            Path("fixtures/providers/live-sync-corpus.json"),
-            corpus,
-        )
-
-        joined = "\n".join(violations)
-        self.assertIn("case venice-openai-model-list-valid: enrichments[0]", joined)
-        self.assertIn("expected.reviewed_routes[0]", joined)
-        self.assertIn("expected.unreviewed_routes[0]", joined)
-        self.assertIn("live-sync fixture routes for Venice dstack app-E2EE", joined)
-        self.assertIn("unreviewed live-sync discoveries must remain new_unverified", joined)
 
     def test_compatibility_matrix_envelope_must_match_raw_matrix(self) -> None:
         envelope = copy.deepcopy(

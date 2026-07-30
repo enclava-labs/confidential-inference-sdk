@@ -14,7 +14,6 @@ mod provider;
 mod provider_evidence_corpus;
 mod reference_values_generator;
 mod registry;
-mod registry_generator;
 
 pub use chutes_live::ChutesHttpProvider;
 pub use compatibility::{
@@ -68,12 +67,4 @@ pub use registry::{
     ProviderRegistryEnvelope, ProviderRegistryPin, ProviderRegistrySigningIdentity,
     RegistryDiffChange, RegistryDiffKind, RegistryModel, RouteDefinition, RouteLifecycle,
     SourceSyncRun, StreamingSupport,
-};
-pub use registry_generator::{
-    generate_provider_registry, generate_provider_registry_from_live_sync,
-    generate_signed_provider_registry, ingest_live_sync_registry,
-    parse_openai_model_list_raw_models, parse_provider_model_list_raw_models,
-    RegistryGeneratorInput, RegistryGeneratorModel, RegistryGeneratorRoute,
-    RegistryLiveSyncEnrichment, RegistryLiveSyncIngestion, RegistryLiveSyncInput,
-    RegistryLiveSyncObservation, RegistryLiveSyncProvider, RegistryLiveSyncRawModel,
 };
