@@ -682,7 +682,6 @@ struct ClientInner {
     gpu_attestation_verifier_is_custom: bool,
     tinfoil_dcap_tdx_collateral_resolver: Option<DcapTdxCollateralResolver>,
     time_source: TimeSource,
-    audit_sink: Arc<dyn AuditSink>,
     verdict_store: Arc<dyn VerdictStore>,
     metrics_recorder: Arc<dyn ConfidentialInferenceMetricsRecorder>,
     api_keys: BTreeMap<String, ClientApiKey>,
@@ -2206,8 +2205,6 @@ impl ConfidentialInference {
             cache_hit,
             "recording attestation verdict"
         );
-        let audit_event = AuditEvent::from_verdict(verdict, cache_hit);
-        self.inner.audit_sink.record(&audit_event);
         let verdict_record = VerdictRecord::from_verdict(verdict, cache_hit);
         self.inner.verdict_store.persist(&verdict_record);
         self.record_metric(ConfidentialInferenceMetricEvent::Verdict(
@@ -2977,7 +2974,6 @@ pub struct ConfidentialInferenceBuilder {
     gpu_attestation_verifier_is_custom: bool,
     tinfoil_dcap_tdx_collateral_resolver: Option<DcapTdxCollateralResolver>,
     time_source: TimeSource,
-    audit_sink: Arc<dyn AuditSink>,
     verdict_store: Arc<dyn VerdictStore>,
     metrics_recorder: Arc<dyn ConfidentialInferenceMetricsRecorder>,
     api_keys: BTreeMap<String, ClientApiKey>,
@@ -3001,7 +2997,6 @@ impl ConfidentialInferenceBuilder {
             gpu_attestation_verifier_is_custom: false,
             tinfoil_dcap_tdx_collateral_resolver: None,
             time_source: Arc::new(now_epoch_millis),
-            audit_sink: Arc::new(NoopAuditSink),
             verdict_store: Arc::new(NoopVerdictStore),
             metrics_recorder: Arc::new(NoopConfidentialInferenceMetricsRecorder),
             api_keys: BTreeMap::new(),
@@ -3152,11 +3147,6 @@ impl ConfidentialInferenceBuilder {
 
     pub fn allow_insecure_plaintext(mut self, allow: bool) -> Self {
         self.allow_insecure_plaintext = allow;
-        self
-    }
-
-    pub fn audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
-        self.audit_sink = audit_sink;
         self
     }
 
@@ -3349,7 +3339,6 @@ impl ConfidentialInferenceBuilder {
                 gpu_attestation_verifier_is_custom: self.gpu_attestation_verifier_is_custom,
                 tinfoil_dcap_tdx_collateral_resolver,
                 time_source,
-                audit_sink: self.audit_sink,
                 verdict_store: self.verdict_store,
                 metrics_recorder: self.metrics_recorder,
                 api_keys: self.api_keys,
@@ -3736,8 +3725,9 @@ impl ResponsesBuilder {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditEvent {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VerdictRecord {
+    pub request_id: String,
     pub provider: String,
     pub route_id: String,
     pub requested_model: String,
@@ -3750,89 +3740,6 @@ pub struct AuditEvent {
     pub request_confidentiality_result: confidential_inference_attestation::ConfidentialityResult,
     pub response_confidentiality_result: confidential_inference_attestation::ConfidentialityResult,
     pub response_integrity_result: ResponseIntegrityResult,
-    pub enforcement: EnforcementMode,
-    pub status: confidential_inference_attestation::VerificationStatus,
-    pub request_allowed: bool,
-    pub would_block_under_enforce: bool,
-    pub policy_digest: String,
-    pub provider_registry_digest: String,
-    pub registry_version: String,
-    pub registry_source: String,
-    pub registry_sync_completed_at: String,
-    pub registry_signature: SignatureMetadata,
-    pub reference_values_digest: String,
-    pub reference_values_version: String,
-    pub reference_values_source: String,
-    pub reference_values_signature: SignatureMetadata,
-    pub raw_evidence_digest: String,
-    pub evidence_digest: String,
-    pub verified_at: String,
-    pub expires_at: String,
-    pub freshness_class: confidential_inference_attestation::FreshnessClass,
-    pub streaming_allowed: bool,
-    pub route_execution_status: String,
-    pub chat_executable: bool,
-    pub known_unsupported_modes: Vec<String>,
-    pub cache_hit: bool,
-    pub errors: Vec<String>,
-}
-
-impl AuditEvent {
-    fn from_verdict(verdict: &AttestationVerdict, cache_hit: bool) -> Self {
-        Self {
-            provider: verdict.provider.clone(),
-            route_id: verdict.route_id.clone(),
-            requested_model: verdict.requested_model.clone(),
-            provider_model: verdict.provider_model.clone(),
-            canonical_model: verdict.canonical_model.clone(),
-            evidence_family: verdict.evidence_family.clone(),
-            adapter_version: verdict.adapter_version.clone(),
-            trust_tier: verdict.trust_tier.clone(),
-            channel_binding_kind: verdict.channel_binding_kind.clone(),
-            request_confidentiality_result: verdict.request_confidentiality_result.clone(),
-            response_confidentiality_result: verdict.response_confidentiality_result.clone(),
-            response_integrity_result: verdict.response_integrity_result.clone(),
-            enforcement: verdict.enforcement.clone(),
-            status: verdict.status.clone(),
-            request_allowed: verdict.request_allowed,
-            would_block_under_enforce: verdict.would_block_under_enforce,
-            policy_digest: verdict.policy_digest.clone(),
-            provider_registry_digest: verdict.provider_registry_digest.clone(),
-            registry_version: verdict.registry_version.clone(),
-            registry_source: verdict.registry_source.clone(),
-            registry_sync_completed_at: verdict.registry_sync_completed_at.clone(),
-            registry_signature: verdict.registry_signature.clone(),
-            reference_values_digest: verdict.reference_values_digest.clone(),
-            reference_values_version: verdict.reference_values_version.clone(),
-            reference_values_source: verdict.reference_values_source.clone(),
-            reference_values_signature: verdict.reference_values_signature.clone(),
-            raw_evidence_digest: verdict.raw_evidence_digest.clone(),
-            evidence_digest: verdict.evidence_digest.clone(),
-            verified_at: verdict.verified_at.clone(),
-            expires_at: verdict.expires_at.clone(),
-            freshness_class: verdict.freshness_class.clone(),
-            streaming_allowed: verdict.streaming_allowed,
-            route_execution_status: verdict.route_execution_status.clone(),
-            chat_executable: verdict.chat_executable,
-            known_unsupported_modes: verdict.known_unsupported_modes.clone(),
-            cache_hit,
-            errors: verdict
-                .errors
-                .iter()
-                .map(|error| format!("{}:{}", error.code, error.message))
-                .collect(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct VerdictRecord {
-    pub request_id: String,
-    pub provider: String,
-    pub route_id: String,
-    pub requested_model: String,
-    pub provider_model: String,
-    pub canonical_model: String,
     pub enforcement: EnforcementMode,
     pub status: confidential_inference_attestation::VerificationStatus,
     pub request_allowed: bool,
@@ -3873,6 +3780,13 @@ impl VerdictRecord {
             requested_model: verdict.requested_model.clone(),
             provider_model: verdict.provider_model.clone(),
             canonical_model: verdict.canonical_model.clone(),
+            evidence_family: verdict.evidence_family.clone(),
+            adapter_version: verdict.adapter_version.clone(),
+            trust_tier: verdict.trust_tier.clone(),
+            channel_binding_kind: verdict.channel_binding_kind.clone(),
+            request_confidentiality_result: verdict.request_confidentiality_result.clone(),
+            response_confidentiality_result: verdict.response_confidentiality_result.clone(),
+            response_integrity_result: verdict.response_integrity_result.clone(),
             enforcement: verdict.enforcement.clone(),
             status: verdict.status.clone(),
             request_allowed: verdict.request_allowed,
@@ -4066,45 +3980,6 @@ struct VerificationFlightState {
     waiters: usize,
 }
 
-pub trait AuditSink: Send + Sync {
-    fn record(&self, event: &AuditEvent);
-}
-
-#[derive(Debug)]
-pub struct NoopAuditSink;
-
-impl AuditSink for NoopAuditSink {
-    fn record(&self, _event: &AuditEvent) {}
-}
-
-#[derive(Debug)]
-pub struct JsonlAuditSink {
-    file: Mutex<std::fs::File>,
-}
-
-impl JsonlAuditSink {
-    pub fn create(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        Ok(Self {
-            file: Mutex::new(file),
-        })
-    }
-}
-
-impl AuditSink for JsonlAuditSink {
-    fn record(&self, event: &AuditEvent) {
-        let Ok(mut file) = self.file.lock() else {
-            return;
-        };
-        if serde_json::to_writer(&mut *file, event).is_ok() {
-            let _ = writeln!(&mut *file);
-        }
-    }
-}
-
 fn now_epoch_millis() -> u64 {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4166,17 +4041,6 @@ mod tests {
         include_bytes!("../../../fixtures/evidence/dcap-qvl/tdx_quote.bin");
     const SAMPLE_DCAP_COLLATERAL: &[u8] =
         include_bytes!("../../../fixtures/evidence/dcap-qvl/tdx_quote_collateral.json");
-
-    #[derive(Default)]
-    struct MemoryAuditSink {
-        events: Mutex<Vec<AuditEvent>>,
-    }
-
-    impl AuditSink for MemoryAuditSink {
-        fn record(&self, event: &AuditEvent) {
-            self.events.lock().unwrap().push(event.clone());
-        }
-    }
 
     #[derive(Default)]
     struct MemoryVerdictStore {
@@ -4950,7 +4814,6 @@ mod tests {
                 gpu_attestation_verifier_is_custom: false,
                 tinfoil_dcap_tdx_collateral_resolver: None,
                 time_source: Arc::new(now_epoch_millis),
-                audit_sink: Arc::new(NoopAuditSink),
                 verdict_store: Arc::new(NoopVerdictStore),
                 metrics_recorder: Arc::new(NoopConfidentialInferenceMetricsRecorder),
                 api_keys: BTreeMap::new(),
@@ -6034,11 +5897,9 @@ mod tests {
         let expected_verdict: serde_json::Value =
             serde_json::from_str(include_str!("../../../fixtures/verdict/demo-verified.json"))
                 .unwrap();
-        let audit = Arc::new(MemoryAuditSink::default());
         let verdict_store = Arc::new(MemoryVerdictStore::default());
         let client = ConfidentialInference::builder()
             .with_demo_provider()
-            .audit_sink(audit.clone())
             .verdict_store(verdict_store.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
@@ -6106,7 +5967,7 @@ mod tests {
             serde_json::to_value(&response.verdict).unwrap(),
             expected_verdict
         );
-        let events = audit.events.lock().unwrap();
+        let events = verdict_store.records.lock().unwrap();
         assert_eq!(events.len(), 2);
         assert!(events.iter().any(|event| event.cache_hit));
         let event = events
@@ -6558,10 +6419,10 @@ mod tests {
 
     #[tokio::test]
     async fn responses_shim_executes_through_verified_chat_path() {
-        let audit = Arc::new(MemoryAuditSink::default());
+        let audit = Arc::new(MemoryVerdictStore::default());
         let client = ConfidentialInference::builder()
             .with_demo_provider()
-            .audit_sink(audit.clone())
+            .verdict_store(audit.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -6596,7 +6457,7 @@ mod tests {
             response.verdict.check("response_channel_binding"),
             Some(&CheckResult::Verified)
         );
-        assert_eq!(audit.events.lock().unwrap().len(), 2);
+        assert_eq!(audit.records.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -7451,11 +7312,11 @@ mod tests {
 
     #[tokio::test]
     async fn per_session_verification_cache_reuses_send_time_recheck() {
-        let audit = Arc::new(MemoryAuditSink::default());
+        let audit = Arc::new(MemoryVerdictStore::default());
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
             .with_provider(CountingProvider::valid(fetches.clone()))
-            .audit_sink(audit.clone())
+            .verdict_store(audit.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7472,7 +7333,7 @@ mod tests {
         assert_eq!(response.verdict.status, VerificationStatus::Verified);
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
-        let events = audit.events.lock().unwrap();
+        let events = audit.records.lock().unwrap();
         assert_eq!(events.len(), 2);
         assert!(!events[0].cache_hit);
         assert!(events[1].cache_hit);
@@ -7480,7 +7341,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_revalidates_once_after_provider_key_rotation() {
-        let audit = Arc::new(MemoryAuditSink::default());
+        let audit = Arc::new(MemoryVerdictStore::default());
         let fetches = Arc::new(AtomicUsize::new(0));
         let chat_attempts = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
@@ -7488,7 +7349,7 @@ mod tests {
                 fetches.clone(),
                 chat_attempts.clone(),
             ))
-            .audit_sink(audit.clone())
+            .verdict_store(audit.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7505,7 +7366,7 @@ mod tests {
         assert_eq!(response.verdict.status, VerificationStatus::Verified);
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
         assert_eq!(chat_attempts.load(Ordering::SeqCst), 2);
-        let events = audit.events.lock().unwrap();
+        let events = audit.records.lock().unwrap();
         assert_eq!(events.len(), 3);
         assert!(!events[0].cache_hit);
         assert!(events[1].cache_hit);
@@ -8648,17 +8509,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jsonl_audit_sink_writes_structured_records_without_plaintext() {
+    async fn jsonl_verdict_store_writes_structured_records_without_plaintext() {
         let path = std::env::temp_dir().join(format!(
-            "confidential-inference-audit-record-{}-{}.jsonl",
+            "confidential-inference-verdict-record-{}-{}.jsonl",
             std::process::id(),
             now_epoch_millis()
         ));
-        let audit_sink = Arc::new(JsonlAuditSink::create(&path).unwrap());
+        let verdict_store = Arc::new(JsonlVerdictStore::create(&path).unwrap());
         let prompt = "jsonl audit secret prompt";
         let client = ConfidentialInference::builder()
             .with_demo_provider()
-            .audit_sink(audit_sink.clone())
+            .verdict_store(verdict_store.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -8674,10 +8535,10 @@ mod tests {
 
         assert_eq!(response.verdict.status, VerificationStatus::Verified);
         drop(client);
-        drop(audit_sink);
+        drop(verdict_store);
 
         let contents = std::fs::read_to_string(&path).unwrap();
-        let records: Vec<AuditEvent> = contents
+        let records: Vec<VerdictRecord> = contents
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
@@ -8717,14 +8578,14 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_per_session_cache_misses_use_single_flight_verification() {
-        let audit = Arc::new(MemoryAuditSink::default());
+        let audit = Arc::new(MemoryVerdictStore::default());
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
             .with_provider(CountingProvider::valid_with_delay(
                 fetches.clone(),
                 Duration::from_millis(50),
             ))
-            .audit_sink(audit.clone())
+            .verdict_store(audit.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -8742,7 +8603,7 @@ mod tests {
         assert_eq!(second.verdict().status, VerificationStatus::Verified);
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
-        let events = audit.events.lock().unwrap();
+        let events = audit.records.lock().unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events.iter().filter(|event| !event.cache_hit).count(), 1);
         assert_eq!(events.iter().filter(|event| event.cache_hit).count(), 1);
@@ -8750,14 +8611,14 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_chat_on_cloned_client_shares_in_flight_verification() {
-        let audit = Arc::new(MemoryAuditSink::default());
+        let audit = Arc::new(MemoryVerdictStore::default());
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
             .with_provider(CountingProvider::valid_with_delay(
                 fetches.clone(),
                 Duration::from_millis(50),
             ))
-            .audit_sink(audit.clone())
+            .verdict_store(audit.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -8798,7 +8659,7 @@ mod tests {
             .contains("second concurrent prompt"));
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
-        let events = audit.events.lock().unwrap();
+        let events = audit.records.lock().unwrap();
         assert!(events.iter().any(|event| !event.cache_hit));
         assert!(events.iter().any(|event| event.cache_hit));
         assert!(events.iter().all(|event| event.provider == "demo"));
@@ -8933,7 +8794,7 @@ mod tests {
 
     #[tokio::test]
     async fn per_request_freshness_bypasses_verdict_cache() {
-        let audit = Arc::new(MemoryAuditSink::default());
+        let audit = Arc::new(MemoryVerdictStore::default());
         let fetches = Arc::new(AtomicUsize::new(0));
         let evidence_nonces = Arc::new(Mutex::new(Vec::new()));
         let mut policy = VerificationPolicy::require_attested_e2ee();
@@ -8944,7 +8805,7 @@ mod tests {
                 fetches.clone(),
                 evidence_nonces.clone(),
             ))
-            .audit_sink(audit.clone())
+            .verdict_store(audit.clone())
             .policy(policy)
             .allow_insecure_plaintext(true)
             .build()
@@ -8969,7 +8830,7 @@ mod tests {
 
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
         assert!(audit
-            .events
+            .records
             .lock()
             .unwrap()
             .iter()
@@ -9124,13 +8985,13 @@ mod tests {
 
     #[tokio::test]
     async fn zero_verdict_ttl_bypasses_verdict_cache() {
-        let audit = Arc::new(MemoryAuditSink::default());
+        let audit = Arc::new(MemoryVerdictStore::default());
         let fetches = Arc::new(AtomicUsize::new(0));
         let mut policy = VerificationPolicy::require_attested_e2ee();
         policy.verdict_ttl_millis = Millis(0);
         let client = ConfidentialInference::builder()
             .with_provider(CountingProvider::valid(fetches.clone()))
-            .audit_sink(audit.clone())
+            .verdict_store(audit.clone())
             .policy(policy)
             .build()
             .await
@@ -9146,7 +9007,7 @@ mod tests {
 
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
         assert!(audit
-            .events
+            .records
             .lock()
             .unwrap()
             .iter()
@@ -9155,12 +9016,10 @@ mod tests {
 
     #[tokio::test]
     async fn enforcing_policy_blocks_wrong_model_evidence() {
-        let audit = Arc::new(MemoryAuditSink::default());
         let verdict_store = Arc::new(MemoryVerdictStore::default());
         let metrics = Arc::new(InMemoryConfidentialInferenceMetricsRecorder::default());
         let client = ConfidentialInference::builder()
             .with_provider(DemoProvider::wrong_model())
-            .audit_sink(audit.clone())
             .verdict_store(verdict_store.clone())
             .metrics_recorder(metrics.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
@@ -9208,15 +9067,6 @@ mod tests {
         assert!(!serde_json::to_string(&events)
             .unwrap()
             .contains("should fail"));
-        let audit_events = audit.events.lock().unwrap();
-        assert_eq!(audit_events.len(), 1);
-        assert_eq!(audit_events[0].status, VerificationStatus::Failed);
-        assert!(!audit_events[0].request_allowed);
-        assert!(audit_events[0].would_block_under_enforce);
-        assert!(!audit_events[0].cache_hit);
-        assert!(!serde_json::to_string(&*audit_events)
-            .unwrap()
-            .contains("should fail"));
     }
 
     #[tokio::test]
@@ -9248,11 +9098,9 @@ mod tests {
     async fn observe_mode_allows_failed_verdict_but_records_status() {
         let mut policy = VerificationPolicy::require_attested_e2ee();
         policy.enforcement = EnforcementMode::Observe;
-        let audit = Arc::new(MemoryAuditSink::default());
         let verdict_store = Arc::new(MemoryVerdictStore::default());
         let client = ConfidentialInference::builder()
             .with_provider(DemoProvider::wrong_key())
-            .audit_sink(audit.clone())
             .verdict_store(verdict_store.clone())
             .policy(policy)
             .allow_insecure_plaintext(true)
@@ -9284,29 +9132,15 @@ mod tests {
         assert!(records
             .iter()
             .all(|record| record.would_block_under_enforce));
-        let audit_events = audit.events.lock().unwrap();
-        assert_eq!(audit_events.len(), 2);
-        assert!(audit_events.iter().all(|event| event.request_allowed));
-        assert!(audit_events
-            .iter()
-            .all(|event| event.status == VerificationStatus::Failed));
-        assert!(audit_events
-            .iter()
-            .all(|event| event.would_block_under_enforce));
-        assert!(!serde_json::to_string(&*audit_events)
-            .unwrap()
-            .contains("observe mode"));
     }
 
     #[tokio::test]
     async fn disabled_mode_allows_failed_verdict_and_marks_status_disabled() {
         let mut policy = VerificationPolicy::require_attested_e2ee();
         policy.enforcement = EnforcementMode::Disabled;
-        let audit = Arc::new(MemoryAuditSink::default());
         let verdict_store = Arc::new(MemoryVerdictStore::default());
         let client = ConfidentialInference::builder()
             .with_provider(DemoProvider::wrong_key())
-            .audit_sink(audit.clone())
             .verdict_store(verdict_store.clone())
             .policy(policy)
             .allow_insecure_plaintext(true)
@@ -9338,28 +9172,14 @@ mod tests {
         assert!(records
             .iter()
             .all(|record| record.would_block_under_enforce));
-        let audit_events = audit.events.lock().unwrap();
-        assert_eq!(audit_events.len(), 2);
-        assert!(audit_events.iter().all(|event| event.request_allowed));
-        assert!(audit_events
-            .iter()
-            .all(|event| event.status == VerificationStatus::Disabled));
-        assert!(audit_events
-            .iter()
-            .all(|event| event.would_block_under_enforce));
-        assert!(!serde_json::to_string(&*audit_events)
-            .unwrap()
-            .contains("disabled mode"));
     }
 
     #[tokio::test]
     async fn streaming_fails_closed_when_encrypted_route_does_not_support_it() {
-        let audit = Arc::new(MemoryAuditSink::default());
         let verdict_store = Arc::new(MemoryVerdictStore::default());
         let metrics = Arc::new(InMemoryConfidentialInferenceMetricsRecorder::default());
         let client = ConfidentialInference::builder()
             .with_demo_provider()
-            .audit_sink(audit.clone())
             .verdict_store(verdict_store.clone())
             .metrics_recorder(metrics.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
@@ -9377,7 +9197,7 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, ClientError::StreamingNotSupported { .. }));
-        assert!(audit.events.lock().unwrap().is_empty());
+        assert!(verdict_store.records.lock().unwrap().is_empty());
         assert!(verdict_store.records.lock().unwrap().is_empty());
         assert!(metrics.events().iter().any(|event| matches!(
             event,

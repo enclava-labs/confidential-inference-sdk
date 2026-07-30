@@ -1203,18 +1203,18 @@ fn sanitize_header_value(value: &str) -> String {
 mod tests {
     use super::*;
     use confidential_inference_openai::ChatMessage;
-    use confidential_inference_sdk::{AuditEvent, AuditSink};
+    use confidential_inference_sdk::{VerdictRecord, VerdictStore};
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
-    struct MemoryAuditSink {
-        events: Mutex<Vec<AuditEvent>>,
+    struct MemoryVerdictStore {
+        records: Mutex<Vec<VerdictRecord>>,
     }
 
-    impl AuditSink for MemoryAuditSink {
-        fn record(&self, event: &AuditEvent) {
-            self.events.lock().unwrap().push(event.clone());
+    impl VerdictStore for MemoryVerdictStore {
+        fn persist(&self, record: &VerdictRecord) {
+            self.records.lock().unwrap().push(record.clone());
         }
     }
 
@@ -1594,10 +1594,10 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_rejects_unauthenticated_chat_before_sdk_verification() {
-        let audit = Arc::new(MemoryAuditSink::default());
+        let audit = Arc::new(MemoryVerdictStore::default());
         let client = ConfidentialInference::builder()
             .with_demo_provider()
-            .audit_sink(audit.clone())
+            .verdict_store(audit.clone())
             .build()
             .await
             .unwrap();
@@ -1625,7 +1625,7 @@ mod tests {
         assert_eq!(unauthorized.status, 401);
         assert!(unauthorized.body.contains("unauthorized"));
         assert!(unauthorized.verdict_json.is_none());
-        assert!(audit.events.lock().unwrap().is_empty());
+        assert!(audit.records.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
