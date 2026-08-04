@@ -759,7 +759,6 @@ fn client_error_response(error: &ClientError) -> ProxyHttpResponse {
         ClientError::PolicyDenied { .. } => (403, "policy_denied"),
         ClientError::VerifiedRouteExpired { .. } => (409, "verified_route_expired"),
         ClientError::InsecurePolicyRequiresOptIn { .. } => (500, "client_configuration_failed"),
-        ClientError::MetricsExport(_) => (500, "metrics_export_failed"),
         ClientError::ResponseJsonSerialization(_) => (500, "response_serialization_failed"),
         ClientError::RegistryCache(_) => (503, "registry_cache_failed"),
         ClientError::ReferenceValuesCache(_) => (503, "reference_values_cache_failed"),

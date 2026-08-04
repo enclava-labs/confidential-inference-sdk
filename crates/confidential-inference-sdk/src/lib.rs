@@ -36,7 +36,6 @@ use tracing::Instrument;
 use zeroize::Zeroizing;
 
 const DEFAULT_REMOTE_REGISTRY_TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_OTLP_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const CACHE_CLOCK_JUMP_REVALIDATION_THRESHOLD_MS: u64 = 60_000;
 #[cfg(test)]
 const SINGLE_FLIGHT_MAX_WAITERS: usize = 1;
@@ -116,9 +115,6 @@ pub enum ClientError {
 
     #[error("response JSON serialization failed: {0}")]
     ResponseJsonSerialization(String),
-
-    #[error("metrics export failed: {0}")]
-    MetricsExport(String),
 
     #[error("verified route expired at {expires_at}")]
     VerifiedRouteExpired { expires_at: String },
@@ -911,275 +907,12 @@ impl InMemoryConfidentialInferenceMetricsRecorder {
             .map(|events| events.clone())
             .unwrap_or_default()
     }
-
-    pub fn prometheus_text(&self) -> String {
-        export_confidential_inference_metrics_prometheus_text(&self.events())
-    }
-
-    pub fn otlp_json(&self) -> serde_json::Result<String> {
-        export_confidential_inference_metrics_otlp_json(&self.events())
-    }
-
-    pub async fn export_otlp_http(&self, endpoint: impl AsRef<str>) -> Result<()> {
-        export_confidential_inference_metrics_otlp_http(&self.events(), endpoint).await
-    }
-
-    pub async fn export_otlp_http_with_timeout(
-        &self,
-        endpoint: impl AsRef<str>,
-        timeout: Duration,
-    ) -> Result<()> {
-        export_confidential_inference_metrics_otlp_http_with_timeout(
-            &self.events(),
-            endpoint,
-            timeout,
-        )
-        .await
-    }
 }
 
 impl ConfidentialInferenceMetricsRecorder for InMemoryConfidentialInferenceMetricsRecorder {
     fn record(&self, event: &ConfidentialInferenceMetricEvent) {
         if let Ok(mut events) = self.events.lock() {
             events.push(event.clone());
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct JsonlConfidentialInferenceMetricsRecorder {
-    file: Mutex<std::fs::File>,
-}
-
-impl JsonlConfidentialInferenceMetricsRecorder {
-    pub fn create(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        Ok(Self {
-            file: Mutex::new(file),
-        })
-    }
-}
-
-impl ConfidentialInferenceMetricsRecorder for JsonlConfidentialInferenceMetricsRecorder {
-    fn record(&self, event: &ConfidentialInferenceMetricEvent) {
-        let Ok(mut file) = self.file.lock() else {
-            return;
-        };
-        if serde_json::to_writer(&mut *file, event).is_ok() {
-            let _ = writeln!(&mut *file);
-        }
-    }
-}
-
-pub fn export_confidential_inference_metrics_prometheus_text(
-    events: &[ConfidentialInferenceMetricEvent],
-) -> String {
-    let mut exporter = PrometheusTextExporter::default();
-    record_confidential_inference_metric_counters(events, &mut exporter);
-    exporter.finish()
-}
-
-pub fn export_confidential_inference_metrics_otlp_json(
-    events: &[ConfidentialInferenceMetricEvent],
-) -> serde_json::Result<String> {
-    let mut exporter = OtlpJsonMetricsExporter::default();
-    record_confidential_inference_metric_counters(events, &mut exporter);
-    exporter.finish()
-}
-
-pub async fn export_confidential_inference_metrics_otlp_http(
-    events: &[ConfidentialInferenceMetricEvent],
-    endpoint: impl AsRef<str>,
-) -> Result<()> {
-    export_confidential_inference_metrics_otlp_http_with_timeout(
-        events,
-        endpoint,
-        DEFAULT_OTLP_HTTP_TIMEOUT,
-    )
-    .await
-}
-
-pub async fn export_confidential_inference_metrics_otlp_http_with_timeout(
-    events: &[ConfidentialInferenceMetricEvent],
-    endpoint: impl AsRef<str>,
-    timeout: Duration,
-) -> Result<()> {
-    let endpoint = endpoint.as_ref().trim();
-    if endpoint.is_empty() {
-        return Err(ClientError::MetricsExport(
-            "OTLP HTTP endpoint is empty".into(),
-        ));
-    }
-    let endpoint_label = redact_url_credentials(endpoint);
-    let body = export_confidential_inference_metrics_otlp_json(events)
-        .map_err(|error| ClientError::MetricsExport(format!("OTLP JSON failed: {error}")))?;
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|_| ClientError::MetricsExport("OTLP HTTP client build failed".into()))?;
-    let response = client
-        .post(endpoint)
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|_| {
-            ClientError::MetricsExport(format!("OTLP HTTP POST to {endpoint_label} failed"))
-        })?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(ClientError::MetricsExport(format!(
-            "OTLP HTTP POST to {endpoint_label} returned {status}"
-        )));
-    }
-    Ok(())
-}
-
-fn record_confidential_inference_metric_counters(
-    events: &[ConfidentialInferenceMetricEvent],
-    exporter: &mut impl CounterMetricExporter,
-) {
-    for event in events {
-        match event {
-            ConfidentialInferenceMetricEvent::RouteSelection(metric) => {
-                let labels = [
-                    ("provider", metric.provider.as_str()),
-                    ("requested_model", metric.requested_model.as_str()),
-                    ("purpose", metric.purpose.as_str()),
-                    ("outcome", metric_outcome_label(&metric.outcome)),
-                ];
-                exporter.counter(
-                    "confidential_inference_route_selection_total",
-                    "Route selection attempts by provider, requested model, purpose, and outcome.",
-                    &labels,
-                    1,
-                );
-                exporter.counter(
-                    "confidential_inference_route_selection_duration_ms_count",
-                    "Route selection duration sample count.",
-                    &labels,
-                    1,
-                );
-                exporter.counter(
-                    "confidential_inference_route_selection_duration_ms_sum",
-                    "Route selection duration sum in milliseconds.",
-                    &labels,
-                    metric.duration_ms,
-                );
-                exporter.counter(
-                    "confidential_inference_route_selection_candidates_total",
-                    "Matched route candidates observed during route selection.",
-                    &labels,
-                    metric.candidate_count as u64,
-                );
-                exporter.counter(
-                    "confidential_inference_route_selection_selected_total",
-                    "Selected routes observed during route selection.",
-                    &labels,
-                    metric.selected_count as u64,
-                );
-            }
-            ConfidentialInferenceMetricEvent::Latency(metric) => {
-                let mut labels = route_metric_label_pairs(&metric.labels);
-                let step = metric_step_label(&metric.step);
-                let outcome = metric_outcome_label(&metric.outcome);
-                labels.push(("step", step));
-                labels.push(("outcome", outcome));
-                exporter.counter(
-                    "confidential_inference_verification_step_duration_ms_count",
-                    "Verification and provider execution step duration sample count.",
-                    &labels,
-                    1,
-                );
-                exporter.counter(
-                    "confidential_inference_verification_step_duration_ms_sum",
-                    "Verification and provider execution step duration sum in milliseconds.",
-                    &labels,
-                    metric.duration_ms,
-                );
-            }
-            ConfidentialInferenceMetricEvent::VerificationCache(metric) => {
-                let mut labels = route_metric_label_pairs(&metric.labels);
-                let event = verification_cache_event_label(&metric.event);
-                labels.push(("event", event));
-                exporter.counter(
-                    "confidential_inference_verdict_cache_events_total",
-                    "Verdict cache hit, miss, and store events.",
-                    &labels,
-                    1,
-                );
-            }
-            ConfidentialInferenceMetricEvent::SingleFlight(metric) => {
-                let mut labels = route_metric_label_pairs(&metric.labels);
-                let event = single_flight_event_label(&metric.event);
-                labels.push(("event", event));
-                exporter.counter(
-                    "confidential_inference_single_flight_events_total",
-                    "Single-flight route verification ownership and wait events.",
-                    &labels,
-                    1,
-                );
-                if let Some(wait_ms) = metric.wait_ms {
-                    exporter.counter(
-                        "confidential_inference_single_flight_wait_ms_count",
-                        "Single-flight wait duration sample count.",
-                        &labels,
-                        1,
-                    );
-                    exporter.counter(
-                        "confidential_inference_single_flight_wait_ms_sum",
-                        "Single-flight wait duration sum in milliseconds.",
-                        &labels,
-                        wait_ms,
-                    );
-                }
-            }
-            ConfidentialInferenceMetricEvent::Verdict(metric) => {
-                let mut labels = route_metric_label_pairs(&metric.labels);
-                let status = serde_label(&metric.status);
-                let enforcement = serde_label(&metric.enforcement);
-                let request_allowed = bool_label(metric.request_allowed);
-                let would_block = bool_label(metric.would_block_under_enforce);
-                let cache_hit = bool_label(metric.cache_hit);
-                labels.push(("status", status.as_str()));
-                labels.push(("enforcement", enforcement.as_str()));
-                labels.push(("request_allowed", request_allowed));
-                labels.push(("would_block_under_enforce", would_block));
-                labels.push(("cache_hit", cache_hit));
-                exporter.counter(
-                    "confidential_inference_verdict_status_total",
-                    "Attestation verdict status counts.",
-                    &labels,
-                    1,
-                );
-            }
-            ConfidentialInferenceMetricEvent::PolicyFailure(metric) => {
-                let mut labels = route_metric_label_pairs(&metric.labels);
-                let status = serde_label(&metric.status);
-                let enforcement = serde_label(&metric.enforcement);
-                labels.push(("check", metric.check.as_str()));
-                labels.push(("status", status.as_str()));
-                labels.push(("enforcement", enforcement.as_str()));
-                exporter.counter(
-                    "confidential_inference_policy_failures_total",
-                    "Policy enforcement failures by check.",
-                    &labels,
-                    1,
-                );
-            }
-            ConfidentialInferenceMetricEvent::StreamingFailClosed(metric) => {
-                let mut labels = route_metric_label_pairs(&metric.labels);
-                labels.push(("endpoint", metric.endpoint.as_str()));
-                exporter.counter(
-                    "confidential_inference_streaming_fail_closed_total",
-                    "Streaming requests rejected because the selected confidential route cannot stream.",
-                    &labels,
-                    1,
-                );
-            }
         }
     }
 }
@@ -2220,6 +1953,73 @@ impl ConfidentialInference {
     }
 
     fn record_metric(&self, event: ConfidentialInferenceMetricEvent) {
+        // Emit a structured tracing event so callers can export metrics via any
+        // tracing subscriber / caller-selected exporter (e.g. tracing-opentelemetry).
+        match &event {
+            ConfidentialInferenceMetricEvent::RouteSelection(metric) => tracing::info!(
+                target: "confidential_inference.metrics",
+                metric = "route_selection",
+                provider = %metric.provider,
+                requested_model = %metric.requested_model,
+                purpose = %metric.purpose,
+                candidate_count = metric.candidate_count,
+                selected_count = metric.selected_count,
+                duration_ms = metric.duration_ms,
+                outcome = %metric_outcome_label(&metric.outcome),
+            ),
+            ConfidentialInferenceMetricEvent::Latency(metric) => tracing::info!(
+                target: "confidential_inference.metrics",
+                metric = "latency",
+                provider = %metric.labels.provider,
+                route_id = %metric.labels.route_id,
+                step = %metric_step_label(&metric.step),
+                outcome = %metric_outcome_label(&metric.outcome),
+                duration_ms = metric.duration_ms,
+            ),
+            ConfidentialInferenceMetricEvent::VerificationCache(metric) => tracing::info!(
+                target: "confidential_inference.metrics",
+                metric = "verification_cache",
+                provider = %metric.labels.provider,
+                route_id = %metric.labels.route_id,
+                event = %verification_cache_event_label(&metric.event),
+            ),
+            ConfidentialInferenceMetricEvent::SingleFlight(metric) => tracing::info!(
+                target: "confidential_inference.metrics",
+                metric = "single_flight",
+                provider = %metric.labels.provider,
+                route_id = %metric.labels.route_id,
+                event = %single_flight_event_label(&metric.event),
+                wait_ms = ?metric.wait_ms,
+            ),
+            ConfidentialInferenceMetricEvent::Verdict(metric) => tracing::info!(
+                target: "confidential_inference.metrics",
+                metric = "verdict",
+                provider = %metric.labels.provider,
+                route_id = %metric.labels.route_id,
+                evidence_family = %metric.labels.evidence_family,
+                status = ?metric.status,
+                enforcement = ?metric.enforcement,
+                request_allowed = metric.request_allowed,
+                would_block_under_enforce = metric.would_block_under_enforce,
+                cache_hit = metric.cache_hit,
+            ),
+            ConfidentialInferenceMetricEvent::PolicyFailure(metric) => tracing::info!(
+                target: "confidential_inference.metrics",
+                metric = "policy_failure",
+                provider = %metric.labels.provider,
+                route_id = %metric.labels.route_id,
+                check = %metric.check,
+                status = ?metric.status,
+                enforcement = ?metric.enforcement,
+            ),
+            ConfidentialInferenceMetricEvent::StreamingFailClosed(metric) => tracing::info!(
+                target: "confidential_inference.metrics",
+                metric = "streaming_fail_closed",
+                provider = %metric.labels.provider,
+                route_id = %metric.labels.route_id,
+                endpoint = %metric.endpoint,
+            ),
+        }
         self.inner.metrics_recorder.record(&event);
     }
 
@@ -2678,19 +2478,6 @@ fn route_execution_status_label(status: &RouteExecutionStatus) -> &'static str {
     }
 }
 
-fn route_metric_label_pairs(
-    labels: &ConfidentialInferenceRouteMetricLabels,
-) -> Vec<(&'static str, &str)> {
-    vec![
-        ("provider", labels.provider.as_str()),
-        ("route_id", labels.route_id.as_str()),
-        ("requested_model", labels.requested_model.as_str()),
-        ("provider_model", labels.provider_model.as_str()),
-        ("canonical_model", labels.canonical_model.as_str()),
-        ("evidence_family", labels.evidence_family.as_str()),
-    ]
-}
-
 fn metric_outcome_label(outcome: &ConfidentialInferenceMetricOutcome) -> &'static str {
     match outcome {
         ConfidentialInferenceMetricOutcome::Success => "success",
@@ -2727,236 +2514,6 @@ fn single_flight_event_label(event: &ConfidentialInferenceSingleFlightEvent) -> 
         ConfidentialInferenceSingleFlightEvent::QueueFull => "queue_full",
         ConfidentialInferenceSingleFlightEvent::WaitTimeout => "wait_timeout",
     }
-}
-
-fn bool_label(value: bool) -> &'static str {
-    if value {
-        "true"
-    } else {
-        "false"
-    }
-}
-
-fn serde_label<T>(value: &T) -> String
-where
-    T: Serialize + std::fmt::Debug,
-{
-    match serde_json::to_value(value) {
-        Ok(serde_json::Value::String(label)) => label,
-        _ => debug_label(value),
-    }
-}
-
-fn debug_label<T>(value: &T) -> String
-where
-    T: std::fmt::Debug,
-{
-    let mut out = String::new();
-    for (index, ch) in format!("{value:?}").chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if index > 0 {
-                out.push('_');
-            }
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-trait CounterMetricExporter {
-    fn counter(
-        &mut self,
-        name: &'static str,
-        help: &'static str,
-        labels: &[(&str, &str)],
-        value: u64,
-    );
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PrometheusMetricKey {
-    name: String,
-    labels: Vec<(String, String)>,
-}
-
-#[derive(Debug, Default)]
-struct PrometheusTextExporter {
-    metadata: BTreeMap<String, (&'static str, &'static str)>,
-    values: BTreeMap<PrometheusMetricKey, u64>,
-}
-
-impl CounterMetricExporter for PrometheusTextExporter {
-    fn counter(
-        &mut self,
-        name: &'static str,
-        help: &'static str,
-        labels: &[(&str, &str)],
-        value: u64,
-    ) {
-        self.metadata.insert(name.into(), (help, "counter"));
-        let key = PrometheusMetricKey {
-            name: name.into(),
-            labels: labels
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-                .collect(),
-        };
-        *self.values.entry(key).or_default() += value;
-    }
-}
-
-impl PrometheusTextExporter {
-    fn finish(self) -> String {
-        let mut out = String::new();
-        for (name, (help, metric_type)) in self.metadata {
-            out.push_str("# HELP ");
-            out.push_str(&name);
-            out.push(' ');
-            out.push_str(help);
-            out.push('\n');
-            out.push_str("# TYPE ");
-            out.push_str(&name);
-            out.push(' ');
-            out.push_str(metric_type);
-            out.push('\n');
-            for (key, value) in self.values.iter().filter(|(key, _)| key.name == name) {
-                out.push_str(&key.name);
-                write_prometheus_labels(&mut out, &key.labels);
-                out.push(' ');
-                out.push_str(&value.to_string());
-                out.push('\n');
-            }
-        }
-        out
-    }
-}
-
-#[derive(Debug, Default)]
-struct OtlpJsonMetricsExporter {
-    metadata: BTreeMap<String, &'static str>,
-    values: BTreeMap<PrometheusMetricKey, u64>,
-}
-
-impl CounterMetricExporter for OtlpJsonMetricsExporter {
-    fn counter(
-        &mut self,
-        name: &'static str,
-        help: &'static str,
-        labels: &[(&str, &str)],
-        value: u64,
-    ) {
-        self.metadata.insert(name.into(), help);
-        let key = PrometheusMetricKey {
-            name: name.into(),
-            labels: labels
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-                .collect(),
-        };
-        *self.values.entry(key).or_default() += value;
-    }
-}
-
-impl OtlpJsonMetricsExporter {
-    fn finish(self) -> serde_json::Result<String> {
-        let OtlpJsonMetricsExporter { metadata, values } = self;
-        let metrics: Vec<_> = metadata
-            .into_iter()
-            .map(|(name, help)| {
-                let data_points: Vec<_> = values
-                    .iter()
-                    .filter(|(key, _)| key.name == name)
-                    .map(|(key, value)| {
-                        serde_json::json!({
-                            "attributes": otlp_string_attributes(&key.labels),
-                            "asInt": value.to_string(),
-                        })
-                    })
-                    .collect();
-                serde_json::json!({
-                    "name": name,
-                    "description": help,
-                    "unit": "1",
-                    "sum": {
-                        "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
-                        "isMonotonic": true,
-                        "dataPoints": data_points,
-                    },
-                })
-            })
-            .collect();
-        serde_json::to_string(&serde_json::json!({
-            "resourceMetrics": [
-                {
-                    "resource": {
-                        "attributes": [
-                            otlp_string_attribute("service.name", "confidential-inference-sdk"),
-                            otlp_string_attribute("telemetry.sdk.name", "confidential-inference"),
-                            otlp_string_attribute("telemetry.sdk.language", "rust"),
-                            otlp_string_attribute("confidential-inference.component", "client"),
-                        ],
-                    },
-                    "scopeMetrics": [
-                        {
-                            "scope": {
-                                "name": "confidential-inference-sdk",
-                                "version": env!("CARGO_PKG_VERSION"),
-                            },
-                            "metrics": metrics,
-                        },
-                    ],
-                },
-            ],
-        }))
-    }
-}
-
-fn otlp_string_attributes(labels: &[(String, String)]) -> Vec<serde_json::Value> {
-    labels
-        .iter()
-        .map(|(key, value)| otlp_string_attribute(key, value))
-        .collect()
-}
-
-fn otlp_string_attribute(key: &str, value: &str) -> serde_json::Value {
-    serde_json::json!({
-        "key": key,
-        "value": {
-            "stringValue": value,
-        },
-    })
-}
-
-fn write_prometheus_labels(out: &mut String, labels: &[(String, String)]) {
-    if labels.is_empty() {
-        return;
-    }
-    out.push('{');
-    for (index, (key, value)) in labels.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str(key);
-        out.push_str("=\"");
-        out.push_str(&escape_prometheus_label_value(value));
-        out.push('"');
-    }
-    out.push('}');
-}
-
-fn escape_prometheus_label_value(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
 }
 
 pub struct ConfidentialInferenceBuilder {
@@ -4970,26 +4527,6 @@ mod tests {
         format!("http://{addr}/registry.json")
     }
 
-    async fn spawn_otlp_metrics_collector(
-        status: u16,
-    ) -> (String, tokio::task::JoinHandle<std::io::Result<Vec<u8>>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await?;
-            let request = read_test_http_request(&mut stream).await?;
-            let reason = if status == 200 { "OK" } else { "ERROR" };
-            let body = "{}";
-            let response = format!(
-                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).await?;
-            Ok(request)
-        });
-        (format!("http://{addr}/v1/metrics"), handle)
-    }
-
     async fn spawn_dstack_app_e2ee_http_server(
         secret_key: SdkAppE2eeSecretKey,
         raw_chat_requests: Arc<Mutex<Vec<String>>>,
@@ -6155,43 +5692,6 @@ mod tests {
         let serialized = serde_json::to_string(&events).unwrap();
         assert!(!serialized.contains("metrics secret prompt"));
         assert!(!serialized.contains("demo confidential response"));
-        let prometheus = metrics.prometheus_text();
-        assert!(prometheus.contains("# TYPE confidential_inference_verdict_status_total counter"));
-        assert!(prometheus.contains("confidential_inference_route_selection_total"));
-        assert!(prometheus.contains("confidential_inference_verdict_cache_events_total"));
-        assert!(prometheus.contains("confidential_inference_verification_step_duration_ms_sum"));
-        assert!(prometheus.contains("provider=\"demo\""));
-        assert!(prometheus.contains("evidence_family=\"fixture_dstack\""));
-        assert!(!prometheus.contains("metrics secret prompt"));
-        assert!(!prometheus.contains("demo confidential response"));
-
-        let otlp = metrics.otlp_json().unwrap();
-        let otlp_value: serde_json::Value = serde_json::from_str(&otlp).unwrap();
-        assert_eq!(
-            otlp_value["resourceMetrics"][0]["resource"]["attributes"][0]["key"],
-            "service.name"
-        );
-        let otlp_metrics = otlp_value["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
-            .as_array()
-            .unwrap();
-        assert!(otlp_metrics.iter().any(|metric| metric["name"]
-            == "confidential_inference_verdict_status_total"
-            && metric["sum"]["dataPoints"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|point| point["attributes"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|attribute| attribute["key"] == "provider"
-                        && attribute["value"]["stringValue"] == "demo"))));
-        assert!(otlp_metrics
-            .iter()
-            .any(|metric| metric["name"]
-                == "confidential_inference_verification_step_duration_ms_sum"));
-        assert!(!otlp.contains("metrics secret prompt"));
-        assert!(!otlp.contains("demo confidential response"));
     }
 
     #[tokio::test]
@@ -6238,136 +5738,6 @@ mod tests {
         assert!(!trace_text.contains(api_key));
         assert!(!trace_text.contains("demo confidential response"));
         assert!(!trace_text.contains(response.response.choices[0].message.content.as_str()));
-    }
-
-    #[test]
-    fn prometheus_metrics_exporter_aggregates_and_escapes_labels() {
-        let labels = ConfidentialInferenceRouteMetricLabels {
-            provider: "demo\"provider".into(),
-            route_id: "route\nid".into(),
-            requested_model: "gpt-oss-120b".into(),
-            provider_model: "e2ee-gpt-oss-120b-p".into(),
-            canonical_model: "gpt-oss-120b".into(),
-            evidence_family: "fixture\\dstack".into(),
-        };
-        let event = ConfidentialInferenceMetricEvent::StreamingFailClosed(
-            ConfidentialInferenceStreamingFailClosedMetric {
-                labels,
-                endpoint: "chat_completions".into(),
-            },
-        );
-        let text = export_confidential_inference_metrics_prometheus_text(&[event.clone(), event]);
-
-        assert!(text.contains("provider=\"demo\\\"provider\""));
-        assert!(text.contains("route_id=\"route\\nid\""));
-        assert!(text.contains("evidence_family=\"fixture\\\\dstack\""));
-        assert!(text.contains("confidential_inference_streaming_fail_closed_total"));
-        assert!(text.contains("endpoint=\"chat_completions\"} 2"));
-    }
-
-    #[test]
-    fn otlp_metrics_exporter_aggregates_labels_and_metadata() {
-        let labels = ConfidentialInferenceRouteMetricLabels {
-            provider: "demo\"provider".into(),
-            route_id: "route\nid".into(),
-            requested_model: "gpt-oss-120b".into(),
-            provider_model: "e2ee-gpt-oss-120b-p".into(),
-            canonical_model: "gpt-oss-120b".into(),
-            evidence_family: "fixture\\dstack".into(),
-        };
-        let event = ConfidentialInferenceMetricEvent::StreamingFailClosed(
-            ConfidentialInferenceStreamingFailClosedMetric {
-                labels,
-                endpoint: "chat_completions".into(),
-            },
-        );
-        let text =
-            export_confidential_inference_metrics_otlp_json(&[event.clone(), event]).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let resource_metrics = value["resourceMetrics"].as_array().unwrap();
-        assert_eq!(resource_metrics.len(), 1);
-        let resource_attributes = resource_metrics[0]["resource"]["attributes"]
-            .as_array()
-            .unwrap();
-        assert!(resource_attributes.iter().any(|attribute| {
-            attribute["key"] == "service.name"
-                && attribute["value"]["stringValue"] == "confidential-inference-sdk"
-        }));
-        let scope_metrics = resource_metrics[0]["scopeMetrics"].as_array().unwrap();
-        assert_eq!(
-            scope_metrics[0]["scope"]["name"],
-            "confidential-inference-sdk"
-        );
-        let metrics = scope_metrics[0]["metrics"].as_array().unwrap();
-        let metric = metrics
-            .iter()
-            .find(|metric| metric["name"] == "confidential_inference_streaming_fail_closed_total")
-            .unwrap();
-        assert_eq!(
-            metric["sum"]["aggregationTemporality"],
-            "AGGREGATION_TEMPORALITY_CUMULATIVE"
-        );
-        assert_eq!(metric["sum"]["isMonotonic"], true);
-        let points = metric["sum"]["dataPoints"].as_array().unwrap();
-        assert_eq!(points.len(), 1);
-        assert_eq!(points[0]["asInt"], "2");
-        let point_attributes = points[0]["attributes"].as_array().unwrap();
-        assert!(point_attributes.iter().any(|attribute| {
-            attribute["key"] == "provider" && attribute["value"]["stringValue"] == "demo\"provider"
-        }));
-        assert!(point_attributes.iter().any(|attribute| {
-            attribute["key"] == "route_id" && attribute["value"]["stringValue"] == "route\nid"
-        }));
-        assert!(point_attributes.iter().any(|attribute| {
-            attribute["key"] == "evidence_family"
-                && attribute["value"]["stringValue"] == "fixture\\dstack"
-        }));
-    }
-
-    #[tokio::test]
-    async fn otlp_http_export_posts_json_payload_and_redacts_failures() {
-        let labels = demo_route_metric_labels();
-        let event = ConfidentialInferenceMetricEvent::StreamingFailClosed(
-            ConfidentialInferenceStreamingFailClosedMetric {
-                labels,
-                endpoint: "chat_completions".into(),
-            },
-        );
-        let (endpoint, request) = spawn_otlp_metrics_collector(200).await;
-
-        export_confidential_inference_metrics_otlp_http(&[event.clone(), event], &endpoint)
-            .await
-            .unwrap();
-
-        let request = request.await.unwrap().unwrap();
-        let request_text = String::from_utf8_lossy(&request);
-        assert!(request_text.starts_with("POST /v1/metrics HTTP/1.1"));
-        assert!(request_text
-            .lines()
-            .any(|line| line.eq_ignore_ascii_case("content-type: application/json")));
-        let body: serde_json::Value = serde_json::from_slice(test_http_body(&request)).unwrap();
-        assert_eq!(
-            body["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["name"],
-            "confidential-inference-sdk"
-        );
-        let metrics = body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
-            .as_array()
-            .unwrap();
-        assert!(metrics.iter().any(|metric| {
-            metric["name"] == "confidential_inference_streaming_fail_closed_total"
-                && metric["sum"]["dataPoints"][0]["asInt"] == "2"
-        }));
-
-        let (endpoint, _request) = spawn_otlp_metrics_collector(500).await;
-        let error = export_confidential_inference_metrics_otlp_http(
-            &[],
-            endpoint.replace("http://", "http://user:sk-test-secret@"),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("returned 500"));
-        assert!(!error.contains("sk-test-secret"));
     }
 
     #[test]

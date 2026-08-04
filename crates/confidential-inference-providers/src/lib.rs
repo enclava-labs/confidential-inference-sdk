@@ -29,15 +29,12 @@ pub use contrast::{
     PrivatemodeContrastImageSummary, PrivatemodeContrastManifestSummary,
 };
 pub use dcap_tdx::{
-    export_dcap_tdx_collateral_metrics_otlp_http,
-    export_dcap_tdx_collateral_metrics_otlp_http_with_timeout,
-    export_dcap_tdx_collateral_metrics_otlp_json,
-    export_dcap_tdx_collateral_metrics_prometheus_text, DcapTdxCollateralCacheEvent,
-    DcapTdxCollateralCacheMetric, DcapTdxCollateralFetchEvent, DcapTdxCollateralFetchMetric,
-    DcapTdxCollateralFetchPolicy, DcapTdxCollateralFetcher, DcapTdxCollateralMetricEvent,
-    DcapTdxCollateralMetricsRecorder, DcapTdxCollateralQueueEvent, DcapTdxCollateralQueueMetric,
-    DcapTdxCollateralResolver, InMemoryDcapTdxCollateralMetricsRecorder,
-    NoopDcapTdxCollateralMetricsRecorder, PccsDcapTdxCollateralFetcher,
+    DcapTdxCollateralCacheEvent, DcapTdxCollateralCacheMetric, DcapTdxCollateralFetchEvent,
+    DcapTdxCollateralFetchMetric, DcapTdxCollateralFetchPolicy, DcapTdxCollateralFetcher,
+    DcapTdxCollateralMetricEvent, DcapTdxCollateralMetricsRecorder, DcapTdxCollateralQueueEvent,
+    DcapTdxCollateralQueueMetric, DcapTdxCollateralResolver,
+    InMemoryDcapTdxCollateralMetricsRecorder, NoopDcapTdxCollateralMetricsRecorder,
+    PccsDcapTdxCollateralFetcher,
 };
 pub use demo::{DemoEvidenceMode, DemoProvider};
 pub use http::{
