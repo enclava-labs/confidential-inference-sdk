@@ -13,6 +13,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 const koffi = require('koffi');
 
+// Koffi async worker threads default to a 128 kiB stack, which is too small
+// for the Tokio runtime the FFI drives with block_on (stack overflow). Give
+// the async pool enough stack/heap to run the blocking SDK calls safely.
+koffi.config({ async_stack_size: 4 * 1024 * 1024, async_heap_size: 4 * 1024 * 1024 });
+
+// Invoke a registered Koffi function on one of its worker threads and resolve
+// with the C return value; out-pointer arguments are filled in before resolve.
+function callAsync(fn, ...args) {
+  return new Promise((resolve, reject) => {
+    fn.async(...args, (error, result) => (error ? reject(error) : resolve(result)));
+  });
+}
+
 const CONFIDENTIAL_INFERENCE_FFI_OK = 0;
 const CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT = 1;
 const CONFIDENTIAL_INFERENCE_FFI_PANIC = 2;
@@ -22,13 +35,14 @@ const CONFIDENTIAL_INFERENCE_FFI_UNSUPPORTED = 5;
 const CONFIDENTIAL_INFERENCE_FFI_INTERNAL = 6;
 
 class ConfidentialInferenceError extends Error {
-  constructor(status, error = {}) {
-    const code = error.code || 'ffi_error';
-    const message = error.message || `FFI status ${status}`;
+  constructor(status, error) {
+    const detail = error || {};
+    const code = detail.code || 'ffi_error';
+    const message = detail.message || `FFI status ${status}`;
     super(`${code}: ${message}`);
     this.name = 'ConfidentialInferenceError';
     this.status = status;
-    this.error = error;
+    this.error = detail;
   }
 }
 
@@ -198,6 +212,32 @@ class Stream {
     return asObject(this._native.takeJsonString(out[0]));
   }
 
+  // Non-blocking variant used by the async iterator; the blocking C call runs
+  // on a Koffi worker thread instead of the Node event loop.
+  _nextAsync(timeoutMs = 0) {
+    if (this._handle === null) {
+      return Promise.reject(
+        new ConfidentialInferenceError(CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT, {
+          code: 'stream_closed',
+          message: 'stream is closed',
+        })
+      );
+    }
+    const out = [null];
+    return callAsync(
+      this._native.functions.confidential_inference_stream_next,
+      this._handle,
+      BigInt(timeoutMs),
+      out
+    ).then((status) => {
+      if (status === CONFIDENTIAL_INFERENCE_FFI_PENDING) {
+        return null;
+      }
+      this._native.raiseForStatus(status);
+      return asObject(this._native.takeJsonString(out[0]));
+    });
+  }
+
   cancel() {
     if (this._handle !== null) {
       this._native.functions.confidential_inference_stream_cancel(this._handle);
@@ -205,17 +245,25 @@ class Stream {
   }
 
   close() {
-    if (this._handle !== null) {
-      const handle = this._handle;
+    if (this._handle === null) {
+      return;
+    }
+    // Cancel first so the native handle is never left pending: stream_free
+    // refuses (FFI_BUSY) to free a live stream, which would leak it.
+    this.cancel();
+    const status = this._native.functions.confidential_inference_stream_free(this._handle);
+    if (status === CONFIDENTIAL_INFERENCE_FFI_OK) {
       this._handle = null;
-      this._native.functions.confidential_inference_stream_free(handle);
+    } else {
+      // Keep the handle so the caller can retry after draining/cancelling.
+      this._native.raiseForStatus(status);
     }
   }
 
   async *[Symbol.asyncIterator]({ timeoutMs = 0, pollIntervalMs = 10 } = {}) {
     try {
       while (true) {
-        const event = this.next(timeoutMs);
+        const event = await this._nextAsync(timeoutMs);
         if (event === null) {
           await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
           continue;
@@ -245,10 +293,16 @@ class Client {
   }
 
   close() {
-    if (this._handle !== null) {
-      const handle = this._handle;
+    if (this._handle === null) {
+      return;
+    }
+    const status = this._native.functions.confidential_inference_sdk_free(this._handle);
+    if (status === CONFIDENTIAL_INFERENCE_FFI_OK) {
       this._handle = null;
-      this._native.functions.confidential_inference_sdk_free(handle);
+    } else {
+      // FFI_BUSY means live streams still reference the client; keep the
+      // handle so the caller can close them and retry instead of leaking it.
+      this._native.raiseForStatus(status);
     }
   }
 
@@ -290,7 +344,9 @@ class Client {
 
   async confidentialModels() {
     return asArray(
-      this._callNoRequestJson(this._native.functions.confidential_inference_confidentiality_blocking)
+      await this._callNoRequestJson(
+        this._native.functions.confidential_inference_confidentiality_blocking
+      )
     );
   }
 
@@ -328,7 +384,7 @@ class Client {
     const pollIntervalMs = options.pollIntervalMs ?? 10;
     try {
       while (true) {
-        const event = stream.next(timeoutMs);
+        const event = await stream._nextAsync(timeoutMs);
         if (event === null) {
           await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
           continue;
@@ -347,17 +403,21 @@ class Client {
   _callJson(fn, request, timeoutMs) {
     this._requireOpen();
     const out = [null];
-    const status = fn(this._handle, JSON.stringify(request), BigInt(timeoutMs), out);
-    this._native.raiseForStatus(status);
-    return asObject(this._native.takeJsonString(out[0]));
+    return callAsync(fn, this._handle, JSON.stringify(request), BigInt(timeoutMs), out).then(
+      (status) => {
+        this._native.raiseForStatus(status);
+        return asObject(this._native.takeJsonString(out[0]));
+      }
+    );
   }
 
   _callNoRequestJson(fn) {
     this._requireOpen();
     const out = [null];
-    const status = fn(this._handle, out);
-    this._native.raiseForStatus(status);
-    return this._native.takeJsonString(out[0]);
+    return callAsync(fn, this._handle, out).then((status) => {
+      this._native.raiseForStatus(status);
+      return this._native.takeJsonString(out[0]);
+    });
   }
 
   _requireOpen() {

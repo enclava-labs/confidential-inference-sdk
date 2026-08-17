@@ -78,54 +78,11 @@ These fields are additive within verdict schema major version 1. Older verdict
 fixtures without them still validate; newly generated SDK verdicts always
 include them.
 
-## Hardened ACI workload keysets
-
-`confidential-inference-attestation` exposes a provider-neutral ACI v1 primitive through
-`verify_aci_workload_keyset`. Its security boundary is deliberately split:
-
-1. The workload keyset is endorsed by an explicitly trusted Ed25519 identity.
-2. A caller-supplied `AciQuoteVerifier` authenticates the vendor TEE quote.
-3. Quote `report_data` binds a canonical 32-byte challenge nonce and the
-   canonical digest of the complete keyset.
-4. The complete keyset includes its epoch, validity, TLS SPKI, capabilities,
-   keys, workload images, model artifacts, source commit, and SBOM digest.
-5. The observed leaf certificate SPKI must match the identity-endorsed SPKI,
-   and the certificate must be valid at verification time.
-
-The leaf certificate passed in `AciEvidence` must be captured from the same
-certificate-chain-validated live TLS connection being authorized. Supplying a
-certificate from an unrelated connection defeats the meaning of “live,” even
-though its SPKI and quote bindings are still checked.
-
-The default `FailClosedAciQuoteVerifier` never authorizes evidence. Production
-callers must install a backend that verifies the relevant TDX, SEV-SNP, or
-Nitro signature and collateral before returning `VerifiedAciQuote`.
-
-Keysets are bounded and canonical. Key IDs and usage lists must be sorted and
-unique; Ed25519 and X25519 keys must be canonical 32-byte base64url values;
-algorithms must match their declared usages; and advertised encryption or
-response-signing capabilities require the corresponding key.
-
-Callers persist `VerifiedAciWorkloadKeyset::checkpoint()` and supply it on the
-next verification. A lower epoch is rollback, and a different keyset at the
-same epoch is equivocation. A higher epoch permits reviewed key rotation.
-
-The returned cache expiry is the earliest of:
-
-- keyset `stale_after`;
-- keyset `not_after`;
-- quote expiry;
-- quote collateral expiry; and
-- TLS certificate expiry.
-
-The result is never cacheable for zero time. Callers should discard it at the
-returned epoch even if a broader application cache remains valid.
-
 ## Canonical JSON
 
 Canonical object keys are ordered by raw UTF-16 code units, matching JCS and
-ECMAScript. Rust, Node, and Python have a shared non-BMP test vector. Floats and
-integers outside the cross-language JSON safe-integer range remain rejected.
+ECMAScript. Floats and integers outside the cross-language JSON safe-integer
+range remain rejected.
 
 ## Verification commands
 

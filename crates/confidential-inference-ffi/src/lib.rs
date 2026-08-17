@@ -1318,8 +1318,6 @@ fn async_error_json(message: &str) -> String {
     .to_string()
 }
 
-#[cfg(unix)]
-#[cfg(unix)]
 fn in_tokio_runtime_context() -> bool {
     Handle::try_current().is_ok()
 }

@@ -1,8 +1,8 @@
 # Node.js binding
 
 This directory contains a CommonJS and TypeScript binding for the
-Confidential Inference SDK C ABI. Routing, attestation, and policy enforcement
-remain in Rust.
+Confidential Inference SDK C ABI. Routing, attestation, policy, digest, and
+signature decisions remain in Rust.
 
 The package is private and is not published to npm. It must be used with a
 locally built `confidential-inference-ffi` shared library.
@@ -39,7 +39,7 @@ async function main() {
   const client = new Client({ demo_provider: true });
 
   try {
-    const result = await client.chatAsync({
+    const result = await client.chat({
       model: 'gpt-oss-120b',
       messages: [{ role: 'user', content: 'Verify this route.' }],
     });
@@ -62,20 +62,16 @@ request.
 
 ## API
 
-`Client` provides:
+`Client` provides Promise-based Chat Completions, Responses, route
+verification, model discovery, and active policy / trust-artifact inspection.
+`Client.stream` and `Stream` expose fail-closed stream events as async
+iterables. See `index.d.ts` for the complete API.
 
-- blocking and Promise-based Chat Completions and Responses calls;
-- route verification and model discovery;
-- active policy and trust-artifact inspection;
-- explicit operation and stream handles;
-- `AbortSignal` cancellation for Promise waits and async stream iteration.
-
-`Operation` and `Stream` expose polling, callbacks, cancellation, and Unix
-readiness file descriptors. See `index.d.ts` for the complete API.
-
-Returned FFI payloads are validated before they are exposed to callers,
-including schema versions, required fields, verdict consistency, digest and
-signature metadata, model catalogs, operation states, and stream events.
+Inference methods run the blocking FFI call on a Koffi worker thread, so they
+do not block the Node event loop. Rust owns every
+attestation/policy/registry/digest/signature decision; the binding only
+parses the JSON that crosses the ABI and applies minimal object/array shape
+checks on the way back.
 
 ## Credentials
 
@@ -96,8 +92,10 @@ objects and error logs.
 
 ## Library ownership
 
-Close clients, operations, and streams when they are no longer needed. Strings
-returned by Rust are decoded and released through
+Close streams before closing their client: freeing a client with live streams
+fails with `FFI_BUSY` and preserves the handle so it can be retried. `Stream`
+cancels before freeing so a pending stream never leaks its native handle.
+Strings returned by Rust are decoded and released through
 `confidential_inference_string_free`.
 
 ## License

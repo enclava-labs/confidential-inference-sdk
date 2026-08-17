@@ -171,9 +171,16 @@ class Stream:
 
     def close(self) -> None:
         if self._handle:
-            handle = self._handle
-            self._handle = ctypes.c_void_p()
-            self._native.lib.confidential_inference_stream_free(handle)
+            # Cancel first so the native handle is never left pending:
+            # stream_free refuses (FFI_BUSY) to free a live stream, which
+            # would leak it.
+            self.cancel()
+            status = self._native.lib.confidential_inference_stream_free(self._handle)
+            if status == CONFIDENTIAL_INFERENCE_FFI_OK:
+                self._handle = ctypes.c_void_p()
+            else:
+                # Keep the handle so the caller can drain/cancel and retry.
+                self._native.raise_for_status(status)
 
     async def events_async(
         self, timeout_ms: int = 0, poll_interval: float = 0.01
@@ -228,9 +235,14 @@ class Client:
 
     def close(self) -> None:
         if self._handle:
-            handle = self._handle
-            self._handle = ctypes.c_void_p()
-            self._native.lib.confidential_inference_sdk_free(handle)
+            status = self._native.lib.confidential_inference_sdk_free(self._handle)
+            if status == CONFIDENTIAL_INFERENCE_FFI_OK:
+                self._handle = ctypes.c_void_p()
+            else:
+                # FFI_BUSY means live streams still reference the client; keep
+                # the handle so the caller can close them and retry instead of
+                # leaking the native client.
+                self._native.raise_for_status(status)
 
     def status(self) -> dict[str, Any]:
         return self._native.status()

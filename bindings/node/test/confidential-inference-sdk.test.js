@@ -115,3 +115,38 @@ test('closed client rejects calls', async () => {
   client.close();
   await assert.rejects(() => client.models(), ConfidentialInferenceError);
 });
+
+test('closing a client with a live stream fails and preserves the handle', () => {
+  const client = new Client();
+  const stream = client.startStream(chatRequest());
+  // The pending stream keeps the native client live; freeing must fail
+  // without discarding the handle (which would leak both objects).
+  assert.throws(
+    () => client.close(),
+    (error) => error instanceof ConfidentialInferenceError && error.status === 3 /* FFI_BUSY */
+  );
+  assert.ok(client._handle !== null, 'client handle should be preserved on failed free');
+  stream.close();
+  client.close();
+  assert.ok(client._handle === null, 'client should free once streams are closed');
+});
+
+test('inference methods do not block the event loop', async () => {
+  const client = new Client();
+  try {
+    // The blocking C call runs on a Koffi worker thread, so the promise must
+    // still be pending after an already-queued event-loop turn. A synchronous
+    // call would settle its continuation on the microtask queue first.
+    let settled = false;
+    const pending = client.chat(chatRequest(), 5_000).then((response) => {
+      settled = true;
+      return response;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false, 'chat resolved before the event loop turned');
+    const response = await pending;
+    assert.equal(response.verdict.status, 'verified');
+  } finally {
+    client.close();
+  }
+});

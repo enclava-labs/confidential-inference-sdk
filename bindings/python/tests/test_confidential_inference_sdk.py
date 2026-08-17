@@ -119,6 +119,19 @@ class ConfidentialInferencePythonBindingTests(unittest.TestCase):
         client.close()
         self.assertIn("closed", repr(client))
 
+    def test_closing_client_with_live_stream_preserves_handle(self) -> None:
+        client = Client()
+        stream = client.start_stream(_chat_request())
+        # The pending stream keeps the native client live; freeing must fail
+        # without discarding the handle (which would leak both objects).
+        with self.assertRaises(ConfidentialInferenceError) as ctx:
+            client.close()
+        self.assertEqual(ctx.exception.status, 3)  # CONFIDENTIAL_INFERENCE_FFI_BUSY
+        self.assertTrue(bool(client._handle), "client handle should be preserved on failed free")
+        stream.close()
+        client.close()
+        self.assertFalse(bool(client._handle), "client should free once streams are closed")
+
 
 if __name__ == "__main__":
     unittest.main()

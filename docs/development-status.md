@@ -16,11 +16,11 @@ provider route.
 | Request protection | SDK-managed app-E2EE plus Chutes adapter-managed ML-KEM-768/ChaCha20-Poly1305 |
 | Response integrity | Verdict and receipt binding where the selected route supports it |
 | OpenAI API shapes | Chat Completions and a text-only Responses compatibility path |
-| Integrations | Rust, C ABI, Python, Node.js, middleware, and proxy surfaces |
+| Integrations | Rust, C ABI, Python, Node.js, and proxy surfaces |
 | Release tooling | Package verification, SBOM, checksums, detached signatures, and policy checks |
 
 The deterministic demo exercises verified fixture routes, failure cases,
-middleware, proxy, FFI, bindings, audit output, and metrics without using
+proxy, FFI, bindings, verdict records, and metrics without using
 external credentials. Fixture success demonstrates SDK behavior; it does not
 establish that a live provider deployment is trustworthy.
 
@@ -70,7 +70,6 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked --quiet
 cargo run -p confidential-demo --locked
-python3 tools/check_demo_output.py target/confidential-demo.out
 python3 tools/check_normative_fixtures.py
 python3 tools/check_ffi_exports.py
 python3 -m unittest discover -s bindings/python/tests
@@ -79,13 +78,11 @@ cargo deny check
 cargo audit --ignore RUSTSEC-2023-0071
 python3 tools/check_supply_chain_policy.py
 python3 tools/check_release_packaging.py
-python3 tools/check_ci_workflow.py
 python3 -m unittest discover -s tools -p 'test_*.py'
 ```
 
-The demo command is piped through `tee target/confidential-demo.out` in CI
-before the output checker runs. The complete workflow, including SBOM and
-release-manifest checks, is in `.github/workflows/ci.yml`.
+The complete workflow, including SBOM and release-manifest checks, is in
+`.github/workflows/ci.yml`.
 
 See `dcap-qvl-upstream-sync.md` for the additional review required when
 shipping the TDX/DCAP path.
