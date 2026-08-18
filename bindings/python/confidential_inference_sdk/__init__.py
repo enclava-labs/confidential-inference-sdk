@@ -13,6 +13,8 @@ import ctypes
 import json
 import os
 import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -141,25 +143,53 @@ class _Native:
             raise ConfidentialInferenceError(status, self.last_error())
 
 
+@contextmanager
+def _native_call_guard(owner: Any) -> Any:
+    """Mark a native handle in use for the duration of a blocking FFI call.
+
+    The FFI returns a borrowed reference after releasing its handle registry,
+    so freeing a handle while a call is still running (for example from an
+    ``asyncio.to_thread`` worker while the event loop calls ``close()``) would
+    be use-after-free. ``close()`` takes the same lock while freeing, so it
+    either observes in-flight calls and refuses, or completes the free before
+    the next call can register itself.
+    """
+    with owner._call_lock:
+        if not owner._handle:
+            raise ConfidentialInferenceError(
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                {
+                    "code": "client_closed" if isinstance(owner, Client) else "stream_closed",
+                    "message": "handle is already closed",
+                },
+            )
+        owner._in_flight += 1
+    try:
+        yield
+    finally:
+        with owner._call_lock:
+            owner._in_flight -= 1
+
+
 class Stream:
     def __init__(self, native: _Native, handle: ctypes.c_void_p):
         self._native = native
         self._handle = handle
+        # Worker-thread calls (asyncio.to_thread) can race a same-thread
+        # close(); the lock plus counter make free-vs-in-flight safe.
+        self._in_flight = 0
+        self._call_lock = threading.Lock()
 
     @property
     def closed(self) -> bool:
         return not self._handle
 
     def next(self, timeout_ms: int = 0) -> dict[str, Any] | None:
-        if not self._handle:
-            raise ConfidentialInferenceError(
-                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
-                {"code": "stream_closed", "message": "stream is closed"},
-            )
         out = ctypes.c_void_p()
-        status = self._native.lib.confidential_inference_stream_next(
-            self._handle, ctypes.c_uint64(timeout_ms), ctypes.byref(out)
-        )
+        with _native_call_guard(self):
+            status = self._native.lib.confidential_inference_stream_next(
+                self._handle, ctypes.c_uint64(timeout_ms), ctypes.byref(out)
+            )
         if status == CONFIDENTIAL_INFERENCE_FFI_PENDING:
             return None
         self._native.raise_for_status(status)
@@ -170,7 +200,20 @@ class Stream:
             self._native.lib.confidential_inference_stream_cancel(self._handle)
 
     def close(self) -> None:
-        if self._handle:
+        with self._call_lock:
+            if not self._handle:
+                return
+            # Refuse to free while a worker-thread call still holds the
+            # handle: the FFI would drop the allocation under the running
+            # call (use-after-free).
+            if self._in_flight > 0:
+                raise ConfidentialInferenceError(
+                    CONFIDENTIAL_INFERENCE_FFI_BUSY,
+                    {
+                        "code": "stream_busy",
+                        "message": "stream has in-flight calls; await them before closing",
+                    },
+                )
             # Cancel first so the native handle is never left pending:
             # stream_free refuses (FFI_BUSY) to free a live stream, which
             # would leak it.
@@ -209,6 +252,10 @@ class Client:
     ):
         self._native = _Native(library_path)
         self._handle = ctypes.c_void_p()
+        # Worker-thread calls (asyncio.to_thread) can race a same-thread
+        # close(); the lock plus counter make free-vs-in-flight safe.
+        self._in_flight = 0
+        self._call_lock = threading.Lock()
         config_bytes = None
         if config is not None:
             config_bytes = _json_bytes(config)
@@ -234,7 +281,20 @@ class Client:
         return f"Client(state={state!r}, library={str(self._native.path)!r})"
 
     def close(self) -> None:
-        if self._handle:
+        with self._call_lock:
+            if not self._handle:
+                return
+            # Refuse to free while a worker-thread call still holds the
+            # handle: the FFI would drop the allocation under the running
+            # call (use-after-free).
+            if self._in_flight > 0:
+                raise ConfidentialInferenceError(
+                    CONFIDENTIAL_INFERENCE_FFI_BUSY,
+                    {
+                        "code": "client_busy",
+                        "message": "client has in-flight calls; await them before closing",
+                    },
+                )
             status = self._native.lib.confidential_inference_sdk_free(self._handle)
             if status == CONFIDENTIAL_INFERENCE_FFI_OK:
                 self._handle = ctypes.c_void_p()
@@ -346,19 +406,21 @@ class Client:
     ) -> dict[str, Any]:
         self._require_open()
         out = ctypes.c_void_p()
-        status = function(
-            self._handle,
-            _json_bytes(request),
-            ctypes.c_uint64(timeout_ms),
-            ctypes.byref(out),
-        )
+        with _native_call_guard(self):
+            status = function(
+                self._handle,
+                _json_bytes(request),
+                ctypes.c_uint64(timeout_ms),
+                ctypes.byref(out),
+            )
         self._native.raise_for_status(status)
         return _as_dict(self._native.take_json_string(out))
 
     def _call_no_request_json(self, function: Any) -> Any:
         self._require_open()
         out = ctypes.c_void_p()
-        status = function(self._handle, ctypes.byref(out))
+        with _native_call_guard(self):
+            status = function(self._handle, ctypes.byref(out))
         self._native.raise_for_status(status)
         return self._native.take_json_string(out)
 

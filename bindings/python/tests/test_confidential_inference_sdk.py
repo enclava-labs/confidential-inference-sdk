@@ -132,6 +132,63 @@ class ConfidentialInferencePythonBindingTests(unittest.TestCase):
         client.close()
         self.assertFalse(bool(client._handle), "client should free once streams are closed")
 
+    def test_closing_during_in_flight_call_preserves_handle(self) -> None:
+        client = Client()
+        # Simulate a worker-thread call holding the handle (asyncio.to_thread
+        # runs the same guard); close() must refuse rather than free under it.
+        client._in_flight += 1
+        try:
+            with self.assertRaises(ConfidentialInferenceError) as ctx:
+                client.close()
+            self.assertEqual(ctx.exception.status, 3)
+            self.assertEqual(ctx.exception.error["code"], "client_busy")
+            self.assertTrue(
+                bool(client._handle), "client handle must be preserved while calls run"
+            )
+        finally:
+            client._in_flight -= 1
+        client.close()
+        self.assertFalse(bool(client._handle), "client frees once in-flight calls settle")
+
+    def test_closing_stream_during_in_flight_next_preserves_handle(self) -> None:
+        client = Client()
+        stream = client.start_stream(_chat_request())
+        stream._in_flight += 1
+        try:
+            with self.assertRaises(ConfidentialInferenceError) as ctx:
+                stream.close()
+            self.assertEqual(ctx.exception.status, 3)
+            self.assertEqual(ctx.exception.error["code"], "stream_busy")
+            self.assertTrue(bool(stream._handle))
+        finally:
+            stream._in_flight -= 1
+        stream.close()
+        client.close()
+
+    def test_failed_inference_surfaces_native_error_code(self) -> None:
+        client = Client()
+        with self.assertRaises(ConfidentialInferenceError) as ctx:
+            client.chat({"nope": True})
+        self.assertEqual(ctx.exception.status, 1)
+        self.assertEqual(ctx.exception.error["code"], "invalid_request_json")
+        self.assertIn("model", ctx.exception.error["message"])
+        client.close()
+
+    def test_concurrent_async_calls_all_resolve(self) -> None:
+        async def main() -> None:
+            async with Client() as client:
+                jobs = [
+                    asyncio.to_thread(client.chat, _chat_request(f"fanout {i}"), 5_000)
+                    for i in range(8)
+                ]
+                jobs.append(asyncio.to_thread(client.models))
+                jobs.append(asyncio.to_thread(client.confidentiality))
+                results = await asyncio.gather(*jobs)
+                for response in results[:8]:
+                    self.assertEqual(response["verdict"]["status"], "verified")
+
+        asyncio.run(main())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -91,7 +91,9 @@ cd confidential-inference-sdk
 cargo run -p confidential-inference-sdk --example offline_demo --locked
 ```
 
-The deterministic end-to-end demo exercises the wider integration surface:
+The deterministic demo runs one verified chat completion against the fixture
+provider (its integration surface — failures, proxy, FFI, bindings — is
+covered by the workspace tests):
 
 ```bash
 cargo run -p confidential-demo --locked

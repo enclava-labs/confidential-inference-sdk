@@ -14,9 +14,15 @@ const path = require('node:path');
 const koffi = require('koffi');
 
 // Koffi async worker threads default to a 128 kiB stack, which is too small
-// for the Tokio runtime the FFI drives with block_on (stack overflow). Give
-// the async pool enough stack/heap to run the blocking SDK calls safely.
-koffi.config({ async_stack_size: 4 * 1024 * 1024, async_heap_size: 4 * 1024 * 1024 });
+// for the Tokio runtime the FFI drives with block_on: measured, 128/256 kiB
+// stacks segfault and the full request fanout needs ~1 MiB, so 2 MiB leaves
+// margin. Heap covers FFI argument marshalling. max_async_calls bounds the
+// queued-call memory: 32 * (2 MiB stack + 512 kiB heap) = 80 MiB worst case.
+koffi.config({
+  async_stack_size: 2 * 1024 * 1024,
+  async_heap_size: 512 * 1024,
+  max_async_calls: 32,
+});
 
 // Invoke a registered Koffi function on one of its worker threads and resolve
 // with the C return value; out-pointer arguments are filled in before resolve.
@@ -186,6 +192,10 @@ class Stream {
   constructor(native, handle) {
     this._native = native;
     this._handle = handle;
+    // Count of worker-thread calls that still hold this native handle. The
+    // FFI returns a borrowed reference after releasing its handle registry,
+    // so freeing while a call is in flight would be use-after-free.
+    this._inFlight = 0;
   }
 
   get closed() {
@@ -223,19 +233,24 @@ class Stream {
         })
       );
     }
+    this._inFlight += 1;
     const out = [null];
     return callAsync(
       this._native.functions.confidential_inference_stream_next,
       this._handle,
       BigInt(timeoutMs),
       out
-    ).then((status) => {
-      if (status === CONFIDENTIAL_INFERENCE_FFI_PENDING) {
-        return null;
-      }
-      this._native.raiseForStatus(status);
-      return asObject(this._native.takeJsonString(out[0]));
-    });
+    )
+      .then((status) => {
+        if (status === CONFIDENTIAL_INFERENCE_FFI_PENDING) {
+          return null;
+        }
+        this._native.raiseForStatus(status);
+        return asObject(this._native.takeJsonString(out[0]));
+      })
+      .finally(() => {
+        this._inFlight -= 1;
+      });
   }
 
   cancel() {
@@ -247,6 +262,14 @@ class Stream {
   close() {
     if (this._handle === null) {
       return;
+    }
+    // Refuse to free while a worker-thread call still holds the handle: the
+    // FFI would drop the allocation under the running call (use-after-free).
+    if (this._inFlight > 0) {
+      throw new ConfidentialInferenceError(CONFIDENTIAL_INFERENCE_FFI_BUSY, {
+        code: 'stream_busy',
+        message: 'stream has in-flight calls; await them before closing',
+      });
     }
     // Cancel first so the native handle is never left pending: stream_free
     // refuses (FFI_BUSY) to free a live stream, which would leak it.
@@ -285,6 +308,11 @@ class Client {
     const libraryPath = typeof options === 'string' ? options : options.libraryPath;
     this._native = new Native(libraryPath);
     this._handle = null;
+    // Count of worker-thread calls that still hold this native handle; see
+    // Stream._inFlight. Incremented synchronously at dispatch and decremented
+    // when the call settles, both on the Node thread, so close() can rely on
+    // it without a lock.
+    this._inFlight = 0;
     const out = [null];
     const configBytes = config === null ? null : JSON.stringify(config);
     const status = this._native.functions.confidential_inference_sdk_new(configBytes, out);
@@ -295,6 +323,14 @@ class Client {
   close() {
     if (this._handle === null) {
       return;
+    }
+    // Refuse to free while a worker-thread call still holds the handle: the
+    // FFI would drop the allocation under the running call (use-after-free).
+    if (this._inFlight > 0) {
+      throw new ConfidentialInferenceError(CONFIDENTIAL_INFERENCE_FFI_BUSY, {
+        code: 'client_busy',
+        message: 'client has in-flight calls; await them before closing',
+      });
     }
     const status = this._native.functions.confidential_inference_sdk_free(this._handle);
     if (status === CONFIDENTIAL_INFERENCE_FFI_OK) {
@@ -402,22 +438,30 @@ class Client {
 
   _callJson(fn, request, timeoutMs) {
     this._requireOpen();
+    this._inFlight += 1;
     const out = [null];
-    return callAsync(fn, this._handle, JSON.stringify(request), BigInt(timeoutMs), out).then(
-      (status) => {
+    return callAsync(fn, this._handle, JSON.stringify(request), BigInt(timeoutMs), out)
+      .then((status) => {
         this._native.raiseForStatus(status);
         return asObject(this._native.takeJsonString(out[0]));
-      }
-    );
+      })
+      .finally(() => {
+        this._inFlight -= 1;
+      });
   }
 
   _callNoRequestJson(fn) {
     this._requireOpen();
+    this._inFlight += 1;
     const out = [null];
-    return callAsync(fn, this._handle, out).then((status) => {
-      this._native.raiseForStatus(status);
-      return this._native.takeJsonString(out[0]);
-    });
+    return callAsync(fn, this._handle, out)
+      .then((status) => {
+        this._native.raiseForStatus(status);
+        return this._native.takeJsonString(out[0]);
+      })
+      .finally(() => {
+        this._inFlight -= 1;
+      });
   }
 
   _requireOpen() {

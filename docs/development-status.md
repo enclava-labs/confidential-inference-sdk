@@ -19,10 +19,12 @@ provider route.
 | Integrations | Rust, C ABI, Python, Node.js, and proxy surfaces |
 | Release tooling | Package verification, SBOM, checksums, detached signatures, and policy checks |
 
-The deterministic demo exercises verified fixture routes, failure cases,
-proxy, FFI, bindings, verdict records, and metrics without using
-external credentials. Fixture success demonstrates SDK behavior; it does not
-establish that a live provider deployment is trustworthy.
+The demo binary performs a single verified offline chat against the fixture
+provider without external credentials. The wider integration surface —
+failure cases, proxy, FFI, bindings, verdict records, and metrics — is covered
+by the workspace tests and binding test suites in CI. Fixture success
+demonstrates SDK behavior; it does not establish that a live provider
+deployment is trustworthy.
 
 ## Production prerequisites
 

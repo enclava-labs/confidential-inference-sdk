@@ -37,6 +37,30 @@ thread_local! {
     static LAST_ERROR: RefCell<Option<FfiErrorJson>> = const { RefCell::new(None) };
 }
 
+// Bindings invoke the SDK on worker threads (koffi `.async`, asyncio.to_thread)
+// and read `confidential_inference_last_error` from their main thread, which
+// would observe an empty thread-local slot. Failures are therefore also
+// mirrored into a process-global slot that such readers fall back to; it is
+// advisory diagnostics for the most recent failed call, so a concurrent
+// failure overwriting it is acceptable.
+fn global_last_error_slot() -> &'static Mutex<Option<FfiErrorJson>> {
+    static SLOT: OnceLock<Mutex<Option<FfiErrorJson>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Most recent error for the calling thread, falling back to the process-wide
+/// slot so worker-thread failures remain observable from the main thread.
+fn take_last_error() -> Option<FfiErrorJson> {
+    if let Some(error) = LAST_ERROR.with(|slot| slot.borrow().clone()) {
+        return Some(error);
+    }
+    global_last_error_slot()
+        .lock()
+        .map(|slot| slot.clone())
+        .ok()
+        .flatten()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FfiErrorJson {
     code: &'static str,
@@ -981,20 +1005,18 @@ pub unsafe extern "C" fn confidential_inference_last_error(
     out_error_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary(|| {
-        let body = LAST_ERROR.with(|slot| {
-            let error = slot.borrow().clone();
-            match error {
-                Some(error) => json!({
-                    "error": {
-                        "type": "confidential_inference_ffi_error",
-                        "code": error.code,
-                        "message": error.message,
-                    }
-                })
-                .to_string(),
-                None => json!({ "error": null }).to_string(),
-            }
-        });
+        let error = take_last_error();
+        let body = match error {
+            Some(error) => json!({
+                "error": {
+                    "type": "confidential_inference_ffi_error",
+                    "code": error.code,
+                    "message": error.message,
+                }
+            })
+            .to_string(),
+            None => json!({ "error": null }).to_string(),
+        };
         write_c_string(out_error_json, body)
     })
 }
@@ -1406,12 +1428,16 @@ fn ffi_boundary(operation: impl FnOnce() -> c_int) -> c_int {
 }
 
 fn ffi_error(status: c_int, code: &'static str, message: &str) -> c_int {
+    let error = FfiErrorJson {
+        code,
+        message: message.to_owned(),
+    };
     LAST_ERROR.with(|slot| {
-        *slot.borrow_mut() = Some(FfiErrorJson {
-            code,
-            message: message.to_owned(),
-        });
+        *slot.borrow_mut() = Some(error.clone());
     });
+    if let Ok(mut global) = global_last_error_slot().lock() {
+        *global = Some(error);
+    }
     status
 }
 
@@ -1419,6 +1445,9 @@ fn clear_last_error() {
     LAST_ERROR.with(|slot| {
         *slot.borrow_mut() = None;
     });
+    // The process-global mirror is intentionally left untouched: successful
+    // calls on this thread must not erase a worker-thread failure that a
+    // binding main thread has not read yet.
 }
 
 #[cfg(test)]

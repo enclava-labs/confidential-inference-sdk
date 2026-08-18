@@ -131,6 +131,74 @@ test('closing a client with a live stream fails and preserves the handle', () =>
   assert.ok(client._handle === null, 'client should free once streams are closed');
 });
 
+test('closing while a worker-thread call is in flight refuses and preserves the handle', async () => {
+  const client = new Client();
+  // Dispatch synchronously: the in-flight counter is bumped before this line
+  // returns, so the same-tick close() deterministically observes it.
+  const pending = client.chat(chatRequest(), 5_000);
+  assert.throws(
+    () => client.close(),
+    (error) =>
+      error instanceof ConfidentialInferenceError &&
+      error.status === 3 &&
+      error.error.code === 'client_busy'
+  );
+  assert.ok(client._handle !== null, 'client handle must be preserved while calls run');
+  const response = await pending;
+  assert.equal(response.verdict.status, 'verified');
+  client.close();
+  assert.ok(client._handle === null, 'client frees once in-flight calls settle');
+});
+
+test('closing a stream while stream_next is in flight refuses and preserves the handle', async () => {
+  const client = new Client();
+  const stream = client.startStream(chatRequest());
+  const pending = stream._nextAsync(5_000);
+  assert.throws(
+    () => stream.close(),
+    (error) =>
+      error instanceof ConfidentialInferenceError &&
+      error.status === 3 &&
+      error.error.code === 'stream_busy'
+  );
+  assert.ok(stream._handle !== null, 'stream handle must be preserved while next runs');
+  await pending;
+  stream.close();
+  client.close();
+});
+
+test('failed inference surfaces the native error code across the worker boundary', async () => {
+  const client = new Client();
+  try {
+    await client.chat({ nope: true });
+    assert.fail('expected a failure');
+  } catch (error) {
+    assert.ok(error instanceof ConfidentialInferenceError);
+    assert.equal(error.status, 1);
+    assert.equal(error.error.code, 'invalid_request_json');
+    assert.match(error.error.message, /missing field `model`/);
+  } finally {
+    client.close();
+  }
+});
+
+test('concurrent inference calls all resolve under the koffi async pool', async () => {
+  const client = new Client();
+  try {
+    const jobs = [];
+    for (let i = 0; i < 8; i += 1) {
+      jobs.push(client.chat(chatRequest(`fanout ${i}`), 5_000));
+    }
+    jobs.push(client.models(), client.confidentiality(), client.activePolicy());
+    const results = await Promise.all(jobs);
+    for (let i = 0; i < 8; i += 1) {
+      assert.equal(results[i].verdict.status, 'verified');
+    }
+  } finally {
+    client.close();
+  }
+});
+
 test('inference methods do not block the event loop', async () => {
   const client = new Client();
   try {
