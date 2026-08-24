@@ -9,7 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-base64 = "0.22"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 base64ct.workspace = true
 dcap-qvl = { version = "0.6.1", default-features = false, features = ["std", "ring", "default-x509"] }
 ed25519-compact = { version = "2.1.1", default-features = false, features = ["std"] }
