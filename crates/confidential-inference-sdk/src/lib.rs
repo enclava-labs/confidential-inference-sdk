@@ -22,7 +22,6 @@ use confidential_inference_providers::{
     ProviderRegistryEnvelope, ProviderRegistryPin, RegistryModel, RouteDefinition,
     RouteExecutionStatus, RouteLifecycle, TinfoilHttpProvider,
 };
-use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -2608,7 +2607,9 @@ fn decode_hex_bytes(field: &str, value: &str) -> std::result::Result<Vec<u8>, At
     }
     Ok(value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = (pair[0] as char).to_digit(16).expect("validated hex") as u8;
             let low = (pair[1] as char).to_digit(16).expect("validated hex") as u8;
@@ -2619,7 +2620,7 @@ fn decode_hex_bytes(field: &str, value: &str) -> std::result::Result<Vec<u8>, At
 
 fn fresh_evidence_nonce() -> String {
     let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("OS randomness unavailable");
     lower_hex(&bytes)
 }
 

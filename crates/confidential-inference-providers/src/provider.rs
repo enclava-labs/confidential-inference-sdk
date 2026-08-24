@@ -2,10 +2,9 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::ChaCha20Poly1305;
 use confidential_inference_openai::{ChatCompletionRequest, ChatCompletionResponse};
 use hkdf::Hkdf;
-use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -241,7 +240,7 @@ impl ProviderChatRequest {
         config: &SdkAppE2eeConfig,
     ) -> Result<Self> {
         let recipient_public_key = config.recipient_public_key()?;
-        let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
+        let ephemeral_secret = EphemeralSecret::random();
         let ephemeral_public_key = PublicKey::from(&ephemeral_secret);
         let shared_secret = ephemeral_secret.diffie_hellman(&recipient_public_key);
         let request_id = random_request_id();
@@ -710,13 +709,13 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 
 fn random_request_id() -> String {
     let mut bytes = [0_u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("OS randomness unavailable");
     STANDARD.encode(bytes)
 }
 
 fn random_nonce() -> [u8; 12] {
     let mut nonce = [0_u8; 12];
-    OsRng.fill_bytes(&mut nonce);
+    getrandom::fill(&mut nonce).expect("OS randomness unavailable");
     nonce
 }
 
@@ -784,9 +783,9 @@ fn derive_sdk_app_e2ee_keys(
 }
 
 fn seal(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    ChaCha20Poly1305::new(Key::from_slice(key))
+    ChaCha20Poly1305::new(key.into())
         .encrypt(
-            Nonce::from_slice(nonce),
+            nonce.into(),
             Payload {
                 msg: plaintext,
                 aad,
@@ -796,9 +795,9 @@ fn seal(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Resul
 }
 
 fn open(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
-    ChaCha20Poly1305::new(Key::from_slice(key))
+    ChaCha20Poly1305::new(key.into())
         .decrypt(
-            Nonce::from_slice(nonce),
+            nonce.into(),
             Payload {
                 msg: ciphertext,
                 aad,

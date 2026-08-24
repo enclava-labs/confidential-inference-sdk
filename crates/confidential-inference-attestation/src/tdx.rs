@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use x509_cert::{crl::CertificateList, der::Decode};
+use x509_cert::{certificate::Rfc5280, crl::CertificateList, der::Decode};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DcapTdxCollateralBundle {
@@ -452,7 +452,7 @@ fn collateral_json_next_update_epoch_millis(json: &str) -> Result<u64> {
 }
 
 fn crl_next_update_epoch_millis(crl_der: &[u8]) -> Result<Option<u64>> {
-    let crl = CertificateList::from_der(crl_der)
+    let crl = CertificateList::<Rfc5280>::from_der(crl_der)
         .map_err(|err| AttestationError::InvalidEvidence(format!("invalid DCAP CRL: {err}")))?;
     Ok(crl
         .tbs_cert_list

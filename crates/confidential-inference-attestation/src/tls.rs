@@ -13,8 +13,8 @@ pub fn certificate_spki_sha256_hex(cert_der: &[u8]) -> Result<String> {
     let cert = x509_cert::Certificate::from_der(cert_der)
         .map_err(|err| AttestationError::InvalidCertificate(err.to_string()))?;
     let spki_der = cert
-        .tbs_certificate
-        .subject_public_key_info
+        .tbs_certificate()
+        .subject_public_key_info()
         .to_der()
         .map_err(|err| AttestationError::InvalidCertificate(err.to_string()))?;
 
@@ -26,7 +26,7 @@ pub fn certificate_spki_sha256_hex(cert_der: &[u8]) -> Result<String> {
 pub fn certificate_validity_epoch_millis(cert_der: &[u8]) -> Result<(u64, u64)> {
     let cert = x509_cert::Certificate::from_der(cert_der)
         .map_err(|err| AttestationError::InvalidCertificate(err.to_string()))?;
-    let validity = &cert.tbs_certificate.validity;
+    let validity = cert.tbs_certificate().validity();
     let not_before = validity
         .not_before
         .to_unix_duration()

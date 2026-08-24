@@ -14,7 +14,6 @@ use ml_kem::{
     kem::{Decapsulate, Encapsulate, Kem, KeyExport, TryKeyInit},
     MlKem768,
 };
-use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::Sha256;
@@ -395,10 +394,10 @@ fn encrypt_request(e2e_public_key_base64: &str, body: &Value) -> Result<Encrypte
     let plaintext = serde_json::to_vec(&payload)?;
     let compressed = gzip(&plaintext)?;
     let mut nonce = [0_u8; CHACHA_NONCE_BYTES];
-    OsRng.fill_bytes(&mut nonce);
+    getrandom::fill(&mut nonce).expect("OS randomness unavailable");
     let encrypted = ChaCha20Poly1305::new_from_slice(&request_key)
         .map_err(|_| ProviderError::Adapter("invalid Chutes request key".into()))?
-        .encrypt(Nonce::from_slice(&nonce), compressed.as_ref())
+        .encrypt((&nonce).into(), compressed.as_ref())
         .map_err(|_| ProviderError::Adapter("Chutes request encryption failed".into()))?;
 
     let mut blob =
@@ -431,7 +430,10 @@ fn decrypt_response(
     let response_key = derive_key(shared_secret.as_ref(), ciphertext_bytes, E2EE_RESPONSE_INFO)?;
     let compressed = ChaCha20Poly1305::new_from_slice(&response_key)
         .map_err(|_| ProviderError::Adapter("invalid Chutes response key".into()))?
-        .decrypt(Nonce::from_slice(nonce), encrypted)
+        .decrypt(
+            <&Nonce>::try_from(nonce).expect("validated Chutes nonce length"),
+            encrypted,
+        )
         .map_err(|_| ProviderError::Adapter("Chutes response authentication failed".into()))?;
     gunzip_bounded(&compressed)
 }
@@ -612,10 +614,11 @@ mod tests {
         let compressed = ChaCha20Poly1305::new_from_slice(&server_key)
             .unwrap()
             .decrypt(
-                Nonce::from_slice(
+                <&Nonce>::try_from(
                     &request.blob[ML_KEM_768_CIPHERTEXT_BYTES
                         ..ML_KEM_768_CIPHERTEXT_BYTES + CHACHA_NONCE_BYTES],
-                ),
+                )
+                .unwrap(),
                 &request.blob[ML_KEM_768_CIPHERTEXT_BYTES + CHACHA_NONCE_BYTES..],
             )
             .unwrap();
@@ -640,10 +643,7 @@ mod tests {
         let response_nonce = [7_u8; CHACHA_NONCE_BYTES];
         let response_encrypted = ChaCha20Poly1305::new_from_slice(&response_key)
             .unwrap()
-            .encrypt(
-                Nonce::from_slice(&response_nonce),
-                response_compressed.as_ref(),
-            )
+            .encrypt((&response_nonce).into(), response_compressed.as_ref())
             .unwrap();
         let mut response_blob = response_ct.as_slice().to_vec();
         response_blob.extend_from_slice(&response_nonce);

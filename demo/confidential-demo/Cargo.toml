@@ -9,7 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-base64 = "0.22"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 ed25519-compact = { version = "2.1.1", default-features = false, features = ["std"] }
 confidential-inference-attestation = { version = "0.1.0", path = "../../crates/confidential-inference-attestation" }
 confidential-inference-sdk = { version = "0.1.0", path = "../../crates/confidential-inference-sdk" }
