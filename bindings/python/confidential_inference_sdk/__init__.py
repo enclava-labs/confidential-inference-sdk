@@ -138,9 +138,16 @@ class _Native:
             return {"code": "last_error_failed", "message": f"status {code}"}
         return _as_dict(self.take_json_string(out)).get("error")
 
-    def raise_for_status(self, status: int) -> None:
+    def raise_for_status(
+        self, status: int, error_ptr: ctypes.c_void_p | None = None
+    ) -> None:
         if status != CONFIDENTIAL_INFERENCE_FFI_OK:
-            raise ConfidentialInferenceError(status, self.last_error())
+            error = (
+                _as_dict(self.take_json_string(error_ptr)).get("error")
+                if error_ptr
+                else self.last_error()
+            )
+            raise ConfidentialInferenceError(status, error)
 
 
 @contextmanager
@@ -171,6 +178,19 @@ def _native_call_guard(owner: Any) -> Any:
             owner._in_flight -= 1
 
 
+async def _to_thread_and_drain(function: Callable[..., Any], *args: Any) -> Any:
+    """Do not release a native handle until a cancelled worker call exits."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception:
+            pass
+        raise
+
+
 class Stream:
     def __init__(self, native: _Native, handle: ctypes.c_void_p):
         self._native = native
@@ -192,7 +212,7 @@ class Stream:
             )
         if status == CONFIDENTIAL_INFERENCE_FFI_PENDING:
             return None
-        self._native.raise_for_status(status)
+        self._native.raise_for_status(status, out)
         return _as_dict(self._native.take_json_string(out))
 
     def cancel(self) -> None:
@@ -229,7 +249,7 @@ class Stream:
         self, timeout_ms: int = 0, poll_interval: float = 0.01
     ) -> AsyncIterator[dict[str, Any]]:
         while True:
-            event = await asyncio.to_thread(self.next, timeout_ms)
+            event = await _to_thread_and_drain(self.next, timeout_ms)
             if event is None:
                 await asyncio.sleep(poll_interval)
                 continue
@@ -366,12 +386,12 @@ class Client:
     async def chat_async(
         self, request: dict[str, Any], timeout_ms: int = 0
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(self.chat, request, timeout_ms)
+        return await _to_thread_and_drain(self.chat, request, timeout_ms)
 
     async def create_response_async(
         self, request: dict[str, Any], timeout_ms: int = 0
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(self.create_response, request, timeout_ms)
+        return await _to_thread_and_drain(self.create_response, request, timeout_ms)
 
     async def response_async(
         self, request: dict[str, Any], timeout_ms: int = 0
@@ -381,7 +401,7 @@ class Client:
     async def verify_async(
         self, provider: str, model: str, timeout_ms: int = 0
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(self.verify, provider, model, timeout_ms)
+        return await _to_thread_and_drain(self.verify, provider, model, timeout_ms)
 
     async def stream_async(
         self,
@@ -413,7 +433,7 @@ class Client:
                 ctypes.c_uint64(timeout_ms),
                 ctypes.byref(out),
             )
-        self._native.raise_for_status(status)
+        self._native.raise_for_status(status, out)
         return _as_dict(self._native.take_json_string(out))
 
     def _call_no_request_json(self, function: Any) -> Any:
@@ -421,7 +441,7 @@ class Client:
         out = ctypes.c_void_p()
         with _native_call_guard(self):
             status = function(self._handle, ctypes.byref(out))
-        self._native.raise_for_status(status)
+        self._native.raise_for_status(status, out)
         return self._native.take_json_string(out)
 
     def _require_open(self) -> None:

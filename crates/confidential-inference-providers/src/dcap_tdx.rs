@@ -805,7 +805,7 @@ impl DcapTdxCollateralResolver {
     }
 
     fn record_cache_metric(&self, quote_sha256: &str, event: DcapTdxCollateralCacheEvent) {
-        tracing::info!(
+        tracing::debug!(
             target: "confidential_inference.metrics",
             metric = "dcap_tdx_collateral_cache",
             quote_sha256 = %quote_sha256,
@@ -821,7 +821,7 @@ impl DcapTdxCollateralResolver {
     }
 
     fn record_queue_metric(&self, metric: DcapTdxCollateralQueueMetric) {
-        tracing::info!(
+        tracing::debug!(
             target: "confidential_inference.metrics",
             metric = "dcap_tdx_collateral_queue",
             event = ?metric.event,

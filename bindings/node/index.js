@@ -181,9 +181,12 @@ class Native {
     return asObject(this.takeJsonString(out[0])).error;
   }
 
-  raiseForStatus(status) {
+  raiseForStatus(status, errorPtr = null) {
     if (status !== CONFIDENTIAL_INFERENCE_FFI_OK) {
-      throw new ConfidentialInferenceError(status, this.lastError());
+      const error = errorPtr
+        ? asObject(this.takeJsonString(errorPtr)).error
+        : this.lastError();
+      throw new ConfidentialInferenceError(status, error);
     }
   }
 }
@@ -242,10 +245,10 @@ class Stream {
       out
     )
       .then((status) => {
-        if (status === CONFIDENTIAL_INFERENCE_FFI_PENDING) {
+        if (status === CONFIDENTIAL_INFERENCE_FFI_PENDING && out[0] === null) {
           return null;
         }
-        this._native.raiseForStatus(status);
+        this._native.raiseForStatus(status, out[0]);
         return asObject(this._native.takeJsonString(out[0]));
       })
       .finally(() => {
@@ -442,7 +445,7 @@ class Client {
     const out = [null];
     return callAsync(fn, this._handle, JSON.stringify(request), BigInt(timeoutMs), out)
       .then((status) => {
-        this._native.raiseForStatus(status);
+        this._native.raiseForStatus(status, out[0]);
         return asObject(this._native.takeJsonString(out[0]));
       })
       .finally(() => {
@@ -456,7 +459,7 @@ class Client {
     const out = [null];
     return callAsync(fn, this._handle, out)
       .then((status) => {
-        this._native.raiseForStatus(status);
+        this._native.raiseForStatus(status, out[0]);
         return this._native.takeJsonString(out[0]);
       })
       .finally(() => {

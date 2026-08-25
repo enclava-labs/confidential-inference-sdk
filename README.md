@@ -159,6 +159,10 @@ A production client supplies:
 5. A verdict store and metrics observation appropriate for the deployment
    (metrics are emitted as `tracing` events; attach any exporter you want).
 
+Metric events use the `confidential_inference.metrics` target. Collect that
+target in an exporter or filter it from normal application logs; high-frequency
+cache and single-flight events are emitted at `DEBUG`.
+
 The builder rejects incomplete or weakening trust configuration. Production
 release qualification additionally requires the signed live-conformance and
 DCAP review artifacts described in

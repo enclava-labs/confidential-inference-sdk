@@ -1,4 +1,4 @@
-//! Async operation-handle C ABI for `confidential-inference-sdk`.
+//! Blocking and stream-handle C ABI for `confidential-inference-sdk`.
 //!
 //! Complex request and response payloads cross the ABI as JSON. Provider
 //! routing, request adaptation, attestation, and verdict enforcement remain in
@@ -18,9 +18,8 @@ use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Duration;
 use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
@@ -37,28 +36,9 @@ thread_local! {
     static LAST_ERROR: RefCell<Option<FfiErrorJson>> = const { RefCell::new(None) };
 }
 
-// Bindings invoke the SDK on worker threads (koffi `.async`, asyncio.to_thread)
-// and read `confidential_inference_last_error` from their main thread, which
-// would observe an empty thread-local slot. Failures are therefore also
-// mirrored into a process-global slot that such readers fall back to; it is
-// advisory diagnostics for the most recent failed call, so a concurrent
-// failure overwriting it is acceptable.
-fn global_last_error_slot() -> &'static Mutex<Option<FfiErrorJson>> {
-    static SLOT: OnceLock<Mutex<Option<FfiErrorJson>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
-}
-
-/// Most recent error for the calling thread, falling back to the process-wide
-/// slot so worker-thread failures remain observable from the main thread.
+/// Most recent error for the calling thread.
 fn take_last_error() -> Option<FfiErrorJson> {
-    if let Some(error) = LAST_ERROR.with(|slot| slot.borrow().clone()) {
-        return Some(error);
-    }
-    global_last_error_slot()
-        .lock()
-        .map(|slot| slot.clone())
-        .ok()
-        .flatten()
+    LAST_ERROR.with(|slot| slot.borrow().clone())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,7 +196,7 @@ struct ClientShared {
 
 pub struct ConfidentialInferenceFfiStream {
     shared: Arc<ClientShared>,
-    state: Arc<Mutex<StreamState>>,
+    state: Arc<(Mutex<StreamState>, Condvar)>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -473,7 +453,7 @@ pub unsafe extern "C" fn confidential_inference_chat_blocking(
     timeout_ms: u64,
     out_response_json: *mut *mut c_char,
 ) -> c_int {
-    ffi_boundary(|| unsafe {
+    ffi_boundary_with_error(out_response_json, || unsafe {
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -531,7 +511,7 @@ pub unsafe extern "C" fn confidential_inference_response_blocking(
     timeout_ms: u64,
     out_response_json: *mut *mut c_char,
 ) -> c_int {
-    ffi_boundary(|| unsafe {
+    ffi_boundary_with_error(out_response_json, || unsafe {
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -590,7 +570,7 @@ pub unsafe extern "C" fn confidential_inference_verify_blocking(
     timeout_ms: u64,
     out_verdict_json: *mut *mut c_char,
 ) -> c_int {
-    ffi_boundary(|| unsafe {
+    ffi_boundary_with_error(out_verdict_json, || unsafe {
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -644,7 +624,7 @@ pub unsafe extern "C" fn confidential_inference_models_blocking(
     client: *mut ConfidentialInferenceFfiClient,
     out_models_json: *mut *mut c_char,
 ) -> c_int {
-    ffi_boundary(|| unsafe {
+    ffi_boundary_with_error(out_models_json, || unsafe {
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -687,7 +667,7 @@ pub unsafe extern "C" fn confidential_inference_confidentiality_blocking(
     client: *mut ConfidentialInferenceFfiClient,
     out_catalog_json: *mut *mut c_char,
 ) -> c_int {
-    ffi_boundary(|| unsafe {
+    ffi_boundary_with_error(out_catalog_json, || unsafe {
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -730,7 +710,7 @@ pub unsafe extern "C" fn confidential_inference_active_policy_blocking(
     client: *mut ConfidentialInferenceFfiClient,
     out_policy_json: *mut *mut c_char,
 ) -> c_int {
-    ffi_boundary(|| unsafe {
+    ffi_boundary_with_error(out_policy_json, || unsafe {
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -783,7 +763,7 @@ pub unsafe extern "C" fn confidential_inference_active_trust_artifacts_blocking(
     client: *mut ConfidentialInferenceFfiClient,
     out_artifacts_json: *mut *mut c_char,
 ) -> c_int {
-    ffi_boundary(|| unsafe {
+    ffi_boundary_with_error(out_artifacts_json, || unsafe {
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -883,7 +863,8 @@ pub unsafe extern "C" fn confidential_inference_stream_next(
     timeout_ms: u64,
     out_event_json: *mut *mut c_char,
 ) -> c_int {
-    ffi_boundary(|| unsafe {
+    clear_last_error();
+    let status = ffi_boundary(|| unsafe {
         let Some(stream) = stream_ref(stream) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -891,27 +872,24 @@ pub unsafe extern "C" fn confidential_inference_stream_next(
                 "stream must not be null",
             );
         };
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            settle_finished_stream_task(stream);
-            match next_stream_event(stream) {
-                StreamNext::Event(event) => return write_c_string(out_event_json, event),
-                StreamNext::Closed => {
-                    return write_c_string(out_event_json, json!({ "type": "closed" }).to_string())
-                }
-                StreamNext::Pending => {
-                    if timeout_ms == 0 || Instant::now() >= deadline {
-                        return ffi_error(
-                            CONFIDENTIAL_INFERENCE_FFI_PENDING,
-                            "stream_pending",
-                            "stream event is not ready yet",
-                        );
-                    }
-                    thread::sleep(Duration::from_millis(5));
-                }
+        settle_finished_stream_task(stream);
+        match next_stream_event(stream, Duration::from_millis(timeout_ms)) {
+            StreamNext::Event(event) => write_c_string(out_event_json, event),
+            StreamNext::Closed => {
+                write_c_string(out_event_json, json!({ "type": "closed" }).to_string())
             }
+            StreamNext::Pending => ffi_error(
+                CONFIDENTIAL_INFERENCE_FFI_PENDING,
+                "stream_pending",
+                "stream event is not ready yet",
+            ),
         }
-    })
+    });
+    if status == CONFIDENTIAL_INFERENCE_FFI_PENDING {
+        status
+    } else {
+        attach_error_json(out_event_json, status)
+    }
 }
 
 #[no_mangle]
@@ -1006,17 +984,7 @@ pub unsafe extern "C" fn confidential_inference_last_error(
 ) -> c_int {
     ffi_boundary(|| {
         let error = take_last_error();
-        let body = match error {
-            Some(error) => json!({
-                "error": {
-                    "type": "confidential_inference_ffi_error",
-                    "code": error.code,
-                    "message": error.message,
-                }
-            })
-            .to_string(),
-            None => json!({ "error": null }).to_string(),
-        };
+        let body = error_json_body(error.as_ref());
         write_c_string(out_error_json, body)
     })
 }
@@ -1159,7 +1127,7 @@ where
     F: std::future::Future<Output = Vec<String>> + Send + 'static,
 {
     shared.live_operations.fetch_add(1, Ordering::SeqCst);
-    let state = Arc::new(Mutex::new(StreamState::new()));
+    let state = Arc::new((Mutex::new(StreamState::new()), Condvar::new()));
     let task_state = state.clone();
     let join = shared.runtime.spawn(async move {
         let events = future.await;
@@ -1243,8 +1211,9 @@ fn stream_error_event(message: &str) -> String {
     .to_string()
 }
 
-fn complete_stream(state: &Arc<Mutex<StreamState>>, events: Vec<String>) {
-    let Ok(mut state) = state.lock() else {
+fn complete_stream(state: &Arc<(Mutex<StreamState>, Condvar)>, events: Vec<String>) {
+    let (state_lock, ready) = &**state;
+    let Ok(mut state) = state_lock.lock() else {
         return;
     };
     if state.terminal {
@@ -1252,6 +1221,7 @@ fn complete_stream(state: &Arc<Mutex<StreamState>>, events: Vec<String>) {
     }
     state.events.extend(events);
     state.terminal = true;
+    ready.notify_all();
 }
 
 fn settle_finished_stream_task(stream: &ConfidentialInferenceFfiStream) {
@@ -1308,10 +1278,19 @@ enum StreamNext {
     Closed,
 }
 
-fn next_stream_event(stream: &ConfidentialInferenceFfiStream) -> StreamNext {
-    let Ok(mut state) = stream.state.lock() else {
+fn next_stream_event(stream: &ConfidentialInferenceFfiStream, timeout: Duration) -> StreamNext {
+    let (state_lock, ready) = &*stream.state;
+    let Ok(mut state) = state_lock.lock() else {
         return StreamNext::Event(stream_error_event("stream lock failed"));
     };
+    if state.events.is_empty() && !state.terminal && !timeout.is_zero() {
+        let Ok((waited, _)) = ready.wait_timeout_while(state, timeout, |state| {
+            state.events.is_empty() && !state.terminal
+        }) else {
+            return StreamNext::Event(stream_error_event("stream wait failed"));
+        };
+        state = waited;
+    }
     if let Some(event) = state.events.pop_front() {
         StreamNext::Event(event)
     } else if state.terminal {
@@ -1324,6 +1303,7 @@ fn next_stream_event(stream: &ConfidentialInferenceFfiStream) -> StreamNext {
 fn stream_is_pending(stream: &ConfidentialInferenceFfiStream) -> bool {
     stream
         .state
+        .0
         .lock()
         .map(|state| !state.terminal)
         .unwrap_or(false)
@@ -1427,17 +1407,55 @@ fn ffi_boundary(operation: impl FnOnce() -> c_int) -> c_int {
     }
 }
 
+fn ffi_boundary_with_error(out_json: *mut *mut c_char, operation: impl FnOnce() -> c_int) -> c_int {
+    clear_last_error();
+    let status = ffi_boundary(operation);
+    attach_error_json(out_json, status)
+}
+
+fn attach_error_json(out_json: *mut *mut c_char, status: c_int) -> c_int {
+    if status != CONFIDENTIAL_INFERENCE_FFI_OK {
+        if let Some(error) = take_last_error() {
+            write_error_c_string(out_json, &error);
+        }
+    }
+    status
+}
+
+fn error_json_body(error: Option<&FfiErrorJson>) -> String {
+    match error {
+        Some(error) => json!({
+            "error": {
+                "type": "confidential_inference_ffi_error",
+                "code": error.code,
+                "message": error.message,
+            }
+        })
+        .to_string(),
+        None => json!({ "error": null }).to_string(),
+    }
+}
+
+fn write_error_c_string(out: *mut *mut c_char, error: &FfiErrorJson) {
+    if out.is_null() {
+        return;
+    }
+    let Ok(value) = CString::new(error_json_body(Some(error))) else {
+        return;
+    };
+    let value = value.into_raw();
+    register_handle(live_string_handles(), value);
+    unsafe { *out = value };
+}
+
 fn ffi_error(status: c_int, code: &'static str, message: &str) -> c_int {
     let error = FfiErrorJson {
         code,
         message: message.to_owned(),
     };
     LAST_ERROR.with(|slot| {
-        *slot.borrow_mut() = Some(error.clone());
+        *slot.borrow_mut() = Some(error);
     });
-    if let Ok(mut global) = global_last_error_slot().lock() {
-        *global = Some(error);
-    }
     status
 }
 
@@ -1445,9 +1463,6 @@ fn clear_last_error() {
     LAST_ERROR.with(|slot| {
         *slot.borrow_mut() = None;
     });
-    // The process-global mirror is intentionally left untouched: successful
-    // calls on this thread must not erase a worker-thread failure that a
-    // binding main thread has not read yet.
 }
 
 #[cfg(test)]
@@ -1856,6 +1871,31 @@ mod tests {
     }
 
     #[test]
+    fn ffi_blocking_failure_returns_call_specific_error_json() {
+        unsafe {
+            let client = new_demo_client();
+            let request = c_string(r#"{"nope":true}"#);
+            let mut error = ptr::null_mut();
+
+            assert_eq!(
+                confidential_inference_chat_blocking(client, request.as_ptr(), 0, &mut error),
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT
+            );
+            let error: Value = serde_json::from_str(&take_string(error)).unwrap();
+            assert_eq!(error["error"]["code"], "invalid_request_json");
+            assert!(error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("chat request JSON"));
+
+            assert_eq!(
+                confidential_inference_sdk_free(client),
+                CONFIDENTIAL_INFERENCE_FFI_OK
+            );
+        }
+    }
+
+    #[test]
     fn ffi_client_config_loads_api_key_from_env_reference() {
         unsafe {
             let env_name = "CONFIDENTIAL_INFERENCE_FFI_TEST_API_KEY_ENV_REFERENCE";
@@ -2207,7 +2247,7 @@ mod tests {
                 confidential_inference_stream_next(stream, 0, &mut stale_event),
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT
             );
-            let error = last_error_value();
+            let error: Value = serde_json::from_str(&take_string(stale_event)).unwrap();
             assert_eq!(error["error"]["code"], "invalid_stream");
             assert_eq!(
                 confidential_inference_sdk_free(client),

@@ -1976,14 +1976,14 @@ impl ConfidentialInference {
                 outcome = %metric_outcome_label(&metric.outcome),
                 duration_ms = metric.duration_ms,
             ),
-            ConfidentialInferenceMetricEvent::VerificationCache(metric) => tracing::info!(
+            ConfidentialInferenceMetricEvent::VerificationCache(metric) => tracing::debug!(
                 target: "confidential_inference.metrics",
                 metric = "verification_cache",
                 provider = %metric.labels.provider,
                 route_id = %metric.labels.route_id,
                 event = %verification_cache_event_label(&metric.event),
             ),
-            ConfidentialInferenceMetricEvent::SingleFlight(metric) => tracing::info!(
+            ConfidentialInferenceMetricEvent::SingleFlight(metric) => tracing::debug!(
                 target: "confidential_inference.metrics",
                 metric = "single_flight",
                 provider = %metric.labels.provider,

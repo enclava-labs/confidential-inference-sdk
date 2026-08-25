@@ -71,7 +71,8 @@ Inference methods run the blocking FFI call on a Koffi worker thread, so they
 do not block the Node event loop. Rust owns every
 attestation/policy/registry/digest/signature decision; the binding only
 parses the JSON that crosses the ABI and applies minimal object/array shape
-checks on the way back.
+checks on the way back. The process-wide Koffi pool accepts up to 32 concurrent
+native calls; apply backpressure before that limit for larger fan-outs.
 
 ## Credentials
 

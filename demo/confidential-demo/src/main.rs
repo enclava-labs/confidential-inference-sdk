@@ -16,6 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .message(ChatMessage::user("hello from the offline demo"))
         .send()
         .await?;
+    assert!(response.verdict.request_allowed);
     println!(
         "demo provider={provider} model={model} verdict={verdict:?} content={content:?}",
         provider = response.provider,

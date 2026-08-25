@@ -8,6 +8,7 @@ provider and assert the JSON shapes that cross the ABI.
 import asyncio
 import json
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -88,6 +89,31 @@ class ConfidentialInferencePythonBindingTests(unittest.TestCase):
         response = asyncio.run(main())
         self.assertEqual(response["provider"], "demo")
         self.assertEqual(response["verdict"]["status"], "verified")
+
+    def test_cancelled_async_call_drains_worker_before_returning(self) -> None:
+        async def main() -> None:
+            client = Client()
+            started = threading.Event()
+            release = threading.Event()
+            original_chat = client.chat
+
+            def blocking_chat(request: dict, timeout_ms: int = 0) -> dict:
+                started.set()
+                release.wait()
+                return original_chat(request, timeout_ms)
+
+            client.chat = blocking_chat  # type: ignore[method-assign]
+            task = asyncio.create_task(client.chat_async(_chat_request(), 5_000))
+            await asyncio.to_thread(started.wait)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            client.close()
+
+        asyncio.run(main())
 
     def test_stream_fails_closed_for_non_streaming_route(self) -> None:
         with Client() as client:

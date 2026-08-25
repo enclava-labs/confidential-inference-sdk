@@ -182,6 +182,22 @@ test('failed inference surfaces the native error code across the worker boundary
   }
 });
 
+test('concurrent failures retain their call-specific error details', async () => {
+  const client = new Client();
+  try {
+    const [chat, verify] = await Promise.allSettled([
+      client.chat({ nope: true }),
+      client.verify(undefined, undefined),
+    ]);
+    assert.equal(chat.status, 'rejected');
+    assert.equal(verify.status, 'rejected');
+    assert.match(chat.reason.error.message, /chat request JSON/);
+    assert.match(verify.reason.error.message, /verify request JSON/);
+  } finally {
+    client.close();
+  }
+});
+
 test('concurrent inference calls all resolve under the koffi async pool', async () => {
   const client = new Client();
   try {

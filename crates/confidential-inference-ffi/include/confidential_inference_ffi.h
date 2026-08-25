@@ -18,6 +18,9 @@ extern "C" {
 typedef struct ConfidentialInferenceFfiClient ConfidentialInferenceFfiClient;
 typedef struct ConfidentialInferenceFfiStream ConfidentialInferenceFfiStream;
 
+/* JSON-output calls return their call-specific error envelope through the
+ * output pointer on failure. Free it with confidential_inference_string_free. */
+
 int confidential_inference_status(char **out_status_json);
 
 int confidential_inference_sdk_new(const char *config_json, ConfidentialInferenceFfiClient **out_client);
