@@ -45,7 +45,6 @@ SDK_CRATE_ALLOWED_DEPENDENCIES = {
         "confidential-inference-openai",
         "confidential-inference-providers",
     },
-    "confidential-inference-middleware": {"confidential-inference-sdk", "confidential-inference-openai"},
     "confidential-inference-proxy": {"confidential-inference-sdk", "confidential-inference-openai"},
     "confidential-inference-ffi": {"confidential-inference-sdk"},
 }

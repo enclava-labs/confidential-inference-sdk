@@ -14,7 +14,6 @@ mod provider;
 mod provider_evidence_corpus;
 mod reference_values_generator;
 mod registry;
-mod registry_generator;
 
 pub use chutes_live::ChutesHttpProvider;
 pub use compatibility::{
@@ -30,15 +29,12 @@ pub use contrast::{
     PrivatemodeContrastImageSummary, PrivatemodeContrastManifestSummary,
 };
 pub use dcap_tdx::{
-    export_dcap_tdx_collateral_metrics_otlp_http,
-    export_dcap_tdx_collateral_metrics_otlp_http_with_timeout,
-    export_dcap_tdx_collateral_metrics_otlp_json,
-    export_dcap_tdx_collateral_metrics_prometheus_text, DcapTdxCollateralCacheEvent,
-    DcapTdxCollateralCacheMetric, DcapTdxCollateralFetchEvent, DcapTdxCollateralFetchMetric,
-    DcapTdxCollateralFetchPolicy, DcapTdxCollateralFetcher, DcapTdxCollateralMetricEvent,
-    DcapTdxCollateralMetricsRecorder, DcapTdxCollateralQueueEvent, DcapTdxCollateralQueueMetric,
-    DcapTdxCollateralResolver, InMemoryDcapTdxCollateralMetricsRecorder,
-    NoopDcapTdxCollateralMetricsRecorder, PccsDcapTdxCollateralFetcher,
+    DcapTdxCollateralCacheEvent, DcapTdxCollateralCacheMetric, DcapTdxCollateralFetchEvent,
+    DcapTdxCollateralFetchMetric, DcapTdxCollateralFetchPolicy, DcapTdxCollateralFetcher,
+    DcapTdxCollateralMetricEvent, DcapTdxCollateralMetricsRecorder, DcapTdxCollateralQueueEvent,
+    DcapTdxCollateralQueueMetric, DcapTdxCollateralResolver,
+    InMemoryDcapTdxCollateralMetricsRecorder, NoopDcapTdxCollateralMetricsRecorder,
+    PccsDcapTdxCollateralFetcher,
 };
 pub use demo::{DemoEvidenceMode, DemoProvider};
 pub use http::{
@@ -65,15 +61,6 @@ pub use reference_values_generator::{
 pub use registry::{
     EncryptionRequirement, ModelAliasCase, ModelAliasMatrix, ModelAliasMatrixEnvelope,
     ModelAliasProviderRoute, ProviderRegistry, ProviderRegistryDiffReport,
-    ProviderRegistryEnvelope, ProviderRegistryPin, ProviderRegistrySigningIdentity,
-    RegistryDiffChange, RegistryDiffKind, RegistryModel, RouteDefinition, RouteLifecycle,
-    SourceSyncRun, StreamingSupport,
-};
-pub use registry_generator::{
-    generate_provider_registry, generate_provider_registry_from_live_sync,
-    generate_signed_provider_registry, ingest_live_sync_registry,
-    parse_openai_model_list_raw_models, parse_provider_model_list_raw_models,
-    RegistryGeneratorInput, RegistryGeneratorModel, RegistryGeneratorRoute,
-    RegistryLiveSyncEnrichment, RegistryLiveSyncIngestion, RegistryLiveSyncInput,
-    RegistryLiveSyncObservation, RegistryLiveSyncProvider, RegistryLiveSyncRawModel,
+    ProviderRegistryEnvelope, ProviderRegistryPin, RegistryDiffChange, RegistryDiffKind,
+    RegistryModel, RouteDefinition, RouteLifecycle, SourceSyncRun, StreamingSupport,
 };

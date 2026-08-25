@@ -143,7 +143,6 @@ SDK_MEMBERS = (
     "confidential-inference-openai",
     "confidential-inference-providers",
     "confidential-inference-sdk",
-    "confidential-inference-middleware",
     "confidential-inference-proxy",
     "confidential-inference-ffi",
 )
@@ -215,7 +214,6 @@ rust-version = "1.75"
         "confidential-inference-openai": (),
         "confidential-inference-providers": ("confidential-inference-attestation", "confidential-inference-openai"),
         "confidential-inference-sdk": ("confidential-inference-attestation", "confidential-inference-openai", "confidential-inference-providers"),
-        "confidential-inference-middleware": ("confidential-inference-sdk", "confidential-inference-openai"),
         "confidential-inference-proxy": ("confidential-inference-sdk", "confidential-inference-openai"),
         "confidential-inference-ffi": ("confidential-inference-sdk",),
     }
@@ -370,7 +368,7 @@ unknown-git = "allow"
             report = check_supply_chain_policy.check_workspace(root)
 
             self.assertEqual(report["workspace_member_count"], len(SDK_MEMBERS))
-            self.assertEqual(report["sdk_dependency_edges_checked"], 10)
+            self.assertEqual(report["sdk_dependency_edges_checked"], 8)
             self.assertEqual(report["violations"], [])
 
     def test_policy_reports_sdk_dependency_boundary_violations(self) -> None:

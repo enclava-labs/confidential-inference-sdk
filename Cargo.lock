@@ -288,20 +288,9 @@ dependencies = [
 name = "confidential-demo"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
- "confidential-inference-attestation",
- "confidential-inference-ffi",
  "confidential-inference-openai",
- "confidential-inference-providers",
- "confidential-inference-proxy",
  "confidential-inference-sdk",
- "ed25519-compact",
- "flate2",
- "rustls",
- "serde",
- "serde_json",
  "tokio",
- "tokio-rustls",
 ]
 
 [[package]]
@@ -321,8 +310,6 @@ dependencies = [
  "thiserror",
  "tracing",
  "x509-cert",
- "zeroize",
- "zeroize_derive",
 ]
 
 [[package]]
@@ -334,21 +321,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "zeroize",
-]
-
-[[package]]
-name = "confidential-inference-middleware"
-version = "0.1.0"
-dependencies = [
- "confidential-inference-openai",
- "confidential-inference-sdk",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]
@@ -381,7 +353,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "thiserror",
  "tokio",
  "tokio-rustls",
  "tracing",

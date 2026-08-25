@@ -5,7 +5,6 @@ members = [
     "crates/confidential-inference-openai",
     "crates/confidential-inference-providers",
     "crates/confidential-inference-sdk",
-    "crates/confidential-inference-middleware",
     "crates/confidential-inference-proxy",
     "crates/confidential-inference-ffi",
     "demo/confidential-demo",

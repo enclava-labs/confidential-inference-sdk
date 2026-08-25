@@ -16,7 +16,7 @@ deployment.
 | `policy/` | Policy examples and canonical JSON/digest vectors |
 | `registry/` | Signed provider registries and model-alias fixtures |
 | `reference-values/` | Signed reference-value envelopes |
-| `providers/` | Compatibility, normalization, live-sync, and conformance fixtures |
+| `providers/` | Compatibility, normalization, and conformance fixtures |
 | `evidence/` | Valid, invalid, and provider-shaped attestation evidence |
 | `corpus/` | Manifest-driven adversarial evidence cases |
 | `verdict/` | Expected high-level SDK verdicts |
@@ -47,8 +47,6 @@ deployment.
 - `providers/live-conformance-plan.json` defines network-disabled-by-default
   model and evidence-shape checks. A dry run validates the plan and signed
   matrices without contacting providers.
-- `providers/live-sync-corpus.json` covers accepted provider model-list shapes
-  and malformed input.
 - `providers/evidence-normalizer-corpus.json` covers dstack,
   Redpill/Chutes, and related evidence normalization.
 - `providers/tinfoil-live-reference-corpus.json` covers reference-value
@@ -57,7 +55,7 @@ deployment.
 - `providers/privatemode-contrast-active-corpus.json` covers the local
   Privatemode trust-decision inputs and failure cases.
 
-Checked-in live-sync and compatibility fixtures cannot make a provider route
+Checked-in compatibility fixtures cannot make a provider route
 production-ready. The policy checker keeps fixture-only routes
 non-executable or verification-only until the required live evidence and signed
 provider artifacts exist.

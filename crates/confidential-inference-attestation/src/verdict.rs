@@ -216,6 +216,24 @@ pub struct SignatureMetadata {
     pub alg: String,
 }
 
+impl SignatureMetadata {
+    pub fn new(
+        signer: impl Into<String>,
+        key_id: impl Into<String>,
+        alg: impl Into<String>,
+    ) -> Self {
+        Self {
+            signer: signer.into(),
+            key_id: key_id.into(),
+            alg: alg.into(),
+        }
+    }
+
+    pub fn ed25519(signer: impl Into<String>, key_id: impl Into<String>) -> Self {
+        Self::new(signer, key_id, "ed25519")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidityWindow {
     pub policy_ttl_until: String,

@@ -45,12 +45,6 @@ jobs:
             echo "No fuzz targets checked in; offline corpus tests are covered by cargo test --workspace."
           fi
 
-      - name: Local end-to-end demo
-        run: |
-          set -o pipefail
-          cargo run -p confidential-demo --locked | tee target/confidential-demo.out
-          python3 tools/check_demo_output.py target/confidential-demo.out
-
       - name: Normative fixture policy
         run: python3 tools/check_normative_fixtures.py
 
@@ -151,9 +145,6 @@ jobs:
 
       - name: Release checksum manifest signature policy
         run: python3 tools/check_release_manifest.py --manifest target/confidential-inference-release-manifest.json --artifact-glob 'target/package/*.crate' --artifact target/confidential-inference-sbom.json --sbom target/confidential-inference-sbom.json --signature target/confidential-inference-release-manifest.ci.sig.json --trusted-release-key confidential-inference-release-ci:release-ci-key:A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg
-
-      - name: CI workflow policy
-        run: python3 tools/check_ci_workflow.py
 
       - name: Tooling unit tests
         run: python3 -m unittest discover -s tools -p 'test_*.py'

@@ -5,7 +5,6 @@
 //! stable policy/verdict surface and a deterministic fixture verifier used by
 //! the SDK demo while production provider verifiers are reconciled and ported.
 
-mod aci;
 mod canonical;
 mod e2ee;
 mod error;
@@ -21,13 +20,6 @@ mod tls;
 mod verdict;
 mod verifier;
 
-pub use aci::{
-    aci_expected_report_data, verify_aci_workload_keyset, AciCapabilities, AciEvidence,
-    AciKeyAlgorithm, AciKeyUsage, AciKeysetCheckpoint, AciQuoteVerificationRequest,
-    AciQuoteVerifier, AciSourceProvenance, AciVerificationRequest, AciWorkloadKey,
-    AciWorkloadKeyset, AciWorkloadKeysetEnvelope, FailClosedAciQuoteVerifier, VerifiedAciQuote,
-    VerifiedAciWorkloadKeyset,
-};
 pub use canonical::{canonical_digest, canonical_json, sha256_digest, MAX_SAFE_JSON_INT};
 pub use e2ee::{
     chutes_expected_report_data_prefix, chutes_provider_nonce,
@@ -53,7 +45,7 @@ pub use policy::{
 };
 pub use reference_values::{
     ProviderReference, ReferenceSignature, ReferenceValuesEnvelope, ReferenceValuesPayload,
-    ReferenceValuesPin, ReferenceValuesSigningIdentity, RouteReference,
+    ReferenceValuesPin, RouteReference,
 };
 pub use signature::{
     default_trusted_signing_keys, verify_artifact_signature, verify_artifact_signature_with_keys,

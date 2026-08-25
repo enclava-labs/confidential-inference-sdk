@@ -45,7 +45,6 @@ const DEFAULT_DCAP_TDX_FETCH_MAX_BACKOFF: Duration = Duration::from_secs(2);
 const DEFAULT_DCAP_TDX_MAX_CONCURRENT_FETCHES: usize = 4;
 const DEFAULT_DCAP_TDX_MAX_QUEUED_FETCHES: usize = 16;
 const DEFAULT_DCAP_TDX_FETCH_QUEUE_TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_DCAP_TDX_OTLP_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[async_trait]
 pub trait DcapTdxCollateralFetcher: Send + Sync {
@@ -138,194 +137,12 @@ impl InMemoryDcapTdxCollateralMetricsRecorder {
             .map(|events| events.clone())
             .unwrap_or_default()
     }
-
-    pub fn prometheus_text(&self) -> String {
-        export_dcap_tdx_collateral_metrics_prometheus_text(&self.events())
-    }
-
-    pub fn otlp_json(&self) -> serde_json::Result<String> {
-        export_dcap_tdx_collateral_metrics_otlp_json(&self.events())
-    }
-
-    pub async fn export_otlp_http(&self, endpoint: impl AsRef<str>) -> Result<()> {
-        export_dcap_tdx_collateral_metrics_otlp_http(&self.events(), endpoint).await
-    }
-
-    pub async fn export_otlp_http_with_timeout(
-        &self,
-        endpoint: impl AsRef<str>,
-        timeout: Duration,
-    ) -> Result<()> {
-        export_dcap_tdx_collateral_metrics_otlp_http_with_timeout(&self.events(), endpoint, timeout)
-            .await
-    }
 }
 
 impl DcapTdxCollateralMetricsRecorder for InMemoryDcapTdxCollateralMetricsRecorder {
     fn record(&self, event: &DcapTdxCollateralMetricEvent) {
         if let Ok(mut events) = self.events.lock() {
             events.push(event.clone());
-        }
-    }
-}
-
-pub fn export_dcap_tdx_collateral_metrics_prometheus_text(
-    events: &[DcapTdxCollateralMetricEvent],
-) -> String {
-    let mut exporter = PrometheusTextExporter::default();
-    record_dcap_tdx_collateral_metric_counters(events, &mut exporter);
-    exporter.finish()
-}
-
-pub fn export_dcap_tdx_collateral_metrics_otlp_json(
-    events: &[DcapTdxCollateralMetricEvent],
-) -> serde_json::Result<String> {
-    let mut exporter = OtlpJsonMetricsExporter::default();
-    record_dcap_tdx_collateral_metric_counters(events, &mut exporter);
-    exporter.finish()
-}
-
-pub async fn export_dcap_tdx_collateral_metrics_otlp_http(
-    events: &[DcapTdxCollateralMetricEvent],
-    endpoint: impl AsRef<str>,
-) -> Result<()> {
-    export_dcap_tdx_collateral_metrics_otlp_http_with_timeout(
-        events,
-        endpoint,
-        DEFAULT_DCAP_TDX_OTLP_HTTP_TIMEOUT,
-    )
-    .await
-}
-
-pub async fn export_dcap_tdx_collateral_metrics_otlp_http_with_timeout(
-    events: &[DcapTdxCollateralMetricEvent],
-    endpoint: impl AsRef<str>,
-    timeout: Duration,
-) -> Result<()> {
-    let endpoint = endpoint.as_ref().trim();
-    if endpoint.is_empty() {
-        return Err(ProviderError::Http("OTLP HTTP endpoint is empty".into()));
-    }
-    let endpoint_label = redact_url_credentials(endpoint);
-    let body = export_dcap_tdx_collateral_metrics_otlp_json(events)
-        .map_err(|error| ProviderError::Http(format!("OTLP JSON failed: {error}")))?;
-    install_default_rustls_provider();
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|_| ProviderError::Http("OTLP HTTP client build failed".into()))?;
-    let response = client
-        .post(endpoint)
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|_| ProviderError::Http(format!("OTLP HTTP POST to {endpoint_label} failed")))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(ProviderError::Http(format!(
-            "OTLP HTTP POST to {endpoint_label} returned {status}"
-        )));
-    }
-    Ok(())
-}
-
-fn record_dcap_tdx_collateral_metric_counters(
-    events: &[DcapTdxCollateralMetricEvent],
-    exporter: &mut impl CounterMetricExporter,
-) {
-    for event in events {
-        match event {
-            DcapTdxCollateralMetricEvent::Cache(metric) => {
-                let event = dcap_tdx_cache_event_label(&metric.event);
-                let labels = [
-                    ("quote_sha256", metric.quote_sha256.as_str()),
-                    ("event", event),
-                ];
-                exporter.counter(
-                    "confidential_inference_dcap_tdx_collateral_cache_events_total",
-                    "TDX DCAP collateral cache hit, miss, and invalidation events.",
-                    &labels,
-                    1,
-                );
-            }
-            DcapTdxCollateralMetricEvent::Queue(metric) => {
-                let event = dcap_tdx_queue_event_label(&metric.event);
-                let max_queued_fetches = metric.max_queued_fetches.to_string();
-                let queued_fetches = metric.queued_fetches.map(|value| value.to_string());
-                let mut labels = vec![
-                    ("event", event),
-                    ("max_queued_fetches", max_queued_fetches.as_str()),
-                ];
-                if let Some(queued_fetches) = queued_fetches.as_deref() {
-                    labels.push(("queued_fetches", queued_fetches));
-                }
-                exporter.counter(
-                    "confidential_inference_dcap_tdx_collateral_queue_events_total",
-                    "TDX DCAP collateral fetch queue acquisition, wait, full, and timeout events.",
-                    &labels,
-                    1,
-                );
-                if let Some(wait_ms) = metric.wait_ms {
-                    exporter.counter(
-                        "confidential_inference_dcap_tdx_collateral_queue_wait_ms_count",
-                        "TDX DCAP collateral fetch queue wait duration sample count.",
-                        &labels,
-                        1,
-                    );
-                    exporter.counter(
-                        "confidential_inference_dcap_tdx_collateral_queue_wait_ms_sum",
-                        "TDX DCAP collateral fetch queue wait duration sum in milliseconds.",
-                        &labels,
-                        wait_ms,
-                    );
-                }
-            }
-            DcapTdxCollateralMetricEvent::Fetch(metric) => {
-                let event = dcap_tdx_fetch_event_label(&metric.event);
-                let attempt = metric.attempt.to_string();
-                let max_attempts = metric.max_attempts.to_string();
-                let error_kind = metric.error_kind.as_deref().unwrap_or("none");
-                let labels = [
-                    ("quote_sha256", metric.quote_sha256.as_str()),
-                    ("event", event),
-                    ("attempt", attempt.as_str()),
-                    ("max_attempts", max_attempts.as_str()),
-                    ("error_kind", error_kind),
-                ];
-                exporter.counter(
-                    "confidential_inference_dcap_tdx_collateral_fetch_events_total",
-                    "TDX DCAP collateral fetch attempt outcomes.",
-                    &labels,
-                    1,
-                );
-                exporter.counter(
-                    "confidential_inference_dcap_tdx_collateral_fetch_duration_ms_count",
-                    "TDX DCAP collateral fetch attempt duration sample count.",
-                    &labels,
-                    1,
-                );
-                exporter.counter(
-                    "confidential_inference_dcap_tdx_collateral_fetch_duration_ms_sum",
-                    "TDX DCAP collateral fetch attempt duration sum in milliseconds.",
-                    &labels,
-                    metric.duration_ms,
-                );
-                if let Some(backoff_ms) = metric.backoff_ms {
-                    exporter.counter(
-                        "confidential_inference_dcap_tdx_collateral_fetch_backoff_ms_count",
-                        "TDX DCAP collateral fetch retry backoff sample count.",
-                        &labels,
-                        1,
-                    );
-                    exporter.counter(
-                        "confidential_inference_dcap_tdx_collateral_fetch_backoff_ms_sum",
-                        "TDX DCAP collateral fetch retry backoff sum in milliseconds.",
-                        &labels,
-                        backoff_ms,
-                    );
-                }
-            }
         }
     }
 }
@@ -988,6 +805,12 @@ impl DcapTdxCollateralResolver {
     }
 
     fn record_cache_metric(&self, quote_sha256: &str, event: DcapTdxCollateralCacheEvent) {
+        tracing::debug!(
+            target: "confidential_inference.metrics",
+            metric = "dcap_tdx_collateral_cache",
+            quote_sha256 = %quote_sha256,
+            event = ?event,
+        );
         self.metrics_recorder
             .record(&DcapTdxCollateralMetricEvent::Cache(
                 DcapTdxCollateralCacheMetric {
@@ -998,11 +821,27 @@ impl DcapTdxCollateralResolver {
     }
 
     fn record_queue_metric(&self, metric: DcapTdxCollateralQueueMetric) {
+        tracing::debug!(
+            target: "confidential_inference.metrics",
+            metric = "dcap_tdx_collateral_queue",
+            event = ?metric.event,
+            queued_fetches = ?metric.queued_fetches,
+            max_queued_fetches = metric.max_queued_fetches,
+            wait_ms = ?metric.wait_ms,
+        );
         self.metrics_recorder
             .record(&DcapTdxCollateralMetricEvent::Queue(metric));
     }
 
     fn record_fetch_metric(&self, metric: DcapTdxCollateralFetchMetric) {
+        tracing::info!(
+            target: "confidential_inference.metrics",
+            metric = "dcap_tdx_collateral_fetch",
+            quote_sha256 = %metric.quote_sha256,
+            attempt = metric.attempt,
+            event = ?metric.event,
+            duration_ms = metric.duration_ms,
+        );
         self.metrics_recorder
             .record(&DcapTdxCollateralMetricEvent::Fetch(metric));
     }
@@ -1075,251 +914,6 @@ fn next_backoff(current: Duration, max_backoff: Duration) -> Duration {
         .min(max_backoff)
 }
 
-fn dcap_tdx_cache_event_label(event: &DcapTdxCollateralCacheEvent) -> &'static str {
-    match event {
-        DcapTdxCollateralCacheEvent::MemoryHit => "memory_hit",
-        DcapTdxCollateralCacheEvent::FileHit => "file_hit",
-        DcapTdxCollateralCacheEvent::Miss => "miss",
-        DcapTdxCollateralCacheEvent::Invalidated => "invalidated",
-    }
-}
-
-fn dcap_tdx_queue_event_label(event: &DcapTdxCollateralQueueEvent) -> &'static str {
-    match event {
-        DcapTdxCollateralQueueEvent::Acquired => "acquired",
-        DcapTdxCollateralQueueEvent::Wait => "wait",
-        DcapTdxCollateralQueueEvent::Full => "full",
-        DcapTdxCollateralQueueEvent::Timeout => "timeout",
-    }
-}
-
-fn dcap_tdx_fetch_event_label(event: &DcapTdxCollateralFetchEvent) -> &'static str {
-    match event {
-        DcapTdxCollateralFetchEvent::Success => "success",
-        DcapTdxCollateralFetchEvent::Retry => "retry",
-        DcapTdxCollateralFetchEvent::Failure => "failure",
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PrometheusMetricKey {
-    name: String,
-    labels: Vec<(String, String)>,
-}
-
-trait CounterMetricExporter {
-    fn counter(
-        &mut self,
-        name: &'static str,
-        help: &'static str,
-        labels: &[(&str, &str)],
-        value: u64,
-    );
-}
-
-#[derive(Debug, Default)]
-struct PrometheusTextExporter {
-    metadata: BTreeMap<String, (&'static str, &'static str)>,
-    values: BTreeMap<PrometheusMetricKey, u64>,
-}
-
-impl CounterMetricExporter for PrometheusTextExporter {
-    fn counter(
-        &mut self,
-        name: &'static str,
-        help: &'static str,
-        labels: &[(&str, &str)],
-        value: u64,
-    ) {
-        self.metadata.insert(name.into(), (help, "counter"));
-        let key = PrometheusMetricKey {
-            name: name.into(),
-            labels: labels
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-                .collect(),
-        };
-        *self.values.entry(key).or_default() += value;
-    }
-}
-
-impl PrometheusTextExporter {
-    fn finish(self) -> String {
-        let mut out = String::new();
-        for (name, (help, metric_type)) in self.metadata {
-            out.push_str("# HELP ");
-            out.push_str(&name);
-            out.push(' ');
-            out.push_str(help);
-            out.push('\n');
-            out.push_str("# TYPE ");
-            out.push_str(&name);
-            out.push(' ');
-            out.push_str(metric_type);
-            out.push('\n');
-            for (key, value) in self
-                .values
-                .iter()
-                .filter(|(key, _)| key.name.as_str() == name.as_str())
-            {
-                out.push_str(&key.name);
-                write_prometheus_labels(&mut out, &key.labels);
-                out.push(' ');
-                out.push_str(&value.to_string());
-                out.push('\n');
-            }
-        }
-        out
-    }
-}
-
-#[derive(Debug, Default)]
-struct OtlpJsonMetricsExporter {
-    metadata: BTreeMap<String, &'static str>,
-    values: BTreeMap<PrometheusMetricKey, u64>,
-}
-
-impl CounterMetricExporter for OtlpJsonMetricsExporter {
-    fn counter(
-        &mut self,
-        name: &'static str,
-        help: &'static str,
-        labels: &[(&str, &str)],
-        value: u64,
-    ) {
-        self.metadata.insert(name.into(), help);
-        let key = PrometheusMetricKey {
-            name: name.into(),
-            labels: labels
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-                .collect(),
-        };
-        *self.values.entry(key).or_default() += value;
-    }
-}
-
-impl OtlpJsonMetricsExporter {
-    fn finish(self) -> serde_json::Result<String> {
-        let OtlpJsonMetricsExporter { metadata, values } = self;
-        let metrics: Vec<_> = metadata
-            .into_iter()
-            .map(|(name, help)| {
-                let data_points: Vec<_> = values
-                    .iter()
-                    .filter(|(key, _)| key.name.as_str() == name.as_str())
-                    .map(|(key, value)| {
-                        serde_json::json!({
-                            "attributes": otlp_string_attributes(&key.labels),
-                            "asInt": value.to_string(),
-                        })
-                    })
-                    .collect();
-                serde_json::json!({
-                    "name": name,
-                    "description": help,
-                    "unit": "1",
-                    "sum": {
-                        "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
-                        "isMonotonic": true,
-                        "dataPoints": data_points,
-                    },
-                })
-            })
-            .collect();
-        serde_json::to_string(&serde_json::json!({
-            "resourceMetrics": [
-                {
-                    "resource": {
-                        "attributes": [
-                            otlp_string_attribute("service.name", "confidential-inference-providers"),
-                            otlp_string_attribute("telemetry.sdk.name", "confidential-inference"),
-                            otlp_string_attribute("telemetry.sdk.language", "rust"),
-                            otlp_string_attribute("confidential-inference.component", "dcap_tdx_collateral"),
-                        ],
-                    },
-                    "scopeMetrics": [
-                        {
-                            "scope": {
-                                "name": "confidential-inference-providers.dcap_tdx",
-                                "version": env!("CARGO_PKG_VERSION"),
-                            },
-                            "metrics": metrics,
-                        },
-                    ],
-                },
-            ],
-        }))
-    }
-}
-
-fn otlp_string_attributes(labels: &[(String, String)]) -> Vec<serde_json::Value> {
-    labels
-        .iter()
-        .map(|(key, value)| otlp_string_attribute(key, value))
-        .collect()
-}
-
-fn otlp_string_attribute(key: &str, value: &str) -> serde_json::Value {
-    serde_json::json!({
-        "key": key,
-        "value": {
-            "stringValue": value,
-        },
-    })
-}
-
-fn redact_url_credentials(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        return url.to_owned();
-    };
-    let authority_start = scheme_end + 3;
-    let authority_end = url[authority_start..]
-        .find(['/', '?', '#'])
-        .map(|offset| authority_start + offset)
-        .unwrap_or(url.len());
-    let authority = &url[authority_start..authority_end];
-    let Some(credentials_end) = authority.rfind('@') else {
-        return url.to_owned();
-    };
-
-    let mut redacted = String::with_capacity(url.len());
-    redacted.push_str(&url[..authority_start]);
-    redacted.push_str(&authority[credentials_end + 1..]);
-    redacted.push_str(&url[authority_end..]);
-    redacted
-}
-
-fn write_prometheus_labels(out: &mut String, labels: &[(String, String)]) {
-    if labels.is_empty() {
-        return;
-    }
-    out.push('{');
-    for (index, (key, value)) in labels.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str(key);
-        out.push_str("=\"");
-        out.push_str(&escape_prometheus_label_value(value));
-        out.push('"');
-    }
-    out.push('}');
-}
-
-fn escape_prometheus_label_value(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
 struct QueuedFetchGuard<'a> {
     queued_fetches: &'a AtomicUsize,
 }
@@ -1359,8 +953,6 @@ mod tests {
     };
     use ed25519_compact::{KeyPair, Seed};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
     const SAMPLE_QUOTE: &[u8] = include_bytes!("../../../fixtures/evidence/dcap-qvl/tdx_quote.bin");
     const SAMPLE_COLLATERAL: &[u8] =
@@ -1664,77 +1256,6 @@ mod tests {
             !serialized.contains(&base64::engine::general_purpose::STANDARD.encode(SAMPLE_QUOTE))
         );
         assert!(!serialized.contains("transient PCCS outage"));
-        let prometheus = metrics.prometheus_text();
-        assert!(prometheus.contains(
-            "# TYPE confidential_inference_dcap_tdx_collateral_cache_events_total counter"
-        ));
-        assert!(
-            prometheus.contains("confidential_inference_dcap_tdx_collateral_fetch_events_total")
-        );
-        assert!(
-            prometheus.contains("confidential_inference_dcap_tdx_collateral_fetch_backoff_ms_sum")
-        );
-        assert!(prometheus.contains(&format!("quote_sha256=\"{quote_digest}\"")));
-        assert!(prometheus.contains("event=\"retry\""));
-        assert!(prometheus.contains("error_kind=\"http\""));
-        assert!(
-            !prometheus.contains(&base64::engine::general_purpose::STANDARD.encode(SAMPLE_QUOTE))
-        );
-        assert!(!prometheus.contains("transient PCCS outage"));
-        let otlp = metrics.otlp_json().unwrap();
-        let otlp_value: serde_json::Value = serde_json::from_str(&otlp).unwrap();
-        assert_eq!(
-            otlp_value["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["name"],
-            "confidential-inference-providers.dcap_tdx"
-        );
-        let otlp_metrics = otlp_value["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
-            .as_array()
-            .unwrap();
-        assert!(otlp_metrics.iter().any(|metric| {
-            metric["name"] == "confidential_inference_dcap_tdx_collateral_fetch_events_total"
-                && metric["sum"]["dataPoints"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|point| {
-                        point["attributes"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .any(|attribute| {
-                                attribute["key"] == "quote_sha256"
-                                    && attribute["value"]["stringValue"] == quote_digest
-                            })
-                    })
-        }));
-        assert!(otlp_metrics.iter().any(|metric| {
-            metric["name"] == "confidential_inference_dcap_tdx_collateral_fetch_backoff_ms_sum"
-        }));
-        assert!(!otlp.contains(&base64::engine::general_purpose::STANDARD.encode(SAMPLE_QUOTE)));
-        assert!(!otlp.contains("transient PCCS outage"));
-
-        let (endpoint, request) = spawn_otlp_metrics_collector(200).await;
-        metrics.export_otlp_http(&endpoint).await.unwrap();
-        let request = request.await.unwrap().unwrap();
-        let request_text = String::from_utf8_lossy(&request);
-        assert!(request_text.starts_with("POST /v1/metrics HTTP/1.1"));
-        assert!(request_text
-            .lines()
-            .any(|line| line.eq_ignore_ascii_case("content-type: application/json")));
-        let body: serde_json::Value = serde_json::from_slice(test_http_body(&request)).unwrap();
-        assert_eq!(
-            body["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["name"],
-            "confidential-inference-providers.dcap_tdx"
-        );
-
-        let (endpoint, _request) = spawn_otlp_metrics_collector(500).await;
-        let error = metrics
-            .export_otlp_http(endpoint.replace("http://", "http://user:sk-test-secret@"))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("returned 500"));
-        assert!(!error.contains("sk-test-secret"));
     }
 
     #[tokio::test]
@@ -1862,76 +1383,6 @@ mod tests {
     fn cache_file(cache_dir: &Path, quote: &[u8]) -> PathBuf {
         cache_dir.join(cache_filename_for_digest(&sha256_digest(quote)).unwrap())
     }
-
-    async fn spawn_otlp_metrics_collector(
-        status: u16,
-    ) -> (String, tokio::task::JoinHandle<std::io::Result<Vec<u8>>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await?;
-            let request = read_test_http_request(&mut stream).await?;
-            let reason = if status == 200 { "OK" } else { "ERROR" };
-            let body = "{}";
-            let response = format!(
-                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).await?;
-            Ok(request)
-        });
-        (format!("http://{addr}/v1/metrics"), handle)
-    }
-
-    async fn read_test_http_request(
-        stream: &mut tokio::net::TcpStream,
-    ) -> std::io::Result<Vec<u8>> {
-        let mut request = Vec::new();
-        let mut buffer = [0_u8; 1024];
-        loop {
-            let read = stream.read(&mut buffer).await?;
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&buffer[..read]);
-            if test_http_request_complete(&request) {
-                break;
-            }
-        }
-        Ok(request)
-    }
-
-    fn test_http_request_complete(request: &[u8]) -> bool {
-        let Some(header_end) = test_http_header_end(request) else {
-            return false;
-        };
-        let content_length = std::str::from_utf8(&request[..header_end])
-            .ok()
-            .and_then(|headers| {
-                headers.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    if name.eq_ignore_ascii_case("content-length") {
-                        value.trim().parse::<usize>().ok()
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or(0);
-        request.len() >= header_end + content_length
-    }
-
-    fn test_http_body(request: &[u8]) -> &[u8] {
-        &request[test_http_header_end(request).unwrap_or(request.len())..]
-    }
-
-    fn test_http_header_end(request: &[u8]) -> Option<usize> {
-        request
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .map(|position| position + 4)
-    }
-
     fn sample_bundle_at(
         quote_bytes: &[u8],
         fetched_at_epoch_ms: u64,

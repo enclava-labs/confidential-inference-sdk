@@ -4,84 +4,57 @@ export type ClientOptions = {
   libraryPath?: string;
 };
 
-export type WaitOptions = {
+export type StreamOptions = {
   timeoutMs?: number;
   pollIntervalMs?: number;
-  signal?: AbortSignalLike;
 };
 
-export type AbortSignalLike = {
-  readonly aborted: boolean;
-  readonly reason?: unknown;
-  addEventListener(type: 'abort', listener: () => void, options?: { once?: boolean }): void;
-  removeEventListener(type: 'abort', listener: () => void): void;
-};
+export type StreamEvent = JsonObject & { type?: string };
 
 export class ConfidentialInferenceError extends Error {
   status: number;
-  error: JsonObject | null;
+  error: JsonObject;
 }
 
+/**
+ * Thin wrapper over the Confidential Inference SDK C ABI.
+ *
+ * Rust owns every attestation/policy/registry/digest/signature decision; the
+ * binding only marshals JSON across the ABI and applies minimal shape checks.
+ * Inference methods run the blocking FFI call on a Koffi worker thread, so
+ * they never block the Node event loop.
+ */
 export class Client {
   constructor(config?: JsonObject | null, options?: ClientOptions | string);
   status(): JsonObject;
   close(): void;
-  chat(request: JsonObject, options?: WaitOptions | number): JsonObject;
-  createResponse(request: JsonObject, options?: WaitOptions | number): JsonObject;
-  response(request: JsonObject, options?: WaitOptions | number): JsonObject;
-  verify(provider: string, model: string, options?: WaitOptions | number): JsonObject;
-  models(): JsonObject;
-  confidentialModels(): JsonObject[];
-  confidentiality(): JsonObject[];
-  activePolicy(): JsonObject;
-  activeTrustArtifacts(): JsonObject;
-  startChat(request: JsonObject): Operation;
-  startResponse(request: JsonObject): Operation;
-  startVerify(provider: string, model: string): Operation;
+  chat(request: JsonObject, timeoutMs?: number): Promise<JsonObject>;
+  createResponse(request: JsonObject, timeoutMs?: number): Promise<JsonObject>;
+  response(request: JsonObject, timeoutMs?: number): Promise<JsonObject>;
+  verify(provider: string, model: string, timeoutMs?: number): Promise<JsonObject>;
+  models(): Promise<JsonObject>;
+  confidentialModels(): Promise<JsonObject[]>;
+  confidentiality(): Promise<JsonObject[]>;
+  activePolicy(): Promise<JsonObject>;
+  activeTrustArtifacts(): Promise<JsonObject>;
   startStream(request: JsonObject): Stream;
-  chatAsync(request: JsonObject, options?: WaitOptions): Promise<JsonObject>;
-  createResponseAsync(request: JsonObject, options?: WaitOptions): Promise<JsonObject>;
-  responseAsync(request: JsonObject, options?: WaitOptions): Promise<JsonObject>;
-  verifyAsync(provider: string, model: string, options?: WaitOptions): Promise<JsonObject>;
-  streamAsync(request: JsonObject, options?: WaitOptions): AsyncIterable<JsonObject>;
-}
-
-export class Operation {
-  poll(): JsonObject;
-  result(): JsonObject;
-  wait(options?: WaitOptions): Promise<JsonObject>;
-  cancel(): void;
-  setCallback(callback: (() => void) | null): void;
-  readinessFd(): number;
-  close(): void;
+  stream(request: JsonObject, options?: StreamOptions): AsyncIterableIterator<StreamEvent>;
 }
 
 export class Stream {
-  next(options?: WaitOptions | number): JsonObject;
-  events(options?: WaitOptions): AsyncIterable<JsonObject>;
+  /**
+   * Blocking variant: waits up to `timeoutMs` for the next stream event and
+   * returns `null` when none is ready. Use the async iterator (or
+   * `Client.stream`) to avoid blocking the event loop.
+   */
+  next(timeoutMs?: number): StreamEvent | null;
   cancel(): void;
-  setCallback(callback: (() => void) | null): void;
-  readinessFd(): number;
   close(): void;
+  [Symbol.asyncIterator](options?: StreamOptions): AsyncIterableIterator<StreamEvent>;
 }
 
-export function canonicalJson(value: unknown): string;
-export function canonicalSha256Digest(value: unknown): string;
-export function policyCanonicalJson(policy: JsonObject): string;
-export function policyDigest(policy: JsonObject): string;
 export function status(options?: ClientOptions | string): JsonObject;
-export function validateActivePolicySnapshot(snapshot: unknown): unknown;
-export function validateActiveTrustArtifacts(artifacts: unknown): unknown;
-export function validateConfidentialResponse(payload: unknown): unknown;
-export function validateConfidentialModels(payload: unknown): unknown;
-export function validateFfiErrorEnvelope(payload: unknown): unknown;
-export function validateFfiStatus(payload: unknown): unknown;
-export function validateModelList(payload: unknown): unknown;
-export function validateOperationState(state: unknown): unknown;
-export function validateStreamEvent(event: unknown): unknown;
-export function validateVerdict(verdict: unknown): unknown;
 
-export const MAX_SAFE_JSON_INT: number;
 export const CONFIDENTIAL_INFERENCE_FFI_OK: 0;
 export const CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT: 1;
 export const CONFIDENTIAL_INFERENCE_FFI_PANIC: 2;

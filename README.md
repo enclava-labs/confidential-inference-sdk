@@ -53,8 +53,8 @@ layers call the same verification path.
   and Privatemode.
 - SDK-managed app-E2EE for compatible routes and adapter-managed Chutes E2EE.
 - OpenAI-shaped Chat Completions and a text-only Responses compatibility path.
-- Structured verdicts, audit records, metrics, and optional verdict caching.
-- Rust, C ABI, Python, Node.js, middleware, and proxy integration surfaces.
+- Structured verdicts, persisted verdict records, metrics, and optional verdict caching.
+- Rust, C ABI, Python, Node.js, and proxy integration surfaces.
 
 A provider name or model alias is never treated as proof. Authorization depends
 on signed route metadata, verified evidence, reference values, policy, and the
@@ -91,12 +91,12 @@ cd confidential-inference-sdk
 cargo run -p confidential-inference-sdk --example offline_demo --locked
 ```
 
-The full deterministic demo exercises the wider integration surface:
+The deterministic demo runs one verified chat completion against the fixture
+provider (its integration surface — failures, proxy, FFI, bindings — is
+covered by the workspace tests):
 
 ```bash
-set -o pipefail
-cargo run -p confidential-demo --locked | tee target/confidential-demo.out
-python3 tools/check_demo_output.py target/confidential-demo.out
+cargo run -p confidential-demo --locked
 ```
 
 Neither command needs API keys or network access. Both use fixture trust
@@ -156,7 +156,12 @@ A production client supplies:
    artifacts.
 3. Provider credentials through environment-backed secret handling.
 4. Quote, GPU, and collateral verifiers required by the enabled routes.
-5. Audit, verdict, and metrics sinks appropriate for the deployment.
+5. A verdict store and metrics observation appropriate for the deployment
+   (metrics are emitted as `tracing` events; attach any exporter you want).
+
+Metric events use the `confidential_inference.metrics` target. Collect that
+target in an exporter or filter it from normal application logs; high-frequency
+cache and single-flight events are emitted at `DEBUG`.
 
 The builder rejects incomplete or weakening trust configuration. Production
 release qualification additionally requires the signed live-conformance and
@@ -171,7 +176,6 @@ DCAP review artifacts described in
 | `confidential-inference-attestation` | Evidence, policy, signature, and verdict primitives |
 | `confidential-inference-providers` | Provider registry, adapters, and DCAP collateral support |
 | `confidential-inference-openai` | Provider-neutral OpenAI request and response types |
-| `confidential-inference-middleware` | Middleware integration helpers |
 | `confidential-inference-proxy` | Optional OpenAI-compatible proxy primitives |
 | `confidential-inference-ffi` | C ABI used by the language bindings |
 

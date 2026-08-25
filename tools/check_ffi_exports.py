@@ -18,7 +18,7 @@ EXPORT_RE = re.compile(
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("
 )
 HEADER_EXPORT_RE = re.compile(r"\b(?:int|void)\s+(?P<name>confidential_inference_[A-Za-z0-9_]+)\s*\(")
-BOUNDARY_MARKERS = ("ffi_boundary(", "catch_unwind(")
+BOUNDARY_MARKERS = ("ffi_boundary(", "ffi_boundary_with_error(", "catch_unwind(")
 
 
 @dataclass(frozen=True)

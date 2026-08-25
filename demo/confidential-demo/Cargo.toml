@@ -9,17 +9,6 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-base64 = { version = "0.23", default-features = false, features = ["std"] }
-ed25519-compact = { version = "2.1.1", default-features = false, features = ["std"] }
-confidential-inference-attestation = { version = "0.1.0", path = "../../crates/confidential-inference-attestation" }
-confidential-inference-sdk = { version = "0.1.0", path = "../../crates/confidential-inference-sdk" }
-confidential-inference-ffi = { version = "0.1.0", path = "../../crates/confidential-inference-ffi" }
 confidential-inference-openai = { version = "0.1.0", path = "../../crates/confidential-inference-openai" }
-confidential-inference-providers = { version = "0.1.0", path = "../../crates/confidential-inference-providers" }
-confidential-inference-proxy = { version = "0.1.0", path = "../../crates/confidential-inference-proxy" }
-flate2.workspace = true
-rustls = { version = "0.23.4", default-features = false, features = ["ring", "std", "tls12"] }
-serde.workspace = true
-serde_json.workspace = true
+confidential-inference-sdk = { version = "0.1.0", path = "../../crates/confidential-inference-sdk" }
 tokio.workspace = true
-tokio-rustls = { version = "0.26", default-features = false }

@@ -1,8 +1,8 @@
 # Python binding
 
 This directory contains a source-only `ctypes` binding for the Confidential
-Inference SDK C ABI. Routing, attestation, and policy enforcement remain in
-Rust.
+Inference SDK C ABI. Routing, attestation, policy, digest, and signature
+decisions remain in Rust.
 
 The binding is not published to PyPI and does not currently include packaging
 metadata. It must be used with a locally built
@@ -59,25 +59,15 @@ request.
 
 ## API
 
-`Client` provides:
+`Client` provides blocking and async Chat Completions, Responses, route
+verification, model discovery, and active policy / trust-artifact inspection.
+`Client.stream_async` and `Stream.events_async` expose fail-closed stream
+events as async iterators. Async methods run the blocking FFI call through
+`asyncio.to_thread` so they never block the event loop.
 
-- blocking and async Chat Completions and Responses calls;
-- route verification and model discovery;
-- active policy and trust-artifact inspection;
-- explicit operation and stream handles;
-- async stream iteration.
-
-Operations and streams expose polling, callbacks, cancellation, and Unix
-readiness file descriptors. Async waits use readiness file descriptors on Unix
-and fall back to polling when they are unavailable.
-
-Returned FFI payloads are validated before they are exposed to callers,
-including schema versions, required fields, verdict consistency, digest and
-signature metadata, model catalogs, operation states, and stream events.
-
-Canonical JSON and policy digest helpers are exported as
-`canonical_json`, `canonical_sha256_digest`, `policy_canonical_json`, and
-`policy_digest`.
+Rust owns every attestation/policy/registry/digest/signature decision; the
+binding only parses the JSON that crosses the ABI and applies minimal
+object/array shape checks on the way back.
 
 ## Credentials
 
@@ -122,6 +112,14 @@ client = Client(
 Configured providers must identify active, executable, policy-compatible
 routes. Unlisted providers are excluded from automatic chat selection for that
 model, but explicit route verification remains available.
+
+## Library ownership
+
+Close streams before closing their client: freeing a client with live streams
+fails with `FFI_BUSY` and preserves the handle so it can be retried. `Stream`
+cancels before freeing so a pending stream never leaks its native handle.
+Strings returned by Rust are decoded and released through
+`confidential_inference_string_free`.
 
 ## License
 
