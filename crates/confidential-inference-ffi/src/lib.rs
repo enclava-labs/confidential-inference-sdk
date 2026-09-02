@@ -197,7 +197,7 @@ struct ClientShared {
 pub struct ConfidentialInferenceFfiStream {
     shared: Arc<ClientShared>,
     state: Arc<(Mutex<StreamState>, Condvar)>,
-    join: Mutex<Option<JoinHandle<()>>>,
+    join: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 fn live_client_handles() -> &'static Mutex<HashSet<usize>> {
@@ -223,14 +223,6 @@ fn register_handle<T>(handles: &'static Mutex<HashSet<usize>>, ptr: *mut T) {
     if let Ok(mut handles) = handles.lock() {
         handles.insert(pointer_key(ptr));
     }
-}
-
-fn is_handle_live<T>(handles: &'static Mutex<HashSet<usize>>, ptr: *const T) -> bool {
-    !ptr.is_null()
-        && handles
-            .lock()
-            .map(|handles| handles.contains(&pointer_key(ptr)))
-            .unwrap_or(false)
 }
 
 fn unregister_handle<T>(handles: &'static Mutex<HashSet<usize>>, ptr: *mut T) -> bool {
@@ -399,7 +391,17 @@ pub unsafe extern "C" fn confidential_inference_sdk_free(
             clear_last_error();
             return CONFIDENTIAL_INFERENCE_FFI_OK;
         }
-        if !is_handle_live(live_client_handles(), client) {
+        // Hold the handle-registry lock from the liveness check through the
+        // handle removal: `client_shared` dereferences the handle only under
+        // the same lock, so no accessor can race the drop below.
+        let Ok(mut handles) = live_client_handles().lock() else {
+            return ffi_error(
+                CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
+                "handle_registry_poisoned",
+                "client handle registry lock is poisoned",
+            );
+        };
+        if !handles.contains(&pointer_key(client)) {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                 "invalid_client",
@@ -424,13 +426,8 @@ pub unsafe extern "C" fn confidential_inference_sdk_free(
             );
         }
 
-        if !unregister_handle(live_client_handles(), client) {
-            return ffi_error(
-                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
-                "invalid_client",
-                "client handle is not live or was already freed",
-            );
-        }
+        handles.remove(&pointer_key(client));
+        drop(handles);
         drop(Box::from_raw(client));
         clear_last_error();
         CONFIDENTIAL_INFERENCE_FFI_OK
@@ -865,15 +862,15 @@ pub unsafe extern "C" fn confidential_inference_stream_next(
 ) -> c_int {
     clear_last_error();
     let status = ffi_boundary(|| unsafe {
-        let Some(stream) = stream_ref(stream) else {
+        let Some(parts) = stream_parts(stream) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                 "invalid_stream",
                 "stream must not be null",
             );
         };
-        settle_finished_stream_task(stream);
-        match next_stream_event(stream, Duration::from_millis(timeout_ms)) {
+        settle_finished_stream_task(&parts);
+        match next_stream_event(&parts.state, Duration::from_millis(timeout_ms)) {
             StreamNext::Event(event) => write_c_string(out_event_json, event),
             StreamNext::Closed => {
                 write_c_string(out_event_json, json!({ "type": "closed" }).to_string())
@@ -903,20 +900,20 @@ pub unsafe extern "C" fn confidential_inference_stream_cancel(
     stream: *mut ConfidentialInferenceFfiStream,
 ) -> c_int {
     ffi_boundary(|| unsafe {
-        let Some(stream) = stream_ref(stream) else {
+        let Some(parts) = stream_parts(stream) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                 "invalid_stream",
                 "stream must not be null",
             );
         };
-        if let Ok(mut join) = stream.join.lock() {
+        if let Ok(mut join) = parts.join.lock() {
             if let Some(handle) = join.take() {
                 handle.abort();
             }
         }
         complete_stream(
-            &stream.state,
+            &parts.state,
             vec![json!({ "type": "cancelled" }).to_string()],
         );
         clear_last_error();
@@ -940,16 +937,34 @@ pub unsafe extern "C" fn confidential_inference_stream_free(
             clear_last_error();
             return CONFIDENTIAL_INFERENCE_FFI_OK;
         }
-        if !is_handle_live(live_stream_handles(), stream) {
-            return ffi_error(
-                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
-                "invalid_stream",
-                "stream handle is not live or was already freed",
-            );
-        }
-        let stream_ref = &*stream;
-        settle_finished_stream_task(stream_ref);
-        if stream_is_pending(stream_ref) {
+        // Hold the handle-registry lock across the liveness check and the
+        // clone of the interior Arcs; after that the raw pointer is not
+        // dereferenced again, so the drop below cannot race `stream_parts`.
+        let parts = {
+            let Ok(handles) = live_stream_handles().lock() else {
+                return ffi_error(
+                    CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
+                    "handle_registry_poisoned",
+                    "stream handle registry lock is poisoned",
+                );
+            };
+            if !handles.contains(&pointer_key(stream)) {
+                return ffi_error(
+                    CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                    "invalid_stream",
+                    "stream handle is not live or was already freed",
+                );
+            }
+            let stream_ref = &*stream;
+            StreamParts {
+                shared: stream_ref.shared.clone(),
+                state: stream_ref.state.clone(),
+                join: stream_ref.join.clone(),
+            }
+        };
+
+        settle_finished_stream_task(&parts);
+        if stream_is_pending(&parts.state) {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_BUSY,
                 "stream_busy",
@@ -957,16 +972,24 @@ pub unsafe extern "C" fn confidential_inference_stream_free(
             );
         }
 
-        if !unregister_handle(live_stream_handles(), stream) {
+        let Ok(mut handles) = live_stream_handles().lock() else {
+            return ffi_error(
+                CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
+                "handle_registry_poisoned",
+                "stream handle registry lock is poisoned",
+            );
+        };
+        if !handles.remove(&pointer_key(stream)) {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                 "invalid_stream",
                 "stream handle is not live or was already freed",
             );
         }
-        let stream = Box::from_raw(stream);
-        stream.shared.live_operations.fetch_sub(1, Ordering::SeqCst);
-        drop(stream);
+        drop(handles);
+
+        parts.shared.live_operations.fetch_sub(1, Ordering::SeqCst);
+        drop(Box::from_raw(stream));
         clear_last_error();
         CONFIDENTIAL_INFERENCE_FFI_OK
     })
@@ -1137,7 +1160,7 @@ where
     Box::new(ConfidentialInferenceFfiStream {
         shared,
         state,
-        join: Mutex::new(Some(join)),
+        join: Arc::new(Mutex::new(Some(join))),
     })
 }
 
@@ -1224,9 +1247,9 @@ fn complete_stream(state: &Arc<(Mutex<StreamState>, Condvar)>, events: Vec<Strin
     ready.notify_all();
 }
 
-fn settle_finished_stream_task(stream: &ConfidentialInferenceFfiStream) {
+fn settle_finished_stream_task(parts: &StreamParts) {
     let handle = {
-        let Ok(mut join) = stream.join.lock() else {
+        let Ok(mut join) = parts.join.lock() else {
             return;
         };
         let Some(handle) = join.as_ref() else {
@@ -1241,13 +1264,13 @@ fn settle_finished_stream_task(stream: &ConfidentialInferenceFfiStream) {
     let Some(handle) = handle else {
         return;
     };
-    if !stream_is_pending(stream) {
+    if !stream_is_pending(&parts.state) {
         drop(handle);
         return;
     }
     if in_tokio_runtime_context() {
         complete_stream(
-            &stream.state,
+            &parts.state,
             vec![stream_error_event(
                 "stream task finished but cannot be joined from a Tokio runtime context",
             )],
@@ -1255,17 +1278,17 @@ fn settle_finished_stream_task(stream: &ConfidentialInferenceFfiStream) {
         drop(handle);
         return;
     }
-    match stream.shared.runtime.block_on(handle) {
+    match parts.shared.runtime.block_on(handle) {
         Ok(()) => {}
         Err(error) if error.is_cancelled() => {
             complete_stream(
-                &stream.state,
+                &parts.state,
                 vec![json!({ "type": "cancelled" }).to_string()],
             );
         }
         Err(error) => {
             complete_stream(
-                &stream.state,
+                &parts.state,
                 vec![stream_error_event(&format!("stream task failed: {error}"))],
             );
         }
@@ -1278,8 +1301,8 @@ enum StreamNext {
     Closed,
 }
 
-fn next_stream_event(stream: &ConfidentialInferenceFfiStream, timeout: Duration) -> StreamNext {
-    let (state_lock, ready) = &*stream.state;
+fn next_stream_event(state: &Arc<(Mutex<StreamState>, Condvar)>, timeout: Duration) -> StreamNext {
+    let (state_lock, ready) = &**state;
     let Ok(mut state) = state_lock.lock() else {
         return StreamNext::Event(stream_error_event("stream lock failed"));
     };
@@ -1300,13 +1323,8 @@ fn next_stream_event(stream: &ConfidentialInferenceFfiStream, timeout: Duration)
     }
 }
 
-fn stream_is_pending(stream: &ConfidentialInferenceFfiStream) -> bool {
-    stream
-        .state
-        .0
-        .lock()
-        .map(|state| !state.terminal)
-        .unwrap_or(false)
+fn stream_is_pending(state: &Arc<(Mutex<StreamState>, Condvar)>) -> bool {
+    state.0.lock().map(|state| !state.terminal).unwrap_or(false)
 }
 
 fn async_error_json(message: &str) -> String {
@@ -1325,21 +1343,36 @@ fn in_tokio_runtime_context() -> bool {
 }
 
 unsafe fn client_shared(client: *mut ConfidentialInferenceFfiClient) -> Option<Arc<ClientShared>> {
-    if !is_handle_live(live_client_handles(), client) {
-        None
-    } else {
-        Some((*client).shared.clone())
+    // The handle-registry lock is held across the liveness check and the
+    // pointer dereference so a concurrent `confidential_inference_sdk_free`
+    // cannot unregister and drop the handle between the two.
+    let handles = live_client_handles().lock().ok()?;
+    if !handles.contains(&pointer_key(client)) {
+        return None;
     }
+    Some((*client).shared.clone())
 }
 
-unsafe fn stream_ref<'a>(
-    stream: *mut ConfidentialInferenceFfiStream,
-) -> Option<&'a ConfidentialInferenceFfiStream> {
-    if !is_handle_live(live_stream_handles(), stream) {
-        None
-    } else {
-        Some(&*stream)
+struct StreamParts {
+    shared: Arc<ClientShared>,
+    state: Arc<(Mutex<StreamState>, Condvar)>,
+    join: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+unsafe fn stream_parts(stream: *mut ConfidentialInferenceFfiStream) -> Option<StreamParts> {
+    // Same lock-held-deref discipline as `client_shared`: after this returns,
+    // callers only touch the cloned Arcs, so a concurrent
+    // `confidential_inference_stream_free` can never invalidate them.
+    let handles = live_stream_handles().lock().ok()?;
+    if !handles.contains(&pointer_key(stream)) {
+        return None;
     }
+    let stream = &*stream;
+    Some(StreamParts {
+        shared: stream.shared.clone(),
+        state: stream.state.clone(),
+        join: stream.join.clone(),
+    })
 }
 
 unsafe fn optional_json_config(config_json: *const c_char) -> Result<ClientConfig, String> {

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-use crate::http::{checked_response_bytes, require_tls_peer, LiveTlsPeer};
+use crate::http::{checked_response_bytes, https_or_test_loopback, require_tls_peer, LiveTlsPeer};
 use crate::nvidia::NvidiaNrasRemoteClient;
 use crate::{
     EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderError,
@@ -247,7 +247,7 @@ fn ensure_near_route(route: &RouteDefinition, provider: &str) -> Result<()> {
         ("api_base_url", route.api_base_url.as_str()),
         ("evidence_endpoint", route.evidence_endpoint.as_str()),
     ] {
-        if !url.starts_with("https://") && !(cfg!(test) && url.starts_with("http://127.0.0.1")) {
+        if !https_or_test_loopback(url) {
             return Err(ProviderError::Compatibility(format!(
                 "route {} {field} must use https",
                 route.route_id

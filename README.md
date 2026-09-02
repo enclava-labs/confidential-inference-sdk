@@ -14,18 +14,20 @@ after the selected route satisfies an explicit attestation policy.
 | --- | --- | --- |
 | **Tinfoil** | Dedicated HTTP adapter, attestation endpoint capture, TLS certificate/SPKI binding, and TDX/DCAP quote verification | Live adapter and verifier path |
 | **Venice** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Live adapter and evidence path |
-| **RedPill** | OpenAI-compatible HTTP execution, Chutes E2EE evidence, nonce/public-key report-data binding, and NVIDIA CC verification through NRAS | Live adapter and verifier path |
+| **RedPill** | OpenAI-compatible HTTP execution, Chutes E2EE evidence, nonce/public-key report-data binding, and NVIDIA CC verification through NRAS | Live adapter and evidence path (claims matched against signed reference values; the TDX quote is not verified on this family) |
 | **Phala** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Live adapter and evidence path |
 | **Chutes** | Dedicated ML-KEM-768/ChaCha20-Poly1305 E2EE adapter, per-instance TDX/certificate/key binding, DCAP verification, and NVIDIA CC verification through NRAS | Live non-streaming adapter and verifier path |
 | **NEAR** | Model-direct adapter with same-connection TLS certificate capture, TDX nonce/signing-address/TLS/model binding, DCAP verification, and NVIDIA CC verification through NRAS | Live non-streaming adapter and verifier path |
 | **Privatemode** | Contrast manifest, initdata, image-pin, coordinator-attestation, and model-path verification | Verification component; the caller supplies live transport |
 
 Tinfoil, Venice, RedPill, Phala, Chutes, and NEAR have provider-specific HTTP
-integrations. Chutes invocations are encrypted for the selected attested
-instance and consume one-use invocation nonces. NEAR requests use the
-model-direct TLS connection whose leaf-certificate SPKI was bound into the
-verified quote. Privatemode support covers verification of Contrast deployment
-evidence rather than a turn-key HTTP adapter.
+integrations. The Tinfoil adapter validates TLS certificates normally and
+additionally binds the observed leaf SPKI into the verified quote. Chutes
+invocations are encrypted for the selected attested instance and consume
+one-use invocation nonces. NEAR requests use the model-direct TLS connection
+whose leaf-certificate SPKI was bound into the verified quote. Privatemode
+support covers verification of Contrast deployment evidence rather than a
+turn-key HTTP adapter.
 
 Provider support does not make an arbitrary deployment trusted. Production
 routes still require provider-issued signed metadata and reference values, the
@@ -37,6 +39,12 @@ The SDK combines provider routing, signed provider metadata, reference values,
 hardware-evidence verification, request and response protection, and structured
 attestation verdicts. Rust owns the trust decisions; the C, Python, and Node.js
 layers call the same verification path.
+
+For production, replace the built-in demo and fixture signing keys with an
+operator-controlled trust root via
+`ConfidentialInferenceBuilder::exclusive_trusted_artifact_signing_keys`; the
+built-in keys are test material and are trusted by default only so the bundled
+offline demo works out of the box.
 
 > [!IMPORTANT]
 > This is a `0.1.0` preview. The offline verification paths and deterministic

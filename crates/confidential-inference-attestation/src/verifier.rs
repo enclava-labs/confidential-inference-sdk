@@ -1204,7 +1204,20 @@ pub fn verify_chutes_e2ee_evidence_with_gpu_attestation_verifier(
         _ if hardware_verified && gpu_verified && channel_verified => VerificationStatus::Verified,
         _ => VerificationStatus::Partial,
     };
-
+    // `request.route.trust_tier` is the registry's advertised capability. This
+    // evidence family matches provider-asserted claims (including the TDX
+    // report_data hash) against signed reference values without verifying the
+    // quote itself, so report only the tier the checks actually achieved:
+    // AppE2ee when the pinned key and report-data binding matched, TeeOnly
+    // when only the hardware claims matched, and never a higher tier (such as
+    // HwVerifiedTls) than this path can prove.
+    let achieved_trust_tier = if channel_verified {
+        TrustTier::AppE2ee
+    } else if hardware_verified {
+        TrustTier::TeeOnly
+    } else {
+        TrustTier::None
+    };
     let raw_evidence_digest = sha256_digest(&request.raw_evidence);
     let evidence_digest = canonical_digest(&evidence)?;
     let policy_digest = request.policy.digest()?;
@@ -1242,7 +1255,7 @@ pub fn verify_chutes_e2ee_evidence_with_gpu_attestation_verifier(
         enforcement: request.policy.enforcement.clone(),
         request_allowed,
         would_block_under_enforce,
-        trust_tier: request.route.trust_tier.clone(),
+        trust_tier: achieved_trust_tier,
         provider: request.route.provider.clone(),
         requested_model: request.route.requested_model.clone(),
         provider_model: request.route.provider_model.clone(),

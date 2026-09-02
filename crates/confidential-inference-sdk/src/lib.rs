@@ -36,6 +36,7 @@ use tracing::Instrument;
 use zeroize::Zeroizing;
 
 const DEFAULT_REMOTE_REGISTRY_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_REMOTE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const CACHE_CLOCK_JUMP_REVALIDATION_THRESHOLD_MS: u64 = 60_000;
 #[cfg(test)]
 const SINGLE_FLIGHT_MAX_WAITERS: usize = 1;
@@ -550,10 +551,8 @@ async fn fetch_remote_registry_envelope(
     if !status.is_success() {
         return Err(format!("remote registry returned HTTP {status}"));
     }
-    response
-        .json::<ProviderRegistryEnvelope>()
-        .await
-        .map_err(|error| error.to_string())
+    let body = bounded_remote_artifact_bytes(response).await?;
+    serde_json::from_slice(&body).map_err(|error| error.to_string())
 }
 
 async fn fetch_remote_reference_values_envelope(
@@ -573,10 +572,26 @@ async fn fetch_remote_reference_values_envelope(
     if !status.is_success() {
         return Err(format!("remote reference values returned HTTP {status}"));
     }
-    response
-        .json::<ReferenceValuesEnvelope>()
-        .await
-        .map_err(|error| error.to_string())
+    let body = bounded_remote_artifact_bytes(response).await?;
+    serde_json::from_slice(&body).map_err(|error| error.to_string())
+}
+
+/// Reads a remote registry/reference-values body in bounded chunks so a
+/// hostile or compromised distribution endpoint cannot exhaust memory with an
+/// unbounded response.
+async fn bounded_remote_artifact_bytes(
+    mut response: reqwest::Response,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if body.len() + chunk.len() > MAX_REMOTE_ARTIFACT_BYTES {
+            return Err(format!(
+                "remote artifact exceeds {MAX_REMOTE_ARTIFACT_BYTES} bytes"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn install_default_rustls_provider() {
@@ -2523,6 +2538,7 @@ pub struct ConfidentialInferenceBuilder {
     reference_values_source: ReferenceValuesSource,
     reference_values_pin: Option<ReferenceValuesPin>,
     trusted_artifact_signing_keys: Vec<TrustedSigningKey>,
+    trusted_signing_keys_replace_defaults: bool,
     compatibility_matrix: Option<ProviderCompatibilityMatrix>,
     provider_routing: ProviderRoutingConfig,
     adapters: BTreeMap<String, Arc<dyn ProviderAdapter>>,
@@ -2546,6 +2562,7 @@ impl ConfidentialInferenceBuilder {
             reference_values_source: ReferenceValuesSource::Bundled,
             reference_values_pin: None,
             trusted_artifact_signing_keys: Vec::new(),
+            trusted_signing_keys_replace_defaults: false,
             compatibility_matrix: None,
             provider_routing: ProviderRoutingConfig::default(),
             adapters: BTreeMap::new(),
@@ -2658,6 +2675,23 @@ impl ConfidentialInferenceBuilder {
 
     pub fn trusted_artifact_signing_key(mut self, trusted_key: TrustedSigningKey) -> Self {
         self.trusted_artifact_signing_keys.push(trusted_key);
+        self
+    }
+
+    /// Replaces the built-in demo and fixture signing keys with an
+    /// operator-controlled trust root set for production deployments.
+    ///
+    /// By default the builder trusts the bundled demo/fixture keys *in
+    /// addition to* any keys added with `trusted_artifact_signing_key`.
+    /// Those fixture keys are test material and must never anchor production
+    /// trust, so production deployments should call this method with their
+    /// own keys (and, optionally, registry/reference-value pins).
+    pub fn exclusive_trusted_artifact_signing_keys(
+        mut self,
+        trusted_signing_keys: Vec<TrustedSigningKey>,
+    ) -> Self {
+        self.trusted_artifact_signing_keys = trusted_signing_keys;
+        self.trusted_signing_keys_replace_defaults = true;
         self
     }
 
@@ -2791,9 +2825,13 @@ impl ConfidentialInferenceBuilder {
 
         let time_source = self.time_source.clone();
         let build_now_epoch_millis = time_source();
-        let mut trusted_signing_keys =
-            confidential_inference_attestation::default_trusted_signing_keys();
-        trusted_signing_keys.extend(self.trusted_artifact_signing_keys);
+        let trusted_signing_keys = if self.trusted_signing_keys_replace_defaults {
+            self.trusted_artifact_signing_keys.clone()
+        } else {
+            let mut keys = confidential_inference_attestation::default_trusted_signing_keys();
+            keys.extend(self.trusted_artifact_signing_keys);
+            keys
+        };
         let (registry_envelope, registry_source) = self
             .registry_source
             .into_envelope_and_source(
@@ -7244,6 +7282,28 @@ mod tests {
 
         assert_eq!(client.registry_digest(), digest);
         assert_eq!(client.registry_source(), "custom");
+    }
+
+    #[tokio::test]
+    async fn exclusive_trusted_signing_keys_replace_bundled_defaults() {
+        // With an operator-exclusive (here: empty) trust set, the bundled demo
+        // registry must no longer verify: the demo and fixture keys are gone.
+        let result = ConfidentialInference::builder()
+            .exclusive_trusted_artifact_signing_keys(Vec::new())
+            .build()
+            .await;
+
+        match result {
+            Err(ClientError::Attestation(AttestationError::UnknownArtifactSigningKey {
+                signer,
+                key_id,
+            })) => {
+                assert_eq!(signer, "confidential-inference");
+                assert!(key_id.contains("demo"));
+            }
+            Ok(_) => panic!("exclusive trust set unexpectedly trusted the demo registry"),
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]

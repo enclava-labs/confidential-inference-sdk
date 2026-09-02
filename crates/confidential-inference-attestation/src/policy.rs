@@ -179,6 +179,15 @@ pub enum StaleVerdictPolicy {
     AllowForMillis { millis: Millis },
 }
 
+/// Evidence freshness policy.
+///
+/// `PerSession` (the default for `require_attested_e2ee` and
+/// `require_hw_verified_tls`) binds no per-request nonce: evidence captured
+/// once can be replayed and re-verified for the whole verdict TTL, because
+/// nonce/report-data binding is only freshness-checked when `PerRequest`
+/// supplies a fresh challenge. `PerRequest` makes the nonce bindings in every
+/// evidence family actually bite, at the cost of re-fetching evidence for
+/// every call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FreshnessPolicy {

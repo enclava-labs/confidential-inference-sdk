@@ -498,10 +498,23 @@ impl ProxyAuth {
             Self::BearerToken { token, .. } => request
                 .header("authorization")
                 .and_then(|value| value.strip_prefix("Bearer "))
-                .map(|candidate| candidate == token)
+                .map(|candidate| constant_time_eq(candidate.as_bytes(), token.as_bytes()))
                 .unwrap_or(false),
         }
     }
+}
+
+/// Fixed-time comparison so a remote caller cannot recover the configured
+/// bearer token through timing. The length check leaks only the token length.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0_u8;
+    for (left, right) in left.iter().zip(right) {
+        difference |= left ^ right;
+    }
+    difference == 0
 }
 
 impl std::fmt::Debug for ProxyAuth {

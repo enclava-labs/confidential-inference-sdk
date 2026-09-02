@@ -17,6 +17,7 @@ use crate::{
 };
 
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 struct ProviderApiKey(Zeroizing<String>);
@@ -278,10 +279,13 @@ impl TinfoilHttpProvider {
         api_key: Option<impl Into<String>>,
     ) -> Result<Self> {
         install_default_rustls_provider();
+        // TLS certificates are validated normally: the attestation path binds
+        // the leaf SPKI into the verified quote, but the bearer API key and
+        // plaintext chat bodies still must not be disclosed to an unauthenticated
+        // peer before that post-hoc binding check runs.
         let client = reqwest::Client::builder()
             .timeout(DEFAULT_HTTP_TIMEOUT)
             .tls_info(true)
-            .danger_accept_invalid_certs(true)
             .build()
             .map_err(|error| ProviderError::Http(error.to_string()))?;
 
@@ -445,6 +449,13 @@ fn require_https_url(url: &str, field: &str, route_id: &str) -> Result<()> {
     }
 }
 
+/// `https://` is always accepted; plain HTTP is accepted only for loopback
+/// listeners compiled into this crate's own unit tests, which stand in for
+/// live provider endpoints without a certificate.
+pub(crate) fn https_or_test_loopback(url: &str) -> bool {
+    url.starts_with("https://") || cfg!(test) && url.starts_with("http://127.0.0.1")
+}
+
 fn chat_completions_url(api_base_url: &str) -> Result<String> {
     if api_base_url.trim().is_empty() {
         return Err(ProviderError::Compatibility(
@@ -471,11 +482,23 @@ pub(crate) async fn checked_response_bytes(
     operation: &str,
 ) -> Result<Vec<u8>> {
     let status = response.status();
-    let body = response
-        .bytes()
+    let mut response = response;
+    let mut body = Vec::new();
+    // Read in bounded chunks so a hostile endpoint cannot exhaust memory with
+    // an unbounded body before the status is even inspected.
+    while let Some(chunk) = response
+        .chunk()
         .await
         .map_err(|error| ProviderError::Http(error.to_string()))?
-        .to_vec();
+    {
+        if body.len() + chunk.len() > MAX_PROVIDER_RESPONSE_BYTES {
+            return Err(ProviderError::Http(format!(
+                "{operation} response exceeds {} bytes",
+                MAX_PROVIDER_RESPONSE_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
     if status.is_success() {
         Ok(body)
     } else {
@@ -889,7 +912,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tinfoil_http_provider_fails_closed_when_chat_tls_identity_changes() {
+    async fn tinfoil_http_provider_validates_tls_certificates() {
+        // The production constructor must validate certificates normally: an
+        // untrusted (self-signed) endpoint has to fail the connection before
+        // any API key or prompt is put on the wire.
         let (base_url, server) = spawn_tinfoil_tls_identity_rotation().await;
         let route = http_route(&base_url);
         let provider = TinfoilHttpProvider::with_provider_id(
@@ -898,6 +924,43 @@ mod tests {
             Some("sk-tinfoil-test"),
         )
         .unwrap();
+
+        // A re-enabled `danger_accept_invalid_certs` would make this fetch
+        // succeed against the untrusted self-signed server instead.
+        let error = provider
+            .fetch_evidence(
+                &route,
+                &EvidenceRequest {
+                    requested_model: "llama-3.3-70b".into(),
+                    policy_digest: "sha256:policy".into(),
+                    nonce: None,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("error sending request"), "{error}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tinfoil_http_provider_fails_closed_when_chat_tls_identity_changes() {
+        let (base_url, server) = spawn_tinfoil_tls_identity_rotation().await;
+        let route = http_route(&base_url);
+        // The test server presents a self-signed loopback certificate. The
+        // production constructor validates certificates normally; the test
+        // opts this client into the local test CA only.
+        let provider = TinfoilHttpProvider::with_client(
+            "tinfoil-http-test",
+            vec![route.clone()],
+            Some("sk-tinfoil-test".to_owned()),
+            reqwest::Client::builder()
+                .tls_info(true)
+                .danger_accept_invalid_certs(true)
+                .build()
+                .unwrap(),
+        );
         let evidence_request = EvidenceRequest {
             requested_model: "llama-3.3-70b".into(),
             policy_digest: "sha256:policy".into(),

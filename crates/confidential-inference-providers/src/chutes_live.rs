@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+use crate::http::{checked_response_bytes, https_or_test_loopback};
 use crate::nvidia::NvidiaNrasRemoteClient;
 use crate::{
     EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderError,
@@ -497,7 +498,7 @@ fn ensure_chutes_route(route: &RouteDefinition, provider: &str) -> Result<()> {
 }
 
 fn require_https(url: &str, field: &str, route_id: &str) -> Result<()> {
-    if url.starts_with("https://") || cfg!(test) && url.starts_with("http://127.0.0.1") {
+    if https_or_test_loopback(url) {
         Ok(())
     } else {
         Err(ProviderError::Compatibility(format!(
@@ -527,23 +528,6 @@ fn validate_nonce(nonce: &str, field: &str) -> Result<()> {
         Err(ProviderError::Adapter(format!(
             "{field} must be exactly 32 bytes of hex"
         )))
-    }
-}
-
-async fn checked_response_bytes(response: reqwest::Response, operation: &str) -> Result<Vec<u8>> {
-    let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| ProviderError::Http(error.to_string()))?
-        .to_vec();
-    if status.is_success() {
-        Ok(body)
-    } else {
-        Err(ProviderError::HttpStatus {
-            status: status.as_u16(),
-            message: format!("{operation} failed"),
-        })
     }
 }
 
