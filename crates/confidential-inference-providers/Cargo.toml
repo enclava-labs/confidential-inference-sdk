@@ -20,7 +20,7 @@ flate2.workspace = true
 getrandom.workspace = true
 hkdf = "0.13"
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
-reqwest = { version = "=0.13.4", default-features = false, features = ["rustls-no-provider", "json", "query"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "json", "query"] }
 rustls = { version = "0.23.4", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
