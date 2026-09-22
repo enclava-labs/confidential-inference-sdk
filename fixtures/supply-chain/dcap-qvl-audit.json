@@ -25,7 +25,7 @@
   "crates": [
     {
       "name": "dcap-qvl",
-      "version": "0.6.1",
+      "version": "0.6.3",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "MIT"
     },
@@ -64,7 +64,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "c3d67698eacc2e32c546fdb5d499195a5af92679029be8e8b57c8747eeeb5fe8",
+      "sha256": "abaac4057932434b95d535e29c88aad5685f198ae485f2a6c43c732f71a4d9db",
       "reason": "Exact upstream dependency resolution used by release verification."
     }
   ],
@@ -86,7 +86,7 @@
     },
     {
       "path": "Cargo.lock",
-      "value": "name = \"dcap-qvl\"\nversion = \"0.6.1\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"",
+      "value": "name = \"dcap-qvl\"\nversion = \"0.6.3\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"",
       "reason": "The lockfile resolves the reviewed upstream registry package."
     }
   ],
