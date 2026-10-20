@@ -56,6 +56,14 @@ JSON check set, and existing test expectations. That is acceptable because
 
 ### Added
 
+- Live Tinfoil SEV-SNP verification now validates Genoa VCEK/ASK/ARK trust,
+  report signatures, TCB and guest policy, and TLS SPKI report-data binding.
+  The trust CLI pins verified SNP measurements and supports smoke chat through
+  the AMD KDS VCEK resolver.
+- FFI and Go/Python/Node client configuration accept an operator-signed
+  `compatibility_matrix` envelope, verified against the exclusive operator
+  signing keys; custom executable route compatibility remains explicit.
+
 - Go binding under `bindings/go`. It loads `confidential-inference-ffi` at
   run time through purego (no cgo required by callers), mirrors the Python
   and Node.js API surface (`Client`, `Stream`, JSON-in/JSON-out calls), and

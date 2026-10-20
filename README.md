@@ -82,7 +82,7 @@ request and response channel properties.
 | Signed registry and reference-value validation | Ready |
 | Intel TDX/DCAP offline verification | Implemented; production review still required |
 | Live provider execution | Provider- and deployment-specific |
-| SEV-SNP production verification | Not supported |
+| SEV-SNP production verification | Genoa Tinfoil v2 reports verified; model binding unsupported |
 | API stability | Preview; breaking changes may occur before `1.0` |
 
 See [development status](docs/development-status.md) for current limitations
@@ -154,6 +154,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+For incremental output, use a configured streaming-enabled route that does not
+require request/response E2EE (the demo E2EE route intentionally fails closed).
+Call `.stream(true).streaming().await`. The returned stream includes the
+verified `verdict` and route metadata before the first chunk:
+
+```rust
+let mut stream = client
+    .chat_completions()
+    .model("gpt-oss-120b")
+    .message(ChatMessage::user("Explain this route."))
+    .stream(true)
+    .streaming()
+    .await?;
+
+println!("status: {:?}", stream.verdict.status);
+while let Some(chunk) = stream.next().await {
+    let chunk = chunk?;
+    if let Some(content) = chunk.choices.first().and_then(|choice| choice.delta.content.as_ref()) {
+        print!("{content}");
+    }
+}
+// A terminal usage frame is optional; None means usage is unknown.
+if let Some(usage) = stream.terminal_usage {
+    println!("usage: {usage:?}");
+}
+```
+
+For Responses lifecycle operations, `ConfidentialInference::manage_response`
+takes a provider and a `ResponseManageRequest` (`op`, `provider_response_id`,
+and `params`); the operation is covered by the same verified-route and
+structured error handling as inference calls. The C ABI and language bindings
+accept `{op, provider, provider_response_id, params}`.
+The FFI and language bindings emit a `verdict` event first, then normalized
+OpenAI chunk JSON in each `chunk` event, optional terminal `usage`, and `done`.
+They do not expose provider SSE framing directly.
+
+Streaming is fail-closed for routes requiring request or response E2EE. If the
+provider omits terminal usage, the SDK reports `terminal_usage: None`; callers
+must treat usage as unknown, not zero.
 
 The Python, Node.js, and Go bindings currently build against the workspace
 FFI library and are not standalone registry packages. See the

@@ -18,6 +18,7 @@ Publish order:
 4. `confidential-inference-sdk`
 5. `confidential-inference-proxy`
 6. `confidential-inference-ffi`
+7. `confidential-inference-trust-cli`
 
 `confidential-demo` is `publish = false` and is never published.
 

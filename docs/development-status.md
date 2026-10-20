@@ -58,7 +58,11 @@ CI fixture signing key cannot satisfy that production gate.
   signature, so the default policy rejects its CPU evidence (`cpu_tee` fails
   closed). Setting the CPU requirement to `NotRequired` keeps the app-E2EE
   checks usable; the trust tier stays capped below `HwVerifiedTls`.
-- SEV-SNP does not have a production-supported verifier backend.
+  Live Tinfoil SEV-SNP v2 verification is implemented for Genoa reports with
+  pinned AMD ARK/ASK trust, VCEK resolution, report signature and policy
+  checks. SNP verifies router identity and TLS binding, not a model claim;
+  the operator pin marks model binding unsupported and opts into the
+  provider-conditional policy.
 - The checked-in provider compatibility profiles include executable Chutes and
   NEAR transport profiles, but they are not substitutes for a signed live
   provider registry and signed deployment reference values.
