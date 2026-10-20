@@ -241,14 +241,7 @@ pub fn verify_chutes_live_evidence_with_attestation_verifiers(
         ));
     }
 
-    let tee_measurement = format!(
-        "tdx:mr_td:{}:rtmr0:{}:rtmr1:{}:rtmr2:{}:rtmr3:{}",
-        verified_quote.mr_td,
-        verified_quote.rtmr0,
-        verified_quote.rtmr1,
-        verified_quote.rtmr2,
-        verified_quote.rtmr3
-    );
+    let tee_measurement = chutes_live_tee_measurement(&verified_quote);
     let expires_at_epoch_ms = verified_quote
         .expires_at_epoch_ms
         .min(certificate_expires_at);
@@ -292,6 +285,20 @@ pub fn verify_chutes_live_evidence_with_attestation_verifiers(
     };
 
     verify_provider_live_evidence(request, evidence, gpu_attestation_verifier)
+}
+
+/// The TDX measurement string `chutes_live_e2ee` verification produces and
+/// reference values pin. Shared so operator pinning cannot drift from the
+/// verifier's format.
+pub fn chutes_live_tee_measurement(verified_quote: &VerifiedTdxQuote) -> String {
+    format!(
+        "tdx:mr_td:{}:rtmr0:{}:rtmr1:{}:rtmr2:{}:rtmr3:{}",
+        verified_quote.mr_td,
+        verified_quote.rtmr0,
+        verified_quote.rtmr1,
+        verified_quote.rtmr2,
+        verified_quote.rtmr3
+    )
 }
 
 pub fn verify_near_live_evidence_with_attestation_verifiers(

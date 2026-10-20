@@ -12,6 +12,7 @@ mod evidence;
 mod gpu;
 mod policy;
 mod reference_values;
+mod sev_snp;
 mod signature;
 mod tcb;
 mod tdx;
@@ -47,6 +48,9 @@ pub use reference_values::{
     ProviderReference, ReferenceSignature, ReferenceValuesEnvelope, ReferenceValuesPayload,
     ReferenceValuesPin, RouteReference,
 };
+pub use sev_snp::{
+    verify_tinfoil_quote_with_vcek, verify_tinfoil_quote_with_vcek_at, SevSnpTinfoilQuoteVerifier,
+};
 pub use signature::{
     bundled_fixture_signing_keys, verify_artifact_signature_with_keys, ArtifactSignature,
     TrustedSigningKey, ALIAS_MATRIX_FIXTURE_SIGNING_KEY_ID,
@@ -81,8 +85,8 @@ pub use verdict::{
     VerificationStatus,
 };
 pub use verifier::{
-    format_utc_timestamp_millis, parse_utc_timestamp_millis, verify_chutes_e2ee_evidence,
-    verify_chutes_e2ee_evidence_with_gpu_attestation_verifier,
+    chutes_live_tee_measurement, format_utc_timestamp_millis, parse_utc_timestamp_millis,
+    verify_chutes_e2ee_evidence, verify_chutes_e2ee_evidence_with_gpu_attestation_verifier,
     verify_chutes_live_evidence_with_attestation_verifiers, verify_dstack_evidence,
     verify_evidence, verify_evidence_with_attestation_verifiers,
     verify_evidence_with_gpu_attestation_verifier, verify_evidence_with_tinfoil_quote_verifier,
