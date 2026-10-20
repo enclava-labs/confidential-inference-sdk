@@ -48,8 +48,8 @@ pub use reference_values::{
     ReferenceValuesPin, RouteReference,
 };
 pub use signature::{
-    default_trusted_signing_keys, verify_artifact_signature, verify_artifact_signature_with_keys,
-    ArtifactSignature, TrustedSigningKey, ALIAS_MATRIX_FIXTURE_SIGNING_KEY_ID,
+    bundled_fixture_signing_keys, verify_artifact_signature_with_keys, ArtifactSignature,
+    TrustedSigningKey, ALIAS_MATRIX_FIXTURE_SIGNING_KEY_ID,
     ALIAS_MATRIX_FIXTURE_SIGNING_PUBLIC_KEY_BASE64URL, COMPATIBILITY_FIXTURE_SIGNING_KEY_ID,
     COMPATIBILITY_FIXTURE_SIGNING_PUBLIC_KEY_BASE64URL, DEMO_SIGNING_KEY_ID,
     DEMO_SIGNING_PUBLIC_KEY_BASE64URL, PHASE2_FIXTURE_SIGNING_KEY_ID,

@@ -6,7 +6,7 @@
 
 use confidential_inference_sdk::{
     ChatCompletionRequestPayload, ClientError, ConfidentialInference, ProviderRoutingConfig,
-    ResponseCreateRequestPayload,
+    ResponseCreateRequestPayload, TrustedSigningKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -58,6 +58,16 @@ struct ClientConfig {
     api_keys: BTreeMap<String, ApiKeyConfig>,
     #[serde(default)]
     routing: ProviderRoutingConfig,
+    #[serde(default)]
+    trusted_ed25519_signing_keys: Vec<TrustedEd25519SigningKeyConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrustedEd25519SigningKeyConfig {
+    signer: String,
+    key_id: String,
+    public_key_base64url: String,
 }
 
 #[derive(Deserialize)]
@@ -76,12 +86,50 @@ impl Default for ClientConfig {
             allow_inline_api_keys: false,
             api_keys: BTreeMap::new(),
             routing: ProviderRoutingConfig::default(),
+            trusted_ed25519_signing_keys: Vec::new(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn resolve_trusted_signing_keys(
+    config: &ClientConfig,
+) -> Result<Vec<TrustedSigningKey>, ConfigError> {
+    if config.demo_provider && !config.trusted_ed25519_signing_keys.is_empty() {
+        return Err(ConfigError {
+            code: "trusted_signing_keys_ambiguous",
+            message: "trusted_ed25519_signing_keys cannot be combined with demo_provider=true; set demo_provider=false to configure an exclusive operator trust root".to_owned(),
+        });
+    }
+    if !config.demo_provider && config.trusted_ed25519_signing_keys.is_empty() {
+        return Err(ConfigError {
+            code: "trusted_signing_keys_required",
+            message: "demo_provider=false requires a non-empty trusted_ed25519_signing_keys list; the bundled fixture keys are only trusted by the demo provider".to_owned(),
+        });
+    }
+    let mut keys = Vec::with_capacity(config.trusted_ed25519_signing_keys.len());
+    for key in &config.trusted_ed25519_signing_keys {
+        if key.signer.trim().is_empty()
+            || key.key_id.trim().is_empty()
+            || key.public_key_base64url.trim().is_empty()
+        {
+            return Err(ConfigError {
+                code: "trusted_signing_key_field_empty",
+                message:
+                    "trusted_ed25519_signing_keys entries require non-empty signer, key_id, and public_key_base64url"
+                        .to_owned(),
+            });
+        }
+        keys.push(TrustedSigningKey::new(
+            key.signer.clone(),
+            key.key_id.clone(),
+            key.public_key_base64url.clone(),
+        ));
+    }
+    Ok(keys)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -325,10 +373,22 @@ pub unsafe extern "C" fn confidential_inference_sdk_new(
             }
         };
 
+        let trusted_signing_keys = match resolve_trusted_signing_keys(&config) {
+            Ok(keys) => keys,
+            Err(error) => {
+                return ffi_error(
+                    CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                    error.code,
+                    &error.message,
+                )
+            }
+        };
         let provider_routing = config.routing.clone();
         let mut builder = ConfidentialInference::builder().provider_routing(provider_routing);
         if config.demo_provider {
             builder = builder.with_demo_provider();
+        } else {
+            builder = builder.exclusive_trusted_artifact_signing_keys(trusted_signing_keys);
         }
         for (provider, api_key) in match resolve_api_keys(config) {
             Ok(api_keys) => api_keys,
@@ -2099,6 +2159,82 @@ mod tests {
             let error: Value = serde_json::from_str(&error_json).unwrap();
             assert_eq!(error["error"]["code"], "credential_source_ambiguous");
             assert!(!error_json.contains(secret));
+        }
+    }
+
+    #[test]
+    fn ffi_client_config_rejects_demo_provider_with_trusted_signing_keys() {
+        unsafe {
+            let config = c_string(
+                r#"{"demo_provider":true,"trusted_ed25519_signing_keys":[{"signer":"test","key_id":"test-key","public_key_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}"#,
+            );
+            let mut client = ptr::null_mut();
+
+            assert_eq!(
+                confidential_inference_sdk_new(config.as_ptr(), &mut client),
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT
+            );
+            let error = last_error_value();
+            assert_eq!(error["error"]["code"], "trusted_signing_keys_ambiguous");
+            assert!(client.is_null());
+        }
+    }
+
+    #[test]
+    fn ffi_client_config_rejects_non_demo_without_trusted_signing_keys() {
+        unsafe {
+            for config_json in [
+                r#"{"demo_provider":false}"#,
+                r#"{"demo_provider":false,"trusted_ed25519_signing_keys":[]}"#,
+            ] {
+                let config = c_string(config_json);
+                let mut client = ptr::null_mut();
+
+                assert_eq!(
+                    confidential_inference_sdk_new(config.as_ptr(), &mut client),
+                    CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT
+                );
+                let error = last_error_value();
+                assert_eq!(error["error"]["code"], "trusted_signing_keys_required");
+                assert!(client.is_null());
+            }
+        }
+    }
+
+    #[test]
+    fn ffi_client_config_rejects_signing_key_with_empty_fields() {
+        unsafe {
+            let config = c_string(
+                r#"{"demo_provider":false,"trusted_ed25519_signing_keys":[{"signer":"test","key_id":"","public_key_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}"#,
+            );
+            let mut client = ptr::null_mut();
+
+            assert_eq!(
+                confidential_inference_sdk_new(config.as_ptr(), &mut client),
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT
+            );
+            let error = last_error_value();
+            assert_eq!(error["error"]["code"], "trusted_signing_key_field_empty");
+            assert!(client.is_null());
+        }
+    }
+
+    #[test]
+    fn ffi_client_config_accepts_exclusive_trusted_signing_keys() {
+        unsafe {
+            let config = c_string(
+                r#"{"demo_provider":false,"trusted_ed25519_signing_keys":[{"signer":"confidential-inference","key_id":"confidential-inference-demo-ed25519-2026","public_key_base64url":"4oqJcHUzMr1y_vQT5rCy7xtKrdp6osFB8jNxKmh2s1E"}]}"#,
+            );
+            let mut client = ptr::null_mut();
+
+            assert_eq!(
+                confidential_inference_sdk_new(config.as_ptr(), &mut client),
+                CONFIDENTIAL_INFERENCE_FFI_OK
+            );
+            assert_eq!(
+                confidential_inference_sdk_free(client),
+                CONFIDENTIAL_INFERENCE_FFI_OK
+            );
         }
     }
 

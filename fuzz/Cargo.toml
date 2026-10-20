@@ -1,0 +1,21 @@
+[package]
+name = "confidential-inference-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dcap-qvl = { version = "0.6.1", default-features = false, features = ["std", "ring", "default-x509"] }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "dcap_quote_parse"
+path = "fuzz_targets/dcap_quote_parse.rs"
+test = false
+doc = false

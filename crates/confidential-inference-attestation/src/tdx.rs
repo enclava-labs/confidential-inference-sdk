@@ -1,9 +1,8 @@
 use crate::{
     format_utc_timestamp_millis, parse_utc_timestamp_millis, sha256_digest,
-    verify_artifact_signature, verify_artifact_signature_with_keys, ArtifactSignature,
-    AttestationError, CpuTeeKind, EvidenceHardware, Result, TinfoilAttestationFormat,
-    TinfoilQuoteVerificationRequest, TinfoilQuoteVerifier, TrustedSigningKey, VerifiedTdxQuote,
-    VerifiedTinfoilQuote,
+    verify_artifact_signature_with_keys, ArtifactSignature, AttestationError, CpuTeeKind,
+    EvidenceHardware, Result, TinfoilAttestationFormat, TinfoilQuoteVerificationRequest,
+    TinfoilQuoteVerifier, TrustedSigningKey, VerifiedTdxQuote, VerifiedTinfoilQuote,
 };
 use dcap_qvl::{
     quote::{Quote, Report, TDReport10},
@@ -150,11 +149,6 @@ impl DcapTdxCollateralBundleEnvelope {
         })
     }
 
-    pub fn verify_signature(&self) -> Result<()> {
-        self.validate_envelope()?;
-        verify_artifact_signature(&self.signature, &self.payload)
-    }
-
     pub fn verify_signature_with_keys(
         &self,
         trusted_signing_keys: &[TrustedSigningKey],
@@ -163,22 +157,12 @@ impl DcapTdxCollateralBundleEnvelope {
         verify_artifact_signature_with_keys(&self.signature, &self.payload, trusted_signing_keys)
     }
 
-    pub fn into_verified_bundle(self) -> Result<DcapTdxCollateralBundle> {
-        self.verify_signature()?;
-        Ok(self.payload)
-    }
-
     pub fn into_verified_bundle_with_keys(
         self,
         trusted_signing_keys: &[TrustedSigningKey],
     ) -> Result<DcapTdxCollateralBundle> {
         self.verify_signature_with_keys(trusted_signing_keys)?;
         Ok(self.payload)
-    }
-
-    pub fn verifier_at(&self, now_epoch_millis: u64) -> Result<DcapTdxTinfoilQuoteVerifier> {
-        self.verify_signature()?;
-        self.payload.verifier_at(now_epoch_millis)
     }
 
     pub fn verifier_at_with_keys(

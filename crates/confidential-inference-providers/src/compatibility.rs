@@ -22,8 +22,14 @@ impl ProviderCompatibilityMatrix {
     pub const SCHEMA: &'static str = "confidential-inference.provider-compatibility-matrix.v1";
     pub const SUPPORTED_SCHEMA_MAJOR: u32 = 1;
 
+    /// Load the bundled provider compatibility matrix fixture.
+    ///
+    /// Bundled fixture loaders verify against `bundled_fixture_signing_keys`
+    /// only; this is not a production trust path.
     pub fn bundled() -> crate::Result<Self> {
-        ProviderCompatibilityMatrixEnvelope::bundled()?.into_verified_payload()
+        ProviderCompatibilityMatrixEnvelope::bundled()?.into_verified_payload_with_keys(
+            &confidential_inference_attestation::bundled_fixture_signing_keys(),
+        )
     }
 
     pub fn digest(&self) -> crate::Result<String> {
@@ -142,12 +148,6 @@ impl ProviderCompatibilityMatrixEnvelope {
         .map_err(Into::into)
     }
 
-    pub fn verify_signature(&self) -> crate::Result<()> {
-        self.verify_signature_with_keys(
-            &confidential_inference_attestation::default_trusted_signing_keys(),
-        )
-    }
-
     pub fn verify_signature_with_keys(
         &self,
         trusted_signing_keys: &[TrustedSigningKey],
@@ -162,8 +162,11 @@ impl ProviderCompatibilityMatrixEnvelope {
         self.payload.validate()
     }
 
-    pub fn into_verified_payload(self) -> crate::Result<ProviderCompatibilityMatrix> {
-        self.verify_signature()?;
+    pub fn into_verified_payload_with_keys(
+        self,
+        trusted_signing_keys: &[TrustedSigningKey],
+    ) -> crate::Result<ProviderCompatibilityMatrix> {
+        self.verify_signature_with_keys(trusted_signing_keys)?;
         Ok(self.payload)
     }
 }
@@ -540,7 +543,11 @@ mod tests {
     fn bundled_compatibility_matrix_signature_verifies() {
         let envelope = ProviderCompatibilityMatrixEnvelope::bundled().unwrap();
 
-        envelope.verify_signature().unwrap();
+        envelope
+            .verify_signature_with_keys(
+                &confidential_inference_attestation::bundled_fixture_signing_keys(),
+            )
+            .unwrap();
         assert_eq!(
             envelope.signature.key_id,
             COMPATIBILITY_FIXTURE_SIGNING_KEY_ID
@@ -597,7 +604,11 @@ mod tests {
             .unwrap()
             .streaming = StreamingSupport::Supported;
 
-        assert!(envelope.verify_signature().is_err());
+        assert!(envelope
+            .verify_signature_with_keys(
+                &confidential_inference_attestation::bundled_fixture_signing_keys(),
+            )
+            .is_err());
     }
 
     #[test]

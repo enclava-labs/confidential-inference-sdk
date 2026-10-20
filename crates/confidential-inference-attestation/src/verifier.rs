@@ -967,40 +967,50 @@ pub fn verify_chutes_e2ee_evidence_with_gpu_attestation_verifier(
     let hardware_verified = match &request.policy.hardware.cpu {
         CpuTeeRequirement::NotRequired => {
             checks.insert("cpu_tee".into(), CheckResult::NotApplicable);
+            checks.insert(
+                "cpu_measurement_reference".into(),
+                CheckResult::NotApplicable,
+            );
             true
         }
-        CpuTeeRequirement::AnyCpuTee => {
-            let ok = cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
-                && provider_reference
-                    .accepted_measurements
-                    .iter()
-                    .any(|measurement| measurement == &evidence.tee_measurement);
+        CpuTeeRequirement::AnyCpuTee | CpuTeeRequirement::OneOf { .. } => {
+            // This evidence family compares provider-asserted claims against
+            // signed reference values but never verifies the TDX quote
+            // signature, so it can never satisfy a required CPU TEE.
+            checks.insert("cpu_tee".into(), CheckResult::Failed);
+            errors.push(VerdictError {
+                code: "cpu_tee".into(),
+                message: "chutes_e2ee evidence does not verify the TDX quote signature, so a required CPU TEE cannot be satisfied by this evidence family"
+                    .into(),
+            });
+            let reference_match = match &request.policy.hardware.cpu {
+                CpuTeeRequirement::AnyCpuTee => {
+                    cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
+                        && provider_reference
+                            .accepted_measurements
+                            .iter()
+                            .any(|measurement| measurement == &evidence.tee_measurement)
+                }
+                CpuTeeRequirement::OneOf { allowed } => {
+                    allowed
+                        .iter()
+                        .any(|candidate| candidate == &evidence.hardware.cpu)
+                        && cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
+                        && provider_reference
+                            .accepted_measurements
+                            .iter()
+                            .any(|measurement| measurement == &evidence.tee_measurement)
+                }
+                CpuTeeRequirement::NotRequired => unreachable!(),
+            };
             push_check(
                 &mut checks,
                 &mut errors,
-                "cpu_tee",
-                ok,
-                "CPU TEE or measurement is not accepted by reference values",
+                "cpu_measurement_reference",
+                reference_match,
+                "claimed CPU TEE kind or measurement is not accepted by policy/reference values",
             );
-            ok
-        }
-        CpuTeeRequirement::OneOf { allowed } => {
-            let ok = allowed
-                .iter()
-                .any(|candidate| candidate == &evidence.hardware.cpu)
-                && cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
-                && provider_reference
-                    .accepted_measurements
-                    .iter()
-                    .any(|measurement| measurement == &evidence.tee_measurement);
-            push_check(
-                &mut checks,
-                &mut errors,
-                "cpu_tee",
-                ok,
-                "CPU TEE kind or measurement is not accepted by policy/reference values",
-            );
-            ok
+            false
         }
     };
 
@@ -1209,8 +1219,8 @@ pub fn verify_chutes_e2ee_evidence_with_gpu_attestation_verifier(
     // report_data hash) against signed reference values without verifying the
     // quote itself, so report only the tier the checks actually achieved:
     // AppE2ee when the pinned key and report-data binding matched, TeeOnly
-    // when only the hardware claims matched, and never a higher tier (such as
-    // HwVerifiedTls) than this path can prove.
+    // only when the policy did not require a CPU TEE at all, and never a
+    // higher tier (such as HwVerifiedTls) than this path can prove.
     let achieved_trust_tier = if channel_verified {
         TrustTier::AppE2ee
     } else if hardware_verified {
@@ -2920,7 +2930,9 @@ fn check_is_required(name: &str, state: &CheckResult, policy: &VerificationPolic
         || policy.provenance.dependency_sbom;
     match name {
         "route_metadata_binding" | "tcb_compose_hash" | "response_signing_key_binding" => true,
-        "cpu_tee" => !matches!(policy.hardware.cpu, CpuTeeRequirement::NotRequired),
+        "cpu_tee" | "cpu_measurement_reference" => {
+            !matches!(policy.hardware.cpu, CpuTeeRequirement::NotRequired)
+        }
         "gpu_tee" => !matches!(policy.hardware.gpu, GpuTeeRequirement::NotRequired),
         "tls_binding" | "e2ee_key_binding" | "e2ee_key_reference_match" => !matches!(
             policy.channel_binding_requirement,
@@ -2972,6 +2984,7 @@ fn check_evidence_refs(name: &str) -> Vec<String> {
         "route_metadata_binding"
             | "request_route_binding"
             | "route_binding"
+            | "cpu_measurement_reference"
             | "e2ee_key_reference_match"
             | "image_provenance"
             | "model_artifact_provenance"
@@ -3732,6 +3745,12 @@ mod tests {
     fn require_attested_e2ee_with_gpu() -> VerificationPolicy {
         let mut policy = VerificationPolicy::require_attested_e2ee();
         policy.hardware.gpu = GpuTeeRequirement::one_of(vec![GpuTeeKind::NvidiaCc]);
+        policy
+    }
+
+    fn chutes_app_e2ee_policy() -> VerificationPolicy {
+        let mut policy = VerificationPolicy::require_attested_e2ee();
+        policy.hardware.cpu = CpuTeeRequirement::NotRequired;
         policy
     }
 
@@ -4630,17 +4649,27 @@ mod tests {
 
     #[test]
     fn chutes_e2ee_evidence_verifies_nonce_and_public_key_binding() {
-        let request = request_with_chutes_evidence(chutes_evidence(), None);
+        let request = request_with_chutes_evidence_and_policy(
+            chutes_evidence(),
+            None,
+            chutes_app_e2ee_policy(),
+        );
 
         let verdict = verify_evidence(request).unwrap();
 
         assert_eq!(verdict.status, VerificationStatus::Verified);
         assert!(verdict.request_allowed);
+        assert_eq!(verdict.check("cpu_tee"), Some(&CheckResult::NotApplicable));
+        assert_eq!(
+            verdict.check("cpu_measurement_reference"),
+            Some(&CheckResult::NotApplicable)
+        );
         assert_eq!(
             verdict.check("e2ee_key_binding"),
             Some(&CheckResult::Verified)
         );
         assert_eq!(verdict.check("nonce_binding"), Some(&CheckResult::Verified));
+        assert_eq!(verdict.trust_tier, TrustTier::AppE2ee);
         assert_eq!(
             verdict.artifacts.signing_public_key.as_deref(),
             Some(sha256_digest(chutes_public_key().as_bytes()).as_str())
@@ -4648,6 +4677,47 @@ mod tests {
         assert_eq!(
             verdict.artifacts.e2ee_capability.as_deref(),
             Some("chutes-e2ee")
+        );
+    }
+
+    #[test]
+    fn chutes_e2ee_evidence_fails_closed_when_cpu_tee_is_required() {
+        let request = request_with_chutes_evidence(chutes_evidence(), None);
+
+        let verdict = verify_evidence(request).unwrap();
+
+        assert_eq!(verdict.status, VerificationStatus::Failed);
+        assert!(!verdict.request_allowed);
+        assert_eq!(verdict.check("cpu_tee"), Some(&CheckResult::Failed));
+        assert_eq!(
+            verdict.check("cpu_measurement_reference"),
+            Some(&CheckResult::Verified)
+        );
+        assert_ne!(verdict.trust_tier, TrustTier::TeeOnly);
+        assert_ne!(verdict.trust_tier, TrustTier::HwVerifiedTls);
+        assert!(verdict.errors.iter().any(|error| {
+            error.code == "cpu_tee"
+                && error
+                    .message
+                    .contains("does not verify the TDX quote signature")
+        }));
+        assert!(verdict.validate_summary_consistency().is_ok());
+    }
+
+    #[test]
+    fn chutes_e2ee_evidence_fails_closed_for_cpu_measurement_mismatch() {
+        let mut evidence = chutes_evidence();
+        evidence.tee_measurement = "sha256:untrusted-chutes-measurement".into();
+        let request = request_with_chutes_evidence(evidence, None);
+
+        let verdict = verify_evidence(request).unwrap();
+
+        assert_eq!(verdict.status, VerificationStatus::Failed);
+        assert!(!verdict.request_allowed);
+        assert_eq!(verdict.check("cpu_tee"), Some(&CheckResult::Failed));
+        assert_eq!(
+            verdict.check("cpu_measurement_reference"),
+            Some(&CheckResult::Failed)
         );
     }
 
@@ -4680,11 +4750,9 @@ mod tests {
         let mut evidence = chutes_evidence();
         evidence.hardware.gpu = Some(GpuTeeKind::NvidiaCc);
         evidence.gpu_attestation = Some(nvidia_gpu_attestation(&evidence.nonce));
-        let request = request_with_chutes_evidence_and_policy(
-            evidence,
-            None,
-            require_attested_e2ee_with_gpu(),
-        );
+        let mut policy = require_attested_e2ee_with_gpu();
+        policy.hardware.cpu = CpuTeeRequirement::NotRequired;
+        let request = request_with_chutes_evidence_and_policy(evidence, None, policy);
 
         let verdict = verify_chutes_e2ee_evidence_with_gpu_attestation_verifier(
             request,
@@ -4705,7 +4773,7 @@ mod tests {
     fn chutes_per_request_freshness_accepts_expected_nonce() {
         let evidence = chutes_evidence();
         let expected_nonce = evidence.nonce.clone();
-        let mut policy = VerificationPolicy::require_attested_e2ee();
+        let mut policy = chutes_app_e2ee_policy();
         policy.freshness = FreshnessPolicy::PerRequest;
         let mut request = request_with_chutes_evidence_and_policy(evidence, None, policy);
         request.expected_freshness_nonce = Some(expected_nonce);
@@ -4921,6 +4989,7 @@ mod tests {
         RequireAttestedE2ee,
         RequireAttestedE2eeWithProvenance,
         RequireAttestedE2eeWithGpu,
+        RequireAttestedE2eeCpuNotRequired,
     }
 
     impl CorpusPolicy {
@@ -4929,6 +4998,7 @@ mod tests {
                 Self::RequireAttestedE2ee => VerificationPolicy::require_attested_e2ee(),
                 Self::RequireAttestedE2eeWithProvenance => require_attested_e2ee_with_provenance(),
                 Self::RequireAttestedE2eeWithGpu => require_attested_e2ee_with_gpu(),
+                Self::RequireAttestedE2eeCpuNotRequired => chutes_app_e2ee_policy(),
             }
         }
     }

@@ -30,10 +30,6 @@ impl ReferenceValuesEnvelope {
         .map_err(Into::into)
     }
 
-    pub fn verify_signature(&self) -> Result<()> {
-        self.verify_signature_with_keys(&crate::default_trusted_signing_keys())
-    }
-
     pub fn verify_signature_with_keys(
         &self,
         trusted_signing_keys: &[TrustedSigningKey],
@@ -45,25 +41,11 @@ impl ReferenceValuesEnvelope {
         verify_artifact_signature_with_keys(&self.signature, &self.payload, trusted_signing_keys)
     }
 
-    pub fn into_verified_payload(self) -> Result<ReferenceValuesPayload> {
-        self.verify_signature()?;
-        Ok(self.payload)
-    }
-
     pub fn into_verified_payload_with_keys(
         self,
         trusted_signing_keys: &[TrustedSigningKey],
     ) -> Result<ReferenceValuesPayload> {
         self.verify_signature_with_keys(trusted_signing_keys)?;
-        Ok(self.payload)
-    }
-
-    pub fn into_verified_update_from(
-        self,
-        current: &ReferenceValuesPayload,
-    ) -> Result<ReferenceValuesPayload> {
-        self.verify_signature()?;
-        current.verify_update_to(&self.payload)?;
         Ok(self.payload)
     }
 
@@ -465,7 +447,9 @@ mod tests {
     #[test]
     fn bundled_reference_values_signature_verifies() {
         let envelope = ReferenceValuesEnvelope::bundled_demo().unwrap();
-        envelope.verify_signature().unwrap();
+        envelope
+            .verify_signature_with_keys(&crate::bundled_fixture_signing_keys())
+            .unwrap();
         assert_eq!(
             envelope.payload.digest().unwrap(),
             DEMO_REFERENCE_VALUES_DIGEST
@@ -477,7 +461,9 @@ mod tests {
         let mut envelope = ReferenceValuesEnvelope::bundled_demo().unwrap();
         envelope.payload.version = "tampered".into();
 
-        assert!(envelope.verify_signature().is_err());
+        assert!(envelope
+            .verify_signature_with_keys(&crate::bundled_fixture_signing_keys())
+            .is_err());
     }
 
     #[test]
@@ -488,7 +474,9 @@ mod tests {
         candidate.revocation_epoch = 2;
         let update = signed_update(candidate, ACCEPTED_UPDATE_SIGNATURE);
 
-        let accepted = update.into_verified_update_from(&current).unwrap();
+        let accepted = update
+            .into_verified_update_from_with_keys(&current, &crate::bundled_fixture_signing_keys())
+            .unwrap();
 
         assert_eq!(accepted.version, "2026-07-06-demo");
         assert_eq!(accepted.revocation_epoch, 2);
@@ -513,7 +501,9 @@ mod tests {
             });
         let update = signed_update(candidate, ADDED_ARTIFACT_UPDATE_SIGNATURE);
 
-        let accepted = update.into_verified_update_from(&current).unwrap();
+        let accepted = update
+            .into_verified_update_from_with_keys(&current, &crate::bundled_fixture_signing_keys())
+            .unwrap();
 
         assert_eq!(
             accepted
@@ -538,7 +528,10 @@ mod tests {
         let update = signed_update(candidate, STALE_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::InvalidReferenceValuesUpdate(_))
         ));
     }
@@ -551,7 +544,10 @@ mod tests {
         let update = signed_update(candidate, LOW_REVOCATION_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::InvalidReferenceValuesUpdate(_))
         ));
     }
@@ -564,7 +560,10 @@ mod tests {
         let update = signed_update(candidate, MIN_VERSION_ROLLBACK_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::WeakeningReferenceValuesUpdate(_))
         ));
     }
@@ -582,7 +581,10 @@ mod tests {
         let update = signed_update(candidate, BROADENED_MEASUREMENT_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::WeakeningReferenceValuesUpdate(_))
         ));
     }
@@ -603,7 +605,10 @@ mod tests {
         let update = signed_update(candidate, CPU_BROADENED_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::WeakeningReferenceValuesUpdate(_))
         ));
     }
@@ -623,7 +628,10 @@ mod tests {
         let update = signed_update(candidate, KEY_CHANGED_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::WeakeningReferenceValuesUpdate(_))
         ));
     }
@@ -685,7 +693,10 @@ mod tests {
         let update = signed_update(candidate, ARTIFACT_REMOVED_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::WeakeningReferenceValuesUpdate(_))
         ));
     }
@@ -698,7 +709,10 @@ mod tests {
         let update = signed_update(candidate, ROUTE_REMOVED_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::WeakeningReferenceValuesUpdate(_))
         ));
     }
@@ -711,7 +725,10 @@ mod tests {
         let update = signed_update(candidate, PROVIDER_REMOVED_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::WeakeningReferenceValuesUpdate(_))
         ));
     }
@@ -727,7 +744,10 @@ mod tests {
                 .into();
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(
+                &current,
+                &crate::bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::InvalidArtifactSignature(_))
         ));
     }
@@ -759,7 +779,9 @@ mod tests {
         let mut envelope = ReferenceValuesEnvelope::bundled_demo().unwrap();
         envelope.payload.schema = "confidential-inference.reference-values.v2".into();
 
-        let error = envelope.into_verified_payload().unwrap_err();
+        let error = envelope
+            .into_verified_payload_with_keys(&crate::bundled_fixture_signing_keys())
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -989,7 +1011,7 @@ mod tests {
     fn demo_payload() -> ReferenceValuesPayload {
         ReferenceValuesEnvelope::bundled_demo()
             .unwrap()
-            .into_verified_payload()
+            .into_verified_payload_with_keys(&crate::bundled_fixture_signing_keys())
             .unwrap()
     }
 

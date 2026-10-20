@@ -16,7 +16,11 @@ edition = "2021"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/enclava-labs/confidential-inference-sdk"
+homepage = "https://github.com/enclava-labs/confidential-inference-sdk"
+documentation = "https://github.com/enclava-labs/confidential-inference-sdk"
 rust-version = "1.97"
+keywords = ["attestation", "confidential-computing", "e2ee", "inference", "tee"]
+categories = ["cryptography", "network-programming"]
 
 [workspace.dependencies]
 async-trait = "0.1"

@@ -17,6 +17,25 @@ is not the default. `NvidiaGpuAttestationEvidence::NRAS_GPU_EVIDENCE_V3`
 continues to name NVIDIA's input evidence format; it does not select the NRAS
 HTTP API version.
 
+## Artifact trust roots
+
+The bundled fixture signing keys are test material. They verify bundled
+artifacts only, and only after an explicit `with_demo_provider()` opt-in or an
+explicit `exclusive_trusted_artifact_signing_keys` set that lists them. Remote
+and custom registry/reference-value envelopes — including fetched candidates
+and on-disk caches — verify against the operator key set alone, and `build`
+fails when that set is empty for a non-bundled source.
+
+## Chutes E2EE quote claims are not CPU verification
+
+The `chutes_e2ee` evidence family parses the TDX quote and compares claimed
+measurements against signed reference values, but never verifies the quote
+signature. When a policy requires a CPU TEE, `cpu_tee` fails closed and the
+verdict is denied; `cpu_measurement_reference` only reports whether the
+claimed measurement matched. With `CpuTeeRequirement::NotRequired`, `cpu_tee`
+is `not_applicable` and the app-E2EE checks can still reach `verified`, capped
+below `hw_verified_tls`.
+
 ## Evidence is not proof
 
 Provider response booleans and absent fields never become verified facts:

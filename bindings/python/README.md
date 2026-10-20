@@ -4,9 +4,10 @@ This directory contains a source-only `ctypes` binding for the Confidential
 Inference SDK C ABI. Routing, attestation, policy, digest, and signature
 decisions remain in Rust.
 
-The binding is not published to PyPI and does not currently include packaging
-metadata. It must be used with a locally built
-`confidential-inference-ffi` shared library.
+The binding is not published to PyPI. The `pyproject.toml` in this directory
+supports a source install (`pip install .`), but the package must still be
+used with a locally built `confidential-inference-ffi` shared library, which
+is built from this repository.
 
 ## Requirements
 
@@ -69,6 +70,35 @@ Rust owns every attestation/policy/registry/digest/signature decision; the
 binding only parses the JSON that crosses the ABI and applies minimal
 object/array shape checks on the way back.
 
+## Artifact trust
+
+`demo_provider: True` (the default) is the offline/demo mode: it installs the
+demo provider and trusts the bundled fixture signing keys for the bundled
+artifacts only.
+
+Setting `demo_provider: False` requires a non-empty
+`trusted_ed25519_signing_keys` list, which becomes the exclusive trust root
+for every artifact — including the bundled ones:
+
+```python
+client = Client(
+    config={
+        "demo_provider": False,
+        "trusted_ed25519_signing_keys": [
+            {
+                "signer": "my-operator",
+                "key_id": "operator-ed25519-2026",
+                "public_key_base64url": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            }
+        ],
+    }
+)
+```
+
+Combining `demo_provider: True` with a non-empty `trusted_ed25519_signing_keys`
+list is rejected as ambiguous. The bundled fixture keys can never verify
+remote or custom artifacts.
+
 ## Credentials
 
 Prefer environment-variable references:
@@ -77,6 +107,13 @@ Prefer environment-variable references:
 client = Client(
     config={
         "demo_provider": False,
+        "trusted_ed25519_signing_keys": [
+            {
+                "signer": "my-operator",
+                "key_id": "operator-ed25519-2026",
+                "public_key_base64url": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            }
+        ],
         "api_keys": {
             "tinfoil": {"env": "TINFOIL_API_KEY"},
         },
@@ -96,6 +133,13 @@ An ordered provider list can be configured per canonical model:
 client = Client(
     config={
         "demo_provider": False,
+        "trusted_ed25519_signing_keys": [
+            {
+                "signer": "my-operator",
+                "key_id": "operator-ed25519-2026",
+                "public_key_base64url": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            }
+        ],
         "api_keys": {
             "tinfoil": {"env": "TINFOIL_API_KEY"},
             "phala": {"env": "PHALA_API_KEY"},

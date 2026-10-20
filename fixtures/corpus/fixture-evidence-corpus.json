@@ -98,6 +98,15 @@
       "evidence_path": "evidence/redpill-chutes-valid.json",
       "evidence_family": "chutes_e2ee",
       "policy": "require_attested_e2ee",
+      "expected_status": "failed",
+      "expected_request_allowed": false,
+      "expected_failed_checks": ["cpu_tee"]
+    },
+    {
+      "id": "redpill-chutes-app-e2ee-only",
+      "evidence_path": "evidence/redpill-chutes-valid.json",
+      "evidence_family": "chutes_e2ee",
+      "policy": "require_attested_e2ee_cpu_not_required",
       "expected_status": "verified",
       "expected_request_allowed": true,
       "expected_failed_checks": []
@@ -110,6 +119,7 @@
       "expected_status": "failed",
       "expected_request_allowed": false,
       "expected_failed_checks": [
+        "cpu_tee",
         "e2ee_key_binding",
         "nonce_binding",
         "request_key_binding",
@@ -127,6 +137,7 @@
       "expected_status": "failed",
       "expected_request_allowed": false,
       "expected_failed_checks": [
+        "cpu_tee",
         "e2ee_key_binding",
         "request_key_binding",
         "request_encryption",
@@ -142,7 +153,7 @@
       "policy": "require_attested_e2ee_with_gpu",
       "expected_status": "failed",
       "expected_request_allowed": false,
-      "expected_failed_checks": ["gpu_tee"]
+      "expected_failed_checks": ["cpu_tee", "gpu_tee"]
     },
     {
       "id": "unsupported-evidence-schema",

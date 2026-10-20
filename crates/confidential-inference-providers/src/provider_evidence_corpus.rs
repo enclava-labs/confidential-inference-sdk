@@ -7,10 +7,10 @@ use base64::Engine;
 use confidential_inference_attestation::{
     canonical_json, sha256_digest, verify_evidence, AliasConfidence, ArtifactDigest,
     ArtifactSignature, AttestationVerdict, BoundDataRequirement, ChannelBindingKind, CheckResult,
-    ChutesE2eeEvidence, CpuTeeKind, DstackEvidence, FreshnessClass, GpuTeeKind, ProviderReference,
-    ReferenceValuesEnvelope, ReferenceValuesPayload, ResponseIntegrityRequirement,
-    ResponseIntegrityResult, RouteReference, SignatureMetadata, TrustTier, TrustedSigningKey,
-    VerificationPolicy, VerificationRequest, VerificationStatus,
+    ChutesE2eeEvidence, CpuTeeKind, CpuTeeRequirement, DstackEvidence, FreshnessClass, GpuTeeKind,
+    ProviderReference, ReferenceValuesEnvelope, ReferenceValuesPayload,
+    ResponseIntegrityRequirement, ResponseIntegrityResult, RouteReference, SignatureMetadata,
+    TrustTier, TrustedSigningKey, VerificationPolicy, VerificationRequest, VerificationStatus,
 };
 use ed25519_compact::{KeyPair, Seed};
 use serde::Deserialize;
@@ -213,7 +213,15 @@ fn provider_evidence_normalizer_corpus_verifies_normalized_evidence() {
             Some(ReferenceMutation::WrongMeasurement),
         ))
         .unwrap();
-        assert_failed_check(&case, &failed, "cpu_tee");
+        assert_failed_check(
+            &case,
+            &failed,
+            if case.evidence_family == "dstack_app_e2ee" {
+                "cpu_tee"
+            } else {
+                "cpu_measurement_reference"
+            },
+        );
     }
 }
 
@@ -682,13 +690,25 @@ fn verification_request_for_case(
     let reference_values_digest = reference_values.digest().unwrap();
     let registry_digest = sha256_digest(format!("provider-corpus-registry-{}", case.id).as_bytes());
 
+    // chutes_e2ee never verifies the TDX quote signature, so its CPU check
+    // fails closed whenever a CPU TEE is required. The happy path runs under
+    // a CPU-not-required policy so the app-E2EE checks are what is exercised;
+    // the WrongMeasurement mutation keeps the CPU requirement so
+    // cpu_measurement_reference is the check that fails.
+    let mut policy = VerificationPolicy::require_attested_e2ee();
+    if case.evidence_family == "chutes_e2ee"
+        && !matches!(mutation, Some(ReferenceMutation::WrongMeasurement))
+    {
+        policy.hardware.cpu = CpuTeeRequirement::NotRequired;
+    }
+
     VerificationRequest {
         route: attested_route,
         route_execution_status: "provider_corpus".into(),
         chat_executable: true,
         known_unsupported_modes: Vec::new(),
         expected_freshness_nonce: None,
-        policy: VerificationPolicy::require_attested_e2ee()
+        policy: policy
             .with_artifact_digests(registry_digest.clone(), reference_values_digest.clone()),
         reference_values,
         reference_signature: SignatureMetadata {
@@ -739,13 +759,18 @@ fn verification_request_from_reference_values_for_case(
     let registry_digest =
         sha256_digest(format!("provider-app-e2ee-reference-registry-{}", case.id).as_bytes());
 
+    let mut policy = VerificationPolicy::require_attested_e2ee();
+    if case.evidence_family == "chutes_e2ee" {
+        policy.hardware.cpu = CpuTeeRequirement::NotRequired;
+    }
+
     VerificationRequest {
         route: attested_route,
         route_execution_status: "provider_corpus".into(),
         chat_executable: true,
         known_unsupported_modes: Vec::new(),
         expected_freshness_nonce: None,
-        policy: VerificationPolicy::require_attested_e2ee()
+        policy: policy
             .with_artifact_digests(registry_digest.clone(), reference_values_digest.clone()),
         reference_values,
         reference_signature: SignatureMetadata {

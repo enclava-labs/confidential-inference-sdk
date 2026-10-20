@@ -1,4 +1,5 @@
 use base64::Engine;
+pub use confidential_inference_attestation::TrustedSigningKey;
 use confidential_inference_attestation::{
     chutes_provider_nonce, parse_tinfoil_live_capture, sha256_digest,
     verify_evidence_with_attestation_verifiers, ArtifactSignature, AttestationError,
@@ -8,7 +9,7 @@ use confidential_inference_attestation::{
     ModelBindingRequirement, NearLiveEvidence, ReferenceValuesEnvelope, ReferenceValuesPayload,
     ReferenceValuesPin, ResponseIntegrityRequirement, ResponseIntegrityResult, SignatureMetadata,
     StaleVerdictPolicy, TinfoilAttestationFormat, TinfoilQuoteVerifier, TrustTier,
-    TrustedSigningKey, VerificationPolicy, VerificationRequest,
+    VerificationPolicy, VerificationRequest,
 };
 use confidential_inference_openai::{
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Model, ModelList,
@@ -151,6 +152,16 @@ pub enum ClientError {
     ReferenceValuesCache(String),
 
     #[error(
+        "{artifact} requires at least one operator trusted artifact signing key; configure trusted_artifact_signing_key, trusted_ed25519_artifact_signing_key, or a non-empty exclusive_trusted_artifact_signing_keys set"
+    )]
+    MissingOperatorSigningKeys { artifact: &'static str },
+
+    #[error(
+        "bundled {artifact} is fixture material: call with_demo_provider() to trust the bundled fixture keys, or exclusive_trusted_artifact_signing_keys with a non-empty operator key set"
+    )]
+    BundledSourceRequiresTrust { artifact: &'static str },
+
+    #[error(
         "verification policy uses {enforcement:?} enforcement; call allow_insecure_plaintext(true) to acknowledge that observe/disabled modes can send plaintext or policy-failing traffic"
     )]
     InsecurePolicyRequiresOptIn { enforcement: EnforcementMode },
@@ -219,12 +230,17 @@ impl RegistrySource {
     async fn into_envelope_and_source(
         self,
         registry_pin: Option<&ProviderRegistryPin>,
-        trusted_signing_keys: &[TrustedSigningKey],
+        bundled_signing_keys: &[TrustedSigningKey],
+        operator_signing_keys: &[TrustedSigningKey],
         now_epoch_millis: u64,
-    ) -> Result<(ProviderRegistryEnvelope, String)> {
+    ) -> Result<(ProviderRegistryEnvelope, ProviderRegistry, String)> {
         match self {
             RegistrySource::Bundled => {
-                Ok((ProviderRegistryEnvelope::bundled_demo()?, "bundled".into()))
+                let envelope = ProviderRegistryEnvelope::bundled_demo()?;
+                let registry = envelope
+                    .clone()
+                    .into_verified_payload_with_keys(bundled_signing_keys)?;
+                Ok((envelope, registry, "bundled".into()))
             }
             RegistrySource::Remote {
                 url,
@@ -236,13 +252,18 @@ impl RegistrySource {
                     *fallback,
                     cache_path,
                     registry_pin,
-                    trusted_signing_keys,
+                    bundled_signing_keys,
+                    operator_signing_keys,
                     now_epoch_millis,
                 )
                 .await
             }
             RegistrySource::Custom { source, registry } => {
-                Ok((*registry, registry_source_label("custom", source)))
+                let envelope = *registry;
+                let payload = envelope
+                    .clone()
+                    .into_verified_payload_with_keys(operator_signing_keys)?;
+                Ok((envelope, payload, registry_source_label("custom", source)))
             }
         }
     }
@@ -283,12 +304,17 @@ impl ReferenceValuesSource {
     async fn into_envelope_and_source(
         self,
         reference_values_pin: Option<&ReferenceValuesPin>,
-        trusted_signing_keys: &[TrustedSigningKey],
+        bundled_signing_keys: &[TrustedSigningKey],
+        operator_signing_keys: &[TrustedSigningKey],
         now_epoch_millis: u64,
-    ) -> Result<(ReferenceValuesEnvelope, String)> {
+    ) -> Result<(ReferenceValuesEnvelope, ReferenceValuesPayload, String)> {
         match self {
             ReferenceValuesSource::Bundled => {
-                Ok((ReferenceValuesEnvelope::bundled_demo()?, "bundled".into()))
+                let envelope = ReferenceValuesEnvelope::bundled_demo()?;
+                let payload = envelope
+                    .clone()
+                    .into_verified_payload_with_keys(bundled_signing_keys)?;
+                Ok((envelope, payload, "bundled".into()))
             }
             ReferenceValuesSource::Remote {
                 url,
@@ -300,7 +326,8 @@ impl ReferenceValuesSource {
                     *fallback,
                     cache_path,
                     reference_values_pin,
-                    trusted_signing_keys,
+                    bundled_signing_keys,
+                    operator_signing_keys,
                     now_epoch_millis,
                 )
                 .await
@@ -308,7 +335,13 @@ impl ReferenceValuesSource {
             ReferenceValuesSource::Custom {
                 source,
                 reference_values,
-            } => Ok((*reference_values, registry_source_label("custom", source))),
+            } => {
+                let envelope = *reference_values;
+                let payload = envelope
+                    .clone()
+                    .into_verified_payload_with_keys(operator_signing_keys)?;
+                Ok((envelope, payload, registry_source_label("custom", source)))
+            }
         }
     }
 }
@@ -318,19 +351,23 @@ async fn select_remote_registry(
     fallback: ProviderRegistryEnvelope,
     cache_path: Option<PathBuf>,
     registry_pin: Option<&ProviderRegistryPin>,
-    trusted_signing_keys: &[TrustedSigningKey],
+    bundled_signing_keys: &[TrustedSigningKey],
+    operator_signing_keys: &[TrustedSigningKey],
     now_epoch_millis: u64,
-) -> Result<(ProviderRegistryEnvelope, String)> {
+) -> Result<(ProviderRegistryEnvelope, ProviderRegistry, String)> {
+    // The fallback may be bundled fixture material, so it verifies against
+    // the bundled trust set. The on-disk cache and fetched candidates are
+    // operator artifacts and only ever verify against the operator key set.
     let fallback_registry = fallback
         .clone()
-        .into_verified_payload_with_keys(trusted_signing_keys)?;
+        .into_verified_payload_with_keys(bundled_signing_keys)?;
 
     let cached = cache_path.as_deref().and_then(|cache_path| {
         accepted_registry_update(
             read_registry_cache(cache_path)?,
             &fallback_registry,
             registry_pin,
-            trusted_signing_keys,
+            operator_signing_keys,
             now_epoch_millis,
         )
     });
@@ -340,25 +377,37 @@ async fn select_remote_registry(
         .unwrap_or(&fallback_registry);
 
     if let Ok(candidate) = fetch_remote_registry_envelope(&url).await {
-        if let Some((candidate, _candidate_registry)) = accepted_registry_update(
+        if let Some((candidate, candidate_registry)) = accepted_registry_update(
             candidate,
             baseline_registry,
             registry_pin,
-            trusted_signing_keys,
+            operator_signing_keys,
             now_epoch_millis,
         ) {
             if let Some(cache_path) = cache_path.as_deref() {
                 write_registry_cache(cache_path, &candidate)?;
             }
-            return Ok((candidate, registry_source_label("remote", url)));
+            return Ok((
+                candidate,
+                candidate_registry,
+                registry_source_label("remote", url),
+            ));
         }
     }
 
-    if let Some((cached, _cached_registry)) = cached {
-        return Ok((cached, registry_source_label("remote-cache", url)));
+    if let Some((cached, cached_registry)) = cached {
+        return Ok((
+            cached,
+            cached_registry,
+            registry_source_label("remote-cache", url),
+        ));
     }
 
-    Ok((fallback, registry_source_label("remote-fallback", url)))
+    Ok((
+        fallback,
+        fallback_registry,
+        registry_source_label("remote-fallback", url),
+    ))
 }
 
 async fn select_remote_reference_values(
@@ -366,19 +415,22 @@ async fn select_remote_reference_values(
     fallback: ReferenceValuesEnvelope,
     cache_path: Option<PathBuf>,
     reference_values_pin: Option<&ReferenceValuesPin>,
-    trusted_signing_keys: &[TrustedSigningKey],
+    bundled_signing_keys: &[TrustedSigningKey],
+    operator_signing_keys: &[TrustedSigningKey],
     now_epoch_millis: u64,
-) -> Result<(ReferenceValuesEnvelope, String)> {
+) -> Result<(ReferenceValuesEnvelope, ReferenceValuesPayload, String)> {
+    // See select_remote_registry: the fallback uses the bundled trust set
+    // while cached and fetched envelopes only trust operator keys.
     let fallback_reference_values = fallback
         .clone()
-        .into_verified_payload_with_keys(trusted_signing_keys)?;
+        .into_verified_payload_with_keys(bundled_signing_keys)?;
 
     let cached = cache_path.as_deref().and_then(|cache_path| {
         accepted_reference_values_update(
             read_reference_values_cache(cache_path)?,
             &fallback_reference_values,
             reference_values_pin,
-            trusted_signing_keys,
+            operator_signing_keys,
             now_epoch_millis,
         )
     });
@@ -388,25 +440,37 @@ async fn select_remote_reference_values(
         .unwrap_or(&fallback_reference_values);
 
     if let Ok(candidate) = fetch_remote_reference_values_envelope(&url).await {
-        if let Some((candidate, _candidate_reference_values)) = accepted_reference_values_update(
+        if let Some((candidate, candidate_reference_values)) = accepted_reference_values_update(
             candidate,
             baseline_reference_values,
             reference_values_pin,
-            trusted_signing_keys,
+            operator_signing_keys,
             now_epoch_millis,
         ) {
             if let Some(cache_path) = cache_path.as_deref() {
                 write_reference_values_cache(cache_path, &candidate)?;
             }
-            return Ok((candidate, registry_source_label("remote", url)));
+            return Ok((
+                candidate,
+                candidate_reference_values,
+                registry_source_label("remote", url),
+            ));
         }
     }
 
-    if let Some((cached, _cached_reference_values)) = cached {
-        return Ok((cached, registry_source_label("remote-cache", url)));
+    if let Some((cached, cached_reference_values)) = cached {
+        return Ok((
+            cached,
+            cached_reference_values,
+            registry_source_label("remote-cache", url),
+        ));
     }
 
-    Ok((fallback, registry_source_label("remote-fallback", url)))
+    Ok((
+        fallback,
+        fallback_reference_values,
+        registry_source_label("remote-fallback", url),
+    ))
 }
 
 fn accepted_registry_update(
@@ -2538,7 +2602,8 @@ pub struct ConfidentialInferenceBuilder {
     reference_values_source: ReferenceValuesSource,
     reference_values_pin: Option<ReferenceValuesPin>,
     trusted_artifact_signing_keys: Vec<TrustedSigningKey>,
-    trusted_signing_keys_replace_defaults: bool,
+    exclusive_trusted_artifact_signing_keys: Option<Vec<TrustedSigningKey>>,
+    demo_provider: bool,
     compatibility_matrix: Option<ProviderCompatibilityMatrix>,
     provider_routing: ProviderRoutingConfig,
     adapters: BTreeMap<String, Arc<dyn ProviderAdapter>>,
@@ -2562,7 +2627,8 @@ impl ConfidentialInferenceBuilder {
             reference_values_source: ReferenceValuesSource::Bundled,
             reference_values_pin: None,
             trusted_artifact_signing_keys: Vec::new(),
-            trusted_signing_keys_replace_defaults: false,
+            exclusive_trusted_artifact_signing_keys: None,
+            demo_provider: false,
             compatibility_matrix: None,
             provider_routing: ProviderRoutingConfig::default(),
             adapters: BTreeMap::new(),
@@ -2673,28 +2739,37 @@ impl ConfidentialInferenceBuilder {
         self
     }
 
+    /// Appends an operator-controlled artifact signing key.
+    ///
+    /// The appended keys form the operator trust root: remote and custom
+    /// registry/reference-value envelopes are verified against these keys
+    /// only. This method never installs the bundled fixture keys; those are
+    /// only trusted for bundled artifacts when `with_demo_provider()` is used.
     pub fn trusted_artifact_signing_key(mut self, trusted_key: TrustedSigningKey) -> Self {
         self.trusted_artifact_signing_keys.push(trusted_key);
         self
     }
 
-    /// Replaces the built-in demo and fixture signing keys with an
-    /// operator-controlled trust root set for production deployments.
+    /// Replaces the trusted artifact signing key set with exactly the
+    /// supplied operator-controlled keys for production deployments.
     ///
-    /// By default the builder trusts the bundled demo/fixture keys *in
-    /// addition to* any keys added with `trusted_artifact_signing_key`.
-    /// Those fixture keys are test material and must never anchor production
-    /// trust, so production deployments should call this method with their
-    /// own keys (and, optionally, registry/reference-value pins).
+    /// The supplied list is the only trust root used for every artifact —
+    /// bundled registry and reference values included. The bundled fixture
+    /// keys are never added implicitly, so a deployment that wants to keep
+    /// using bundled fixture artifacts must list those keys explicitly (which
+    /// is only appropriate for offline/demo use).
     pub fn exclusive_trusted_artifact_signing_keys(
         mut self,
         trusted_signing_keys: Vec<TrustedSigningKey>,
     ) -> Self {
-        self.trusted_artifact_signing_keys = trusted_signing_keys;
-        self.trusted_signing_keys_replace_defaults = true;
+        self.exclusive_trusted_artifact_signing_keys = Some(trusted_signing_keys);
         self
     }
 
+    /// Appends an operator-controlled Ed25519 artifact signing key.
+    ///
+    /// Like `trusted_artifact_signing_key`, this only adds to the operator
+    /// trust root and never installs the bundled fixture keys.
     pub fn trusted_ed25519_artifact_signing_key(
         mut self,
         signer: impl Into<String>,
@@ -2810,7 +2885,15 @@ impl ConfidentialInferenceBuilder {
         self
     }
 
-    pub fn with_demo_provider(self) -> Self {
+    /// Installs the offline `DemoProvider` and trusts the bundled fixture
+    /// signing keys for the bundled registry and bundled reference values.
+    ///
+    /// The fixture keys are only ever applied to bundled artifacts; remote or
+    /// custom registry/reference-value envelopes still verify against the
+    /// operator key set only. If `exclusive_trusted_artifact_signing_keys` is
+    /// also used, that exclusive set wins for every artifact.
+    pub fn with_demo_provider(mut self) -> Self {
+        self.demo_provider = true;
         self.with_provider(DemoProvider::valid())
     }
 
@@ -2825,24 +2908,62 @@ impl ConfidentialInferenceBuilder {
 
         let time_source = self.time_source.clone();
         let build_now_epoch_millis = time_source();
-        let trusted_signing_keys = if self.trusted_signing_keys_replace_defaults {
-            self.trusted_artifact_signing_keys.clone()
-        } else {
-            let mut keys = confidential_inference_attestation::default_trusted_signing_keys();
-            keys.extend(self.trusted_artifact_signing_keys);
-            keys
+        // The operator trust root is the only set ever applied to remote or
+        // custom artifacts. The bundled trust root additionally includes the
+        // fixture keys, but only when the caller opted into the offline demo
+        // provider; an exclusive key set replaces both sets entirely.
+        let operator_signing_keys = self
+            .exclusive_trusted_artifact_signing_keys
+            .clone()
+            .unwrap_or_else(|| self.trusted_artifact_signing_keys.clone());
+        let bundled_signing_keys = match &self.exclusive_trusted_artifact_signing_keys {
+            Some(keys) => keys.clone(),
+            None if self.demo_provider => {
+                let mut keys = confidential_inference_attestation::bundled_fixture_signing_keys();
+                keys.extend(self.trusted_artifact_signing_keys.iter().cloned());
+                keys
+            }
+            None => self.trusted_artifact_signing_keys.clone(),
         };
-        let (registry_envelope, registry_source) = self
+        let bundled_trust_available = match &self.exclusive_trusted_artifact_signing_keys {
+            Some(keys) => !keys.is_empty(),
+            None => self.demo_provider,
+        };
+        if matches!(self.registry_source, RegistrySource::Bundled) && !bundled_trust_available {
+            return Err(ClientError::BundledSourceRequiresTrust {
+                artifact: "registry",
+            });
+        }
+        if matches!(self.reference_values_source, ReferenceValuesSource::Bundled)
+            && !bundled_trust_available
+        {
+            return Err(ClientError::BundledSourceRequiresTrust {
+                artifact: "reference values",
+            });
+        }
+        if !matches!(self.registry_source, RegistrySource::Bundled)
+            && operator_signing_keys.is_empty()
+        {
+            return Err(ClientError::MissingOperatorSigningKeys {
+                artifact: "registry",
+            });
+        }
+        if !matches!(self.reference_values_source, ReferenceValuesSource::Bundled)
+            && operator_signing_keys.is_empty()
+        {
+            return Err(ClientError::MissingOperatorSigningKeys {
+                artifact: "reference values",
+            });
+        }
+        let (registry_envelope, registry, registry_source) = self
             .registry_source
             .into_envelope_and_source(
                 self.registry_pin.as_ref(),
-                &trusted_signing_keys,
+                &bundled_signing_keys,
+                &operator_signing_keys,
                 build_now_epoch_millis,
             )
             .await?;
-        let registry = registry_envelope
-            .clone()
-            .into_verified_payload_with_keys(&trusted_signing_keys)?;
         let registry_digest = registry.digest()?;
         if let Some(registry_pin) = &self.registry_pin {
             registry_pin.verify_envelope_with_digest_at(
@@ -2851,16 +2972,16 @@ impl ConfidentialInferenceBuilder {
                 build_now_epoch_millis,
             )?;
         }
-        let (reference_values, reference_values_source) = self
+        let (reference_values, reference_values_payload, reference_values_source) = self
             .reference_values_source
             .into_envelope_and_source(
                 self.reference_values_pin.as_ref(),
-                &trusted_signing_keys,
+                &bundled_signing_keys,
+                &operator_signing_keys,
                 build_now_epoch_millis,
             )
             .await?;
-        reference_values.verify_signature_with_keys(&trusted_signing_keys)?;
-        let reference_values_digest = reference_values.payload.digest()?;
+        let reference_values_digest = reference_values_payload.digest()?;
         if let Some(reference_values_pin) = &self.reference_values_pin {
             reference_values_pin.verify_envelope_with_digest_at(
                 &reference_values,
@@ -2917,7 +3038,7 @@ impl ConfidentialInferenceBuilder {
                     alg: registry_artifact_signature.alg.clone(),
                 },
                 registry_artifact_signature,
-                reference_values: reference_values.payload,
+                reference_values: reference_values_payload,
                 reference_values_digest,
                 reference_values_source,
                 reference_signature: SignatureMetadata {
@@ -3602,9 +3723,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use base64::Engine;
+    use confidential_inference_attestation::bundled_fixture_signing_keys;
     use confidential_inference_attestation::{
         canonical_json, chutes_expected_report_data_prefix, AliasConfidence, ArtifactSignature,
-        CheckResult, ConfidentialityResult, CpuTeeKind, DcapTdxCollateralBundle,
+        CheckResult, ConfidentialityResult, CpuTeeKind, CpuTeeRequirement, DcapTdxCollateralBundle,
         DcapTdxCollateralSource, DcapTdxTinfoilQuoteVerifier, EvidenceHardware, FreshnessClass,
         FreshnessPolicy, Millis, ProviderReference, RouteReference, TinfoilAttestationDoc,
         TinfoilAttestationFormat, TinfoilLiveCaptureEvidence, TinfoilQuoteVerificationRequest,
@@ -5906,6 +6028,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .registry(ProviderRegistryEnvelope::phase2_fixtures().unwrap())
             .reference_values(ReferenceValuesEnvelope::phase2_fixtures().unwrap())
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .with_provider(TinfoilFixtureProvider::valid())
             .policy(VerificationPolicy::require_hw_verified_tls())
             .build()
@@ -5944,6 +6067,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .registry(ProviderRegistryEnvelope::phase2_fixtures().unwrap())
             .reference_values(ReferenceValuesEnvelope::phase2_fixtures().unwrap())
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .with_provider(LiveTinfoilCaptureProvider::default())
             .tinfoil_quote_verifier(quote_verifier)
             .policy(policy)
@@ -5980,6 +6104,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .registry(ProviderRegistryEnvelope::phase2_fixtures().unwrap())
             .reference_values(ReferenceValuesEnvelope::phase2_fixtures().unwrap())
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .with_provider(LiveTinfoilCaptureProvider::default())
             .tinfoil_dcap_tdx_collateral_resolver(resolver)
             .policy(VerificationPolicy::require_hw_verified_tls())
@@ -6012,6 +6137,7 @@ mod tests {
             .reference_values(phase2_tinfoil_reference_values_with_measurement(
                 &sample_quote.tee_measurement,
             ))
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .trusted_artifact_signing_key(custom_trusted_signing_key())
             .with_provider(LiveTinfoilCaptureProvider::with_quote_bytes(
                 SAMPLE_DCAP_QUOTE.to_vec(),
@@ -6055,6 +6181,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .registry(ProviderRegistryEnvelope::phase2_fixtures().unwrap())
             .reference_values(ReferenceValuesEnvelope::phase2_fixtures().unwrap())
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .with_provider(VeniceFixtureProvider::valid())
             .policy(policy)
             .build()
@@ -6112,6 +6239,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .registry(ProviderRegistryEnvelope::phase2_fixtures().unwrap())
             .reference_values(ReferenceValuesEnvelope::phase2_fixtures().unwrap())
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .with_provider(VeniceFixtureProvider::valid())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
@@ -6167,6 +6295,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .registry(ProviderRegistryEnvelope::phase2_fixtures().unwrap())
             .reference_values(ReferenceValuesEnvelope::phase2_fixtures().unwrap())
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .with_demo_provider()
             .with_provider(VeniceFixtureProvider::valid())
             .policy(VerificationPolicy::require_attested_e2ee())
@@ -6219,6 +6348,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .registry(ProviderRegistryEnvelope::phase2_fixtures().unwrap())
             .reference_values(ReferenceValuesEnvelope::phase2_fixtures().unwrap())
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .with_provider(TinfoilFixtureProvider::valid())
             .with_provider(VeniceFixtureProvider::valid())
             .policy(VerificationPolicy::require_hw_verified_tls())
@@ -6408,7 +6538,10 @@ mod tests {
             assert!(matches!(error, ClientError::InvalidProviderRouting { .. }));
         }
 
+        // Trust the bundled fixture keys explicitly without installing the demo
+        // provider adapter, so routing still fails on the missing adapter.
         let result = ConfidentialInference::builder()
+            .exclusive_trusted_artifact_signing_keys(bundled_fixture_signing_keys())
             .provider_order("gpt-oss-120b", ["demo"])
             .build()
             .await;
@@ -6426,6 +6559,7 @@ mod tests {
         let result = ConfidentialInference::builder()
             .registry(ProviderRegistryEnvelope::phase2_fixtures().unwrap())
             .reference_values(ReferenceValuesEnvelope::phase2_fixtures().unwrap())
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .with_provider(VeniceFixtureProvider::valid())
             .provider_order("gpt-oss-120b", ["venice-fixture"])
             .policy(policy)
@@ -6723,6 +6857,7 @@ mod tests {
         let audit = Arc::new(MemoryVerdictStore::default());
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid(fetches.clone()))
             .verdict_store(audit.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
@@ -6753,6 +6888,7 @@ mod tests {
         let fetches = Arc::new(AtomicUsize::new(0));
         let chat_attempts = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(KeyRotatingProvider::new(
                 fetches.clone(),
                 chat_attempts.clone(),
@@ -6785,6 +6921,7 @@ mod tests {
     async fn streaming_and_non_streaming_chat_use_distinct_verification_cache_keys() {
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .registry(custom_signed_streaming_demo_registry())
             .trusted_artifact_signing_key(custom_trusted_signing_key())
             .compatibility_matrix(streaming_demo_compatibility_matrix())
@@ -6869,6 +7006,7 @@ mod tests {
     async fn cached_fixture_route_verification_meets_local_latency_budget() {
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid(fetches.clone()))
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
@@ -6907,6 +7045,7 @@ mod tests {
             .unwrap()
             .token_parameter_rewrite = TokenParameterRewrite::MaxTokensToMaxCompletionTokens;
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid_with_body_capture(
                 fetches,
                 chat_bodies.clone(),
@@ -6944,6 +7083,7 @@ mod tests {
         compatibility.route_execution_status = RouteExecutionStatus::Executable;
         compatibility.sdk_app_e2ee = Some(secret_key.public_config().unwrap());
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(SdkEncryptedDemoProvider {
                 inner: DemoProvider::valid(),
                 secret_key,
@@ -7165,6 +7305,9 @@ mod tests {
         let registry = signed_chutes_http_registry(route.clone());
         let reference_values = signed_chutes_http_reference_values(&route);
         let mut policy = VerificationPolicy::require_attested_e2ee();
+        // chutes_e2ee does not verify the TDX quote signature, so this route can
+        // only verify when the caller explicitly does not require a CPU TEE.
+        policy.hardware.cpu = CpuTeeRequirement::NotRequired;
         policy.hardware.gpu = GpuTeeRequirement::one_of(vec![GpuTeeKind::NvidiaCc]);
         policy.model_binding_requirement = ModelBindingRequirement::Required;
         policy.provenance.workload_image = true;
@@ -7188,6 +7331,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(verified.verdict().status, VerificationStatus::Verified);
+        assert_eq!(
+            verified.verdict().check("cpu_tee"),
+            Some(&CheckResult::NotApplicable)
+        );
         for check in [
             "e2ee_key_binding",
             "gpu_tee",
@@ -7211,6 +7358,7 @@ mod tests {
         let reference_values = signed_chutes_http_reference_values(&route);
         let mut policy = VerificationPolicy::require_attested_e2ee();
         policy.freshness = FreshnessPolicy::PerRequest;
+        policy.hardware.cpu = CpuTeeRequirement::NotRequired;
         policy.hardware.gpu = GpuTeeRequirement::one_of(vec![GpuTeeKind::NvidiaCc]);
         policy.model_binding_requirement = ModelBindingRequirement::Required;
         policy.provenance.workload_image = true;
@@ -7271,6 +7419,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .registry(envelope)
+            .trusted_artifact_signing_key(TrustedSigningKey::demo())
             .registry_pin(ProviderRegistryPin::digest_and_version(
                 digest.clone(),
                 version,
@@ -7294,14 +7443,65 @@ mod tests {
             .await;
 
         match result {
-            Err(ClientError::Attestation(AttestationError::UnknownArtifactSigningKey {
-                signer,
-                key_id,
-            })) => {
-                assert_eq!(signer, "confidential-inference");
-                assert!(key_id.contains("demo"));
+            Err(ClientError::BundledSourceRequiresTrust { artifact }) => {
+                assert_eq!(artifact, "registry");
             }
             Ok(_) => panic!("exclusive trust set unexpectedly trusted the demo registry"),
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bare_builder_rejects_bundled_fixture_sources() {
+        let result = ConfidentialInference::builder().build().await;
+
+        match result {
+            Err(ClientError::BundledSourceRequiresTrust { artifact }) => {
+                assert_eq!(artifact, "registry");
+            }
+            Ok(_) => panic!("bare builder unexpectedly trusted the bundled fixtures"),
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_provider_does_not_extend_fixture_trust_to_custom_artifacts() {
+        // Even in demo mode, custom artifacts verify against operator keys only:
+        // the bundled fixture keys must not rescue a fixture-signed custom body.
+        let registry = ProviderRegistryEnvelope::bundled_demo().unwrap();
+        let reference_values = ReferenceValuesEnvelope::bundled_demo().unwrap();
+
+        let result = ConfidentialInference::builder()
+            .with_demo_provider()
+            .registry(registry.clone())
+            .reference_values(reference_values.clone())
+            .build()
+            .await;
+        match result {
+            Err(ClientError::MissingOperatorSigningKeys { artifact }) => {
+                assert_eq!(artifact, "registry");
+            }
+            Ok(_) => panic!("fixture-signed custom registry unexpectedly built a client"),
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+
+        // Supplying a different operator key must not make the fixture-signed
+        // custom envelope verify either.
+        let result = ConfidentialInference::builder()
+            .with_demo_provider()
+            .registry(registry)
+            .reference_values(reference_values)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
+            .build()
+            .await;
+        match result {
+            Err(ClientError::Attestation(AttestationError::UnknownArtifactSigningKey {
+                key_id,
+                ..
+            })) => {
+                assert_eq!(key_id, DEMO_SIGNING_KEY_ID);
+            }
+            Ok(_) => panic!("fixture-signed custom registry unexpectedly built a client"),
             Err(other) => panic!("unexpected error: {other:?}"),
         }
     }
@@ -7354,6 +7554,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .reference_values(envelope)
+            .trusted_artifact_signing_key(TrustedSigningKey::demo())
             .reference_values_pin(ReferenceValuesPin::digest_and_version(
                 digest.clone(),
                 version,
@@ -7438,12 +7639,15 @@ mod tests {
 
     #[tokio::test]
     async fn remote_registry_source_fetches_signed_registry_into_verdict() {
-        let envelope = ProviderRegistryEnvelope::bundled_demo().unwrap();
-        let body = serde_json::to_string(&envelope).unwrap();
+        let fallback = ProviderRegistryEnvelope::bundled_demo().unwrap();
+        let mut remote = fallback.clone();
+        remote.signature = custom_artifact_signature(&remote.payload);
+        let body = serde_json::to_string(&remote).unwrap();
         let url = serve_registry_response(body, "200 OK").await;
         let client = ConfidentialInference::builder()
             .with_demo_provider()
-            .remote_registry(url.clone(), envelope)
+            .remote_registry(url.clone(), fallback)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7462,6 +7666,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_registry(url.clone(), envelope)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7479,7 +7684,8 @@ mod tests {
     #[tokio::test]
     async fn remote_registry_source_persists_and_reuses_last_good_cache() {
         let fallback = ProviderRegistryEnvelope::bundled_demo().unwrap();
-        let remote = ProviderRegistryEnvelope::phase2_fixtures().unwrap();
+        let mut remote = ProviderRegistryEnvelope::phase2_fixtures().unwrap();
+        remote.signature = custom_artifact_signature(&remote.payload);
         let remote_digest = remote.payload.digest().unwrap();
         let cache_path = temp_registry_cache_path("reuse");
 
@@ -7488,6 +7694,7 @@ mod tests {
         let remote_client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_registry_with_cache(remote_url.clone(), fallback.clone(), &cache_path)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7503,6 +7710,7 @@ mod tests {
         let cached_client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_registry_with_cache(invalid_url.clone(), fallback, &cache_path)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7525,16 +7733,20 @@ mod tests {
     #[tokio::test]
     async fn remote_registry_source_keeps_cache_when_remote_is_stale_relative_to_cache() {
         let fallback = ProviderRegistryEnvelope::bundled_demo().unwrap();
-        let cached = ProviderRegistryEnvelope::phase2_fixtures().unwrap();
+        let mut cached = ProviderRegistryEnvelope::phase2_fixtures().unwrap();
+        cached.signature = custom_artifact_signature(&cached.payload);
         let cached_digest = cached.payload.digest().unwrap();
         let cache_path = temp_registry_cache_path("stale-remote");
         std::fs::write(&cache_path, serde_json::to_string(&cached).unwrap()).unwrap();
 
+        let mut stale_remote = fallback.clone();
+        stale_remote.signature = custom_artifact_signature(&stale_remote.payload);
         let stale_remote_url =
-            serve_registry_response(serde_json::to_string(&fallback).unwrap(), "200 OK").await;
+            serve_registry_response(serde_json::to_string(&stale_remote).unwrap(), "200 OK").await;
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_registry_with_cache(stale_remote_url.clone(), fallback, &cache_path)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7565,6 +7777,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_registry_with_cache(url.clone(), fallback, &cache_path)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7590,6 +7803,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_registry(url.clone(), fallback)
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .registry_pin(
                 ProviderRegistryPin::new().with_accepted_ed25519_signing_identity(
                     "confidential-inference",
@@ -7613,13 +7827,15 @@ mod tests {
     #[tokio::test]
     async fn remote_reference_values_source_fetches_signed_bundle_into_verdict() {
         let fallback = ReferenceValuesEnvelope::bundled_demo().unwrap();
-        let remote = ReferenceValuesEnvelope::phase2_fixtures().unwrap();
+        let mut remote = ReferenceValuesEnvelope::phase2_fixtures().unwrap();
+        remote.signature = custom_artifact_signature(&remote.payload);
         let remote_digest = remote.payload.digest().unwrap();
         let url = serve_registry_response(serde_json::to_string(&remote).unwrap(), "200 OK").await;
         let expected_source = format!("remote:{url}");
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_reference_values(url, fallback)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7674,6 +7890,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_reference_values(url, fallback)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7690,7 +7907,8 @@ mod tests {
     #[tokio::test]
     async fn remote_reference_values_source_persists_and_reuses_last_good_cache() {
         let fallback = ReferenceValuesEnvelope::bundled_demo().unwrap();
-        let remote = ReferenceValuesEnvelope::phase2_fixtures().unwrap();
+        let mut remote = ReferenceValuesEnvelope::phase2_fixtures().unwrap();
+        remote.signature = custom_artifact_signature(&remote.payload);
         let remote_digest = remote.payload.digest().unwrap();
         let cache_path = temp_reference_values_cache_path("reuse");
 
@@ -7700,6 +7918,7 @@ mod tests {
         let remote_client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_reference_values_with_cache(remote_url, fallback.clone(), &cache_path)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7720,6 +7939,7 @@ mod tests {
         let cached_client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_reference_values_with_cache(invalid_url, fallback, &cache_path)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7747,17 +7967,21 @@ mod tests {
     #[tokio::test]
     async fn remote_reference_values_source_keeps_cache_when_remote_is_stale_relative_to_cache() {
         let fallback = ReferenceValuesEnvelope::bundled_demo().unwrap();
-        let cached = ReferenceValuesEnvelope::phase2_fixtures().unwrap();
+        let mut cached = ReferenceValuesEnvelope::phase2_fixtures().unwrap();
+        cached.signature = custom_artifact_signature(&cached.payload);
         let cached_digest = cached.payload.digest().unwrap();
         let cache_path = temp_reference_values_cache_path("stale-remote");
         std::fs::write(&cache_path, serde_json::to_string(&cached).unwrap()).unwrap();
 
+        let mut stale_remote = fallback.clone();
+        stale_remote.signature = custom_artifact_signature(&stale_remote.payload);
         let stale_remote_url =
-            serve_registry_response(serde_json::to_string(&fallback).unwrap(), "200 OK").await;
+            serve_registry_response(serde_json::to_string(&stale_remote).unwrap(), "200 OK").await;
         let expected_source = format!("remote-cache:{stale_remote_url}");
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_reference_values_with_cache(stale_remote_url, fallback, &cache_path)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7788,6 +8012,7 @@ mod tests {
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .remote_reference_values(url, fallback)
+            .trusted_artifact_signing_key(TrustedSigningKey::phase2_fixture())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7826,10 +8051,12 @@ mod tests {
 
     #[tokio::test]
     async fn custom_registry_source_reaches_verdict() {
-        let envelope = ProviderRegistryEnvelope::bundled_demo().unwrap();
+        let mut envelope = ProviderRegistryEnvelope::bundled_demo().unwrap();
+        envelope.signature = custom_artifact_signature(&envelope.payload);
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .registry_with_source(envelope, "file:///tmp/demo-registry.json")
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -7841,19 +8068,21 @@ mod tests {
             verified.verdict().registry_source,
             "custom:file:///tmp/demo-registry.json"
         );
-        assert_eq!(client.registry_signature().signer, "confidential-inference");
+        assert_eq!(client.registry_signature().signer, "test");
         assert_eq!(
             verified.verdict().registry_signature.key_id,
-            DEMO_SIGNING_KEY_ID
+            "client-test-ed25519"
         );
     }
 
     #[tokio::test]
     async fn custom_reference_values_source_reaches_verdict() {
-        let envelope = ReferenceValuesEnvelope::bundled_demo().unwrap();
+        let mut envelope = ReferenceValuesEnvelope::bundled_demo().unwrap();
+        envelope.signature = custom_artifact_signature(&envelope.payload);
         let client = ConfidentialInference::builder()
             .with_demo_provider()
             .reference_values_with_source(envelope, "file:///tmp/demo-reference-values.json")
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
             .await
@@ -8011,6 +8240,7 @@ mod tests {
         let audit = Arc::new(MemoryVerdictStore::default());
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid_with_delay(
                 fetches.clone(),
                 Duration::from_millis(50),
@@ -8044,6 +8274,7 @@ mod tests {
         let audit = Arc::new(MemoryVerdictStore::default());
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid_with_delay(
                 fetches.clone(),
                 Duration::from_millis(50),
@@ -8103,6 +8334,7 @@ mod tests {
         let fetches = Arc::new(AtomicUsize::new(0));
         let metrics = Arc::new(InMemoryConfidentialInferenceMetricsRecorder::default());
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid(fetches.clone()))
             .metrics_recorder(metrics.clone())
             .policy(VerificationPolicy::require_attested_e2ee())
@@ -8159,6 +8391,7 @@ mod tests {
         let fetches = Arc::new(AtomicUsize::new(0));
         let metrics = Arc::new(InMemoryConfidentialInferenceMetricsRecorder::default());
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid_with_delay(
                 fetches.clone(),
                 Duration::from_millis(500),
@@ -8231,6 +8464,7 @@ mod tests {
         policy.freshness = FreshnessPolicy::PerRequest;
         policy.enforcement = EnforcementMode::Observe;
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid_with_nonce_capture(
                 fetches.clone(),
                 evidence_nonces.clone(),
@@ -8283,6 +8517,7 @@ mod tests {
         let mut policy = VerificationPolicy::require_attested_e2ee();
         policy.freshness = FreshnessPolicy::AllowCachedBindingMillis { millis: Millis(5) };
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid(fetches.clone()))
             .policy(policy)
             .build()
@@ -8308,6 +8543,7 @@ mod tests {
         let now = Arc::new(AtomicU64::new(now_epoch_millis()));
         let time_source_now = now.clone();
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid(fetches.clone()))
             .time_source(move || time_source_now.load(Ordering::SeqCst))
             .policy(VerificationPolicy::require_attested_e2ee())
@@ -8333,6 +8569,7 @@ mod tests {
         let now = Arc::new(AtomicU64::new(now_epoch_millis()));
         let time_source_now = now.clone();
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid(fetches.clone()))
             .time_source(move || time_source_now.load(Ordering::SeqCst))
             .policy(VerificationPolicy::require_attested_e2ee())
@@ -8356,6 +8593,7 @@ mod tests {
     async fn stale_verdicts_fail_closed_by_default() {
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid(fetches.clone()))
             .policy(VerificationPolicy::require_attested_e2ee())
             .build()
@@ -8381,6 +8619,7 @@ mod tests {
             millis: Millis(60_000),
         };
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid(fetches.clone()))
             .policy(policy)
             .build()
@@ -8420,6 +8659,7 @@ mod tests {
         let mut policy = VerificationPolicy::require_attested_e2ee();
         policy.verdict_ttl_millis = Millis(0);
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(CountingProvider::valid(fetches.clone()))
             .verdict_store(audit.clone())
             .policy(policy)
@@ -8449,6 +8689,7 @@ mod tests {
         let verdict_store = Arc::new(MemoryVerdictStore::default());
         let metrics = Arc::new(InMemoryConfidentialInferenceMetricsRecorder::default());
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(DemoProvider::wrong_model())
             .verdict_store(verdict_store.clone())
             .metrics_recorder(metrics.clone())
@@ -8530,6 +8771,7 @@ mod tests {
         policy.enforcement = EnforcementMode::Observe;
         let verdict_store = Arc::new(MemoryVerdictStore::default());
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(DemoProvider::wrong_key())
             .verdict_store(verdict_store.clone())
             .policy(policy)
@@ -8570,6 +8812,7 @@ mod tests {
         policy.enforcement = EnforcementMode::Disabled;
         let verdict_store = Arc::new(MemoryVerdictStore::default());
         let client = ConfidentialInference::builder()
+            .with_demo_provider()
             .with_provider(DemoProvider::wrong_key())
             .verdict_store(verdict_store.clone())
             .policy(policy)
@@ -8646,6 +8889,7 @@ mod tests {
         let result = ConfidentialInference::builder()
             .with_demo_provider()
             .reference_values(reference_values)
+            .trusted_artifact_signing_key(TrustedSigningKey::demo())
             .build()
             .await;
 
@@ -8669,9 +8913,9 @@ mod tests {
             .await;
         assert!(matches!(
             rejected,
-            Err(ClientError::Attestation(
-                AttestationError::UnknownArtifactSigningKey { .. }
-            ))
+            Err(ClientError::MissingOperatorSigningKeys {
+                artifact: "registry"
+            })
         ));
 
         let client = ConfidentialInference::builder()
@@ -8704,6 +8948,7 @@ mod tests {
         let result = ConfidentialInference::builder()
             .with_demo_provider()
             .registry(registry)
+            .trusted_artifact_signing_key(TrustedSigningKey::demo())
             .build()
             .await;
 
@@ -8729,6 +8974,7 @@ mod tests {
         let result = ConfidentialInference::builder()
             .with_demo_provider()
             .registry(registry)
+            .trusted_artifact_signing_key(TrustedSigningKey::demo())
             .build()
             .await;
 

@@ -14,7 +14,7 @@ after the selected route satisfies an explicit attestation policy.
 | --- | --- | --- |
 | **Tinfoil** | Dedicated HTTP adapter, attestation endpoint capture, TLS certificate/SPKI binding, and TDX/DCAP quote verification | Live adapter and verifier path |
 | **Venice** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Live adapter and evidence path |
-| **RedPill** | OpenAI-compatible HTTP execution, Chutes E2EE evidence, nonce/public-key report-data binding, and NVIDIA CC verification through NRAS | Live adapter and evidence path (claims matched against signed reference values; the TDX quote is not verified on this family) |
+| **RedPill** | OpenAI-compatible HTTP execution, Chutes E2EE evidence, nonce/public-key report-data binding, and NVIDIA CC verification through NRAS | Live adapter and evidence path (claims matched against signed reference values; the TDX quote signature is not verified on this family, so the default policy rejects its CPU evidence — set the CPU requirement to not required to use the app-E2EE checks) |
 | **Phala** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Live adapter and evidence path |
 | **Chutes** | Dedicated ML-KEM-768/ChaCha20-Poly1305 E2EE adapter, per-instance TDX/certificate/key binding, DCAP verification, and NVIDIA CC verification through NRAS | Live non-streaming adapter and verifier path |
 | **NEAR** | Model-direct adapter with same-connection TLS certificate capture, TDX nonce/signing-address/TLS/model binding, DCAP verification, and NVIDIA CC verification through NRAS | Live non-streaming adapter and verifier path |
@@ -37,14 +37,19 @@ are not supported live integrations.
 
 The SDK combines provider routing, signed provider metadata, reference values,
 hardware-evidence verification, request and response protection, and structured
-attestation verdicts. Rust owns the trust decisions; the C, Python, and Node.js
-layers call the same verification path.
+attestation verdicts. Rust owns the trust decisions; the C, Python, Node.js, and
+Go layers call the same verification path.
 
-For production, replace the built-in demo and fixture signing keys with an
-operator-controlled trust root via
-`ConfidentialInferenceBuilder::exclusive_trusted_artifact_signing_keys`; the
-built-in keys are test material and are trusted by default only so the bundled
-offline demo works out of the box.
+Artifact trust is explicit. The bundled fixture signing keys open only the
+bundled demo and fixture artifacts, and only when the caller opts in with
+`with_demo_provider()`. Production callers configure an operator-controlled
+trust root with
+`ConfidentialInferenceBuilder::exclusive_trusted_artifact_signing_keys`
+(or append operator keys with `trusted_artifact_signing_key` /
+`trusted_ed25519_artifact_signing_key`, which never add fixture keys). Remote
+and custom registry/reference-value artifacts always verify against the
+operator key set only; the bundled fixture keys cannot rescue a
+fixture-signed remote or custom body.
 
 > [!IMPORTANT]
 > This is a `0.1.0` preview. The offline verification paths and deterministic
@@ -62,7 +67,7 @@ offline demo works out of the box.
 - SDK-managed app-E2EE for compatible routes and adapter-managed Chutes E2EE.
 - OpenAI-shaped Chat Completions and a text-only Responses compatibility path.
 - Structured verdicts, persisted verdict records, metrics, and optional verdict caching.
-- Rust, C ABI, Python, Node.js, and proxy integration surfaces.
+- Rust, C ABI, Python, Node.js, Go, and proxy integration surfaces.
 
 A provider name or model alias is never treated as proof. Authorization depends
 on signed route metadata, verified evidence, reference values, policy, and the
@@ -73,7 +78,7 @@ request and response channel properties.
 | Area | Status |
 | --- | --- |
 | Offline demo and adversarial corpus | Ready |
-| Rust, FFI, Python, and Node.js tests | Ready |
+| Rust, FFI, Python, Node.js, and Go tests | Ready |
 | Signed registry and reference-value validation | Ready |
 | Intel TDX/DCAP offline verification | Implemented; production review still required |
 | Live provider execution | Provider- and deployment-specific |
@@ -88,6 +93,7 @@ and release requirements.
 - Rust `1.97` or later; `rust-toolchain.toml` selects the current stable channel
 - Python `3.11` or later for the repository tools and Python binding
 - Node.js `22` or later for the Node.js binding
+- Go `1.25` or later for the Go binding
 
 ## Build and run
 
@@ -112,18 +118,15 @@ material and prove SDK behavior, not the trustworthiness of a live provider.
 
 ## Use as a Rust dependency
 
-The `0.1.0` crates are not yet published to crates.io. For initial testing, use
-the Git repository:
+The `0.1.0` crates are not published to crates.io and no git tag exists yet.
+A reproducible build pins a commit `rev` until a release tag is published:
 
 ```toml
 [dependencies]
-confidential-inference-sdk = { git = "https://github.com/enclava-labs/confidential-inference-sdk", branch = "main" }
-confidential-inference-openai = { git = "https://github.com/enclava-labs/confidential-inference-sdk", branch = "main" }
+confidential-inference-sdk = { git = "https://github.com/enclava-labs/confidential-inference-sdk", rev = "a903676" }
+confidential-inference-openai = { git = "https://github.com/enclava-labs/confidential-inference-sdk", rev = "a903676" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
-
-Replace `branch = "main"` with a release `tag` or `rev` before relying on the
-dependency in a reproducible build.
 
 ```rust
 use confidential_inference_openai::ChatMessage;
@@ -131,6 +134,9 @@ use confidential_inference_sdk::ConfidentialInference;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Demo provider: the only configuration that trusts the bundled fixture
+    // signing keys. Production clients instead configure
+    // exclusive_trusted_artifact_signing_keys and their own sources.
     let client = ConfidentialInference::builder()
         .with_demo_provider()
         .build()
@@ -149,10 +155,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The Python and Node.js bindings currently build against the workspace FFI
-library and are not standalone registry packages. See the
-[Python binding](bindings/python/README.md) and
-[Node.js binding](bindings/node/README.md) instructions.
+The Python, Node.js, and Go bindings currently build against the workspace
+FFI library and are not standalone registry packages. See the
+[Python binding](bindings/python/README.md),
+[Node.js binding](bindings/node/README.md), and
+[Go binding](bindings/go/README.md) instructions.
 
 ## Production integration
 
@@ -160,8 +167,10 @@ A production client supplies:
 
 1. An enforcement policy matching the application's confidentiality and
    integrity requirements.
-2. Trusted signing keys and signed provider registry and reference-value
-   artifacts.
+2. An operator-controlled trust root via
+   `exclusive_trusted_artifact_signing_keys`, plus signed provider registry
+   and reference-value artifacts. The bundled fixture keys are never trusted
+   for remote or custom artifacts.
 3. Provider credentials through environment-backed secret handling.
 4. Quote, GPU, and collateral verifiers required by the enabled routes.
 5. A verdict store and metrics observation appropriate for the deployment
@@ -211,6 +220,7 @@ cargo test --workspace --locked
 python3 -m unittest discover -s tools -p 'test_*.py'
 python3 -m unittest discover -s bindings/python/tests
 (cd bindings/node && npm ci && npm test)
+(cd bindings/go && go test -race -count=1 ./...)
 python3 tools/check_release_packaging.py
 ```
 

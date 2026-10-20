@@ -563,6 +563,19 @@ impl AttestationVerdict {
                 "status=verified but at least one check is failed".into(),
             ));
         }
+        for (name, outcome) in &self.check_outcomes {
+            if outcome.required
+                && matches!(
+                    outcome.state,
+                    CheckResult::NotSupported | CheckResult::Unknown
+                )
+            {
+                return Err(AttestationError::MalformedVerdict(format!(
+                    "status=verified but required check {name} is {:?}",
+                    outcome.state
+                )));
+            }
+        }
         if !self.errors.is_empty() {
             return Err(AttestationError::MalformedVerdict(
                 "status=verified but verdict contains errors".into(),

@@ -80,14 +80,14 @@ impl TrustedSigningKey {
     }
 }
 
-pub fn verify_artifact_signature<T: Serialize>(
-    signature: &ArtifactSignature,
-    payload: &T,
-) -> Result<()> {
-    verify_artifact_signature_with_keys(signature, payload, &default_trusted_signing_keys())
-}
-
-pub fn default_trusted_signing_keys() -> Vec<TrustedSigningKey> {
+/// Public keys that open the artifacts bundled with this repository.
+///
+/// These keys only exist so the bundled demo and fixture artifacts verify in
+/// offline tests and examples. They are not a production trust root: anyone
+/// can sign with the corresponding private keys, so production deployments
+/// must configure operator-controlled keys instead (for example through
+/// `exclusive_trusted_artifact_signing_keys` on the SDK builder).
+pub fn bundled_fixture_signing_keys() -> Vec<TrustedSigningKey> {
     vec![
         TrustedSigningKey::demo(),
         TrustedSigningKey::phase2_fixture(),
@@ -172,7 +172,11 @@ mod tests {
         };
 
         assert!(matches!(
-            verify_artifact_signature(&signature, &json!({"x": 1})),
+            verify_artifact_signature_with_keys(
+                &signature,
+                &json!({"x": 1}),
+                &bundled_fixture_signing_keys()
+            ),
             Err(AttestationError::UnknownArtifactSigningKey { .. })
         ));
     }

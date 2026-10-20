@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "confidential-inference-sdk"
+version = "0.1.0"
+description = "Source-only ctypes binding for the Confidential Inference SDK C ABI."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["attestation", "confidential-computing", "e2ee", "inference", "tee"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/enclava-labs/confidential-inference-sdk"
+Repository = "https://github.com/enclava-labs/confidential-inference-sdk"
+
+[tool.setuptools]
+packages = ["confidential_inference_sdk"]

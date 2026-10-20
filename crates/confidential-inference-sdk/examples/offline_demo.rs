@@ -3,6 +3,10 @@ use confidential_inference_sdk::ConfidentialInference;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // with_demo_provider is the explicit opt-in that trusts the bundled
+    // fixture signing keys for the bundled artifacts only. Production
+    // clients instead configure exclusive_trusted_artifact_signing_keys
+    // with operator-controlled keys and their own artifact sources.
     let client = ConfidentialInference::builder()
         .with_demo_provider()
         .build()

@@ -1,8 +1,9 @@
 use confidential_inference_attestation::{
-    canonical_digest, parse_utc_timestamp_millis, verify_artifact_signature_with_keys,
-    AliasConfidence, ArtifactSignature, AttestationError, AttestedRoute, BoundDataRequirement,
-    ChannelBindingKind, FreshnessClass, GpuTeeKind, ResponseIntegrityRequirement,
-    Result as AttestationResult, SignatureMetadata, TrustTier, TrustedSigningKey,
+    bundled_fixture_signing_keys, canonical_digest, parse_utc_timestamp_millis,
+    verify_artifact_signature_with_keys, AliasConfidence, ArtifactSignature, AttestationError,
+    AttestedRoute, BoundDataRequirement, ChannelBindingKind, FreshnessClass, GpuTeeKind,
+    ResponseIntegrityRequirement, Result as AttestationResult, SignatureMetadata, TrustTier,
+    TrustedSigningKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,12 +31,6 @@ impl ProviderRegistryEnvelope {
         .map_err(Into::into)
     }
 
-    pub fn verify_signature(&self) -> AttestationResult<()> {
-        self.verify_signature_with_keys(
-            &confidential_inference_attestation::default_trusted_signing_keys(),
-        )
-    }
-
     pub fn verify_signature_with_keys(
         &self,
         trusted_signing_keys: &[TrustedSigningKey],
@@ -51,28 +46,12 @@ impl ProviderRegistryEnvelope {
         verify_artifact_signature_with_keys(&self.signature, &self.payload, trusted_signing_keys)
     }
 
-    pub fn into_verified_payload(self) -> AttestationResult<ProviderRegistry> {
-        self.verify_signature()?;
-        self.payload.validate_security_invariants()?;
-        Ok(self.payload)
-    }
-
     pub fn into_verified_payload_with_keys(
         self,
         trusted_signing_keys: &[TrustedSigningKey],
     ) -> AttestationResult<ProviderRegistry> {
         self.verify_signature_with_keys(trusted_signing_keys)?;
         self.payload.validate_security_invariants()?;
-        Ok(self.payload)
-    }
-
-    pub fn into_verified_update_from(
-        self,
-        current: &ProviderRegistry,
-    ) -> AttestationResult<ProviderRegistry> {
-        self.verify_signature()?;
-        self.payload.validate_security_invariants()?;
-        current.verify_update_to(&self.payload)?;
         Ok(self.payload)
     }
 
@@ -105,12 +84,6 @@ impl ModelAliasMatrixEnvelope {
         .map_err(Into::into)
     }
 
-    pub fn verify_signature(&self) -> AttestationResult<()> {
-        self.verify_signature_with_keys(
-            &confidential_inference_attestation::default_trusted_signing_keys(),
-        )
-    }
-
     pub fn verify_signature_with_keys(
         &self,
         trusted_signing_keys: &[TrustedSigningKey],
@@ -124,8 +97,11 @@ impl ModelAliasMatrixEnvelope {
         self.payload.validate()
     }
 
-    pub fn into_verified_payload(self) -> AttestationResult<ModelAliasMatrix> {
-        self.verify_signature()?;
+    pub fn into_verified_payload_with_keys(
+        self,
+        trusted_signing_keys: &[TrustedSigningKey],
+    ) -> AttestationResult<ModelAliasMatrix> {
+        self.verify_signature_with_keys(trusted_signing_keys)?;
         Ok(self.payload)
     }
 }
@@ -140,8 +116,13 @@ impl ModelAliasMatrix {
     pub const SCHEMA: &'static str = "confidential-inference.model-alias-matrix.v1";
     pub const SUPPORTED_SCHEMA_MAJOR: u32 = 1;
 
+    /// Load the bundled model alias matrix fixture.
+    ///
+    /// Bundled fixture loaders verify against `bundled_fixture_signing_keys`
+    /// only; this is not a production trust path.
     pub fn bundled() -> AttestationResult<Self> {
-        ModelAliasMatrixEnvelope::bundled()?.into_verified_payload()
+        ModelAliasMatrixEnvelope::bundled()?
+            .into_verified_payload_with_keys(&bundled_fixture_signing_keys())
     }
 
     #[cfg(test)]
@@ -313,12 +294,22 @@ impl ProviderRegistry {
     pub const SCHEMA: &'static str = "confidential-inference.provider-registry.v1";
     pub const SUPPORTED_SCHEMA_MAJOR: u32 = 1;
 
+    /// Load the bundled demo registry fixture.
+    ///
+    /// Bundled fixture loaders verify against `bundled_fixture_signing_keys`
+    /// only; this is not a production trust path.
     pub fn bundled_demo() -> AttestationResult<Self> {
-        ProviderRegistryEnvelope::bundled_demo()?.into_verified_payload()
+        ProviderRegistryEnvelope::bundled_demo()?
+            .into_verified_payload_with_keys(&bundled_fixture_signing_keys())
     }
 
+    /// Load the bundled phase-2 fixture registry.
+    ///
+    /// Bundled fixture loaders verify against `bundled_fixture_signing_keys`
+    /// only; this is not a production trust path.
     pub fn phase2_fixtures() -> AttestationResult<Self> {
-        ProviderRegistryEnvelope::phase2_fixtures()?.into_verified_payload()
+        ProviderRegistryEnvelope::phase2_fixtures()?
+            .into_verified_payload_with_keys(&bundled_fixture_signing_keys())
     }
 
     pub fn digest(&self) -> AttestationResult<String> {
@@ -2034,7 +2025,9 @@ mod tests {
     fn bundled_model_alias_matrix_signature_verifies() {
         let envelope = ModelAliasMatrixEnvelope::bundled().unwrap();
 
-        envelope.verify_signature().unwrap();
+        envelope
+            .verify_signature_with_keys(&bundled_fixture_signing_keys())
+            .unwrap();
         assert_eq!(
             envelope.signature.key_id,
             ALIAS_MATRIX_FIXTURE_SIGNING_KEY_ID
@@ -2052,7 +2045,9 @@ mod tests {
             .aliases
             .push("GPT OSS 120B".into());
 
-        assert!(envelope.verify_signature().is_err());
+        assert!(envelope
+            .verify_signature_with_keys(&bundled_fixture_signing_keys())
+            .is_err());
     }
 
     #[test]
@@ -2109,7 +2104,9 @@ mod tests {
     fn bundled_registry_signature_verifies() {
         let envelope = ProviderRegistryEnvelope::bundled_demo().unwrap();
 
-        envelope.verify_signature().unwrap();
+        envelope
+            .verify_signature_with_keys(&bundled_fixture_signing_keys())
+            .unwrap();
     }
 
     #[test]
@@ -2117,7 +2114,9 @@ mod tests {
         let mut envelope = ProviderRegistryEnvelope::bundled_demo().unwrap();
         envelope.payload.version = "tampered".into();
 
-        assert!(envelope.verify_signature().is_err());
+        assert!(envelope
+            .verify_signature_with_keys(&bundled_fixture_signing_keys())
+            .is_err());
     }
 
     #[test]
@@ -2127,7 +2126,9 @@ mod tests {
         candidate.version = "2026-07-06-demo".into();
         let update = signed_update(candidate, ACCEPTED_UPDATE_SIGNATURE);
 
-        let accepted = update.into_verified_update_from(&current).unwrap();
+        let accepted = update
+            .into_verified_update_from_with_keys(&current, &bundled_fixture_signing_keys())
+            .unwrap();
 
         assert_eq!(accepted.version, "2026-07-06-demo");
     }
@@ -2141,7 +2142,7 @@ mod tests {
         let update = signed_update(candidate, PARTIAL_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(&current, &bundled_fixture_signing_keys()),
             Err(AttestationError::InvalidRegistryUpdate(_))
         ));
     }
@@ -2154,7 +2155,7 @@ mod tests {
         let update = signed_update(candidate, STALE_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(&current, &bundled_fixture_signing_keys()),
             Err(AttestationError::InvalidRegistryUpdate(_))
         ));
     }
@@ -2207,7 +2208,7 @@ mod tests {
         let update = signed_update(candidate, WEAKENED_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(&current, &bundled_fixture_signing_keys()),
             Err(AttestationError::WeakeningRegistryUpdate(_))
         ));
     }
@@ -2246,7 +2247,7 @@ mod tests {
         let update = signed_update(candidate, REMOVED_ROUTE_UPDATE_SIGNATURE);
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(&current, &bundled_fixture_signing_keys()),
             Err(AttestationError::WeakeningRegistryUpdate(_))
         ));
     }
@@ -2262,7 +2263,7 @@ mod tests {
                 .into();
 
         assert!(matches!(
-            update.into_verified_update_from(&current),
+            update.into_verified_update_from_with_keys(&current, &bundled_fixture_signing_keys()),
             Err(AttestationError::InvalidArtifactSignature(_))
         ));
     }

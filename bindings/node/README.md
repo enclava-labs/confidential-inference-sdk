@@ -74,6 +74,33 @@ parses the JSON that crosses the ABI and applies minimal object/array shape
 checks on the way back. The process-wide Koffi pool accepts up to 32 concurrent
 native calls; apply backpressure before that limit for larger fan-outs.
 
+## Artifact trust
+
+`demo_provider: true` (the default) is the offline/demo mode: it installs the
+demo provider and trusts the bundled fixture signing keys for the bundled
+artifacts only.
+
+Setting `demo_provider: false` requires a non-empty
+`trusted_ed25519_signing_keys` list, which becomes the exclusive trust root
+for every artifact — including the bundled ones:
+
+```js
+const client = new Client({
+  demo_provider: false,
+  trusted_ed25519_signing_keys: [
+    {
+      signer: 'my-operator',
+      key_id: 'operator-ed25519-2026',
+      public_key_base64url: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    },
+  ],
+});
+```
+
+Combining `demo_provider: true` with a non-empty `trusted_ed25519_signing_keys`
+list is rejected as ambiguous. The bundled fixture keys can never verify
+remote or custom artifacts.
+
 ## Credentials
 
 Prefer environment-variable references:
@@ -81,6 +108,13 @@ Prefer environment-variable references:
 ```js
 const client = new Client({
   demo_provider: false,
+  trusted_ed25519_signing_keys: [
+    {
+      signer: 'my-operator',
+      key_id: 'operator-ed25519-2026',
+      public_key_base64url: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    },
+  ],
   api_keys: {
     tinfoil: { env: 'TINFOIL_API_KEY' },
   },

@@ -6,6 +6,8 @@
   "types": "index.d.ts",
   "license": "MIT",
   "private": true,
+  "repository": "https://github.com/enclava-labs/confidential-inference-sdk",
+  "homepage": "https://github.com/enclava-labs/confidential-inference-sdk",
   "engines": {
     "node": ">=22"
   },
