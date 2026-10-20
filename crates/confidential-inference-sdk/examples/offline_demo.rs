@@ -20,6 +20,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     println!("status: {:?}", result.verdict.status);
-    println!("response: {}", result.response.choices[0].message.content);
+    println!(
+        "response: {}",
+        result.response.choices[0]
+            .message
+            .content
+            .text()
+            .unwrap_or_default()
+    );
     Ok(())
 }

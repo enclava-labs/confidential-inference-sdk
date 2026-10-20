@@ -781,9 +781,29 @@ fn client_error_response(error: &ClientError) -> ProxyHttpResponse {
         | ClientError::Provider(_)
         | ClientError::VerificationWaitQueueFull { .. }
         | ClientError::VerificationWaitTimeout { .. }
-        | ClientError::RouteAttemptsFailed { .. } => (502, "upstream_verification_failed"),
+        | ClientError::RouteAttemptsFailed { .. }
+        | ClientError::ProviderChat { .. }
+        | ClientError::ResponseVerificationFailed { .. }
+        | ClientError::EmbeddingsRouteAttemptsFailed { .. }
+        | ClientError::ProviderEmbeddings { .. }
+        | ClientError::ProviderResponseManage { .. } => (502, "upstream_verification_failed"),
     };
-    proxy_error_response(status, code, &error.to_string())
+    let mut response = proxy_error_response(status, code, &error.to_string());
+    if let Some(dispatch) = error_dispatch(error) {
+        // The proxy must not retry a request its SDK layer may have executed.
+        response
+            .headers
+            .push(("x-confidential-inference-dispatch".into(), dispatch.into()));
+    }
+    response
+}
+
+fn error_dispatch(error: &ClientError) -> Option<&'static str> {
+    match error.dispatch_outcome() {
+        confidential_inference_sdk::DispatchOutcome::NotDispatched => Some("not_dispatched"),
+        confidential_inference_sdk::DispatchOutcome::Rejected { .. } => Some("rejected"),
+        confidential_inference_sdk::DispatchOutcome::Unknown => Some("unknown"),
+    }
 }
 
 fn proxy_error_response(status: u16, code: &str, message: &str) -> ProxyHttpResponse {

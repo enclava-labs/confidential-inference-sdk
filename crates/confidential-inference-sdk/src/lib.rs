@@ -1,27 +1,220 @@
+/// A verified provider chat stream. The verdict and route are available before
+/// the first chunk; missing terminal usage remains unknown (`None`).
+pub struct ConfidentialChatStream {
+    stream: ProviderChatStream,
+    buffer: Vec<u8>,
+    done: bool,
+    pub provider: String,
+    pub provider_model: String,
+    pub route: AttestedRoute,
+    pub verdict: AttestationVerdict,
+    pub terminal_usage: Option<confidential_inference_openai::Usage>,
+}
+
+impl ConfidentialChatStream {
+    pub async fn next(&mut self) -> Option<Result<ChatCompletionChunk>> {
+        loop {
+            if self.done {
+                return None;
+            }
+            if let Some(chunk) = self.take_buffered_chunk(false) {
+                return Some(chunk);
+            }
+            if self.done {
+                return None;
+            }
+            match std::future::poll_fn(|cx| self.stream.as_mut().poll_next(cx)).await {
+                Some(Ok(bytes)) => self.buffer.extend_from_slice(&bytes),
+                Some(Err(error)) => {
+                    self.done = true;
+                    return Some(Err(ClientError::ProviderChat {
+                        route_id: self.route.route_id.clone(),
+                        outcome: DispatchOutcome::Unknown,
+                        error,
+                    }));
+                }
+                None => {
+                    self.done = true;
+                    return self.take_buffered_chunk(true);
+                }
+            }
+        }
+    }
+
+    fn take_buffered_chunk(&mut self, eof: bool) -> Option<Result<ChatCompletionChunk>> {
+        loop {
+            let (frame_len, delimiter_len) = if let Some(index) = self
+                .buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+            {
+                (index, 4)
+            } else if let Some(index) = self.buffer.windows(2).position(|window| window == b"\n\n")
+            {
+                (index, 2)
+            } else {
+                (0, 0)
+            };
+
+            if delimiter_len != 0 {
+                let frame: Vec<u8> = self.buffer.drain(..frame_len + delimiter_len).collect();
+                let frame = &frame[..frame_len];
+                let mut data = Vec::new();
+                for line in frame.split(|byte| *byte == b'\n') {
+                    let line = line.strip_suffix(b"\r").unwrap_or(line);
+                    if let Some(value) = line.strip_prefix(b"data:") {
+                        if !data.is_empty() {
+                            data.push(b'\n');
+                        }
+                        data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
+                    }
+                }
+                if data.is_empty() {
+                    continue;
+                }
+                if data == b"[DONE]" {
+                    self.done = true;
+                    return None;
+                }
+                return Some(self.parse_chunk(&data));
+            }
+
+            if self.buffer.starts_with(b"data:") {
+                if !eof {
+                    return None;
+                }
+                let value = self.buffer.strip_prefix(b"data:").unwrap_or_default();
+                let data = value.strip_prefix(b" ").unwrap_or(value).to_vec();
+                self.buffer.clear();
+                if data == b"[DONE]" {
+                    self.done = true;
+                    return None;
+                }
+                return Some(self.parse_chunk(&data));
+            }
+
+            if self.buffer == b"[DONE]" {
+                self.buffer.clear();
+                self.done = true;
+                return None;
+            }
+            match serde_json::from_slice::<ChatCompletionChunk>(&self.buffer) {
+                Ok(chunk) => {
+                    self.buffer.clear();
+                    return Some(self.record_chunk(chunk));
+                }
+                Err(_) if eof && !self.buffer.is_empty() => {
+                    let bytes = std::mem::take(&mut self.buffer);
+                    return Some(self.parse_chunk(&bytes));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    fn parse_chunk(&mut self, bytes: &[u8]) -> Result<ChatCompletionChunk> {
+        match serde_json::from_slice::<ChatCompletionChunk>(bytes) {
+            Ok(chunk) => self.record_chunk(chunk),
+            Err(error) => Err(ClientError::ResponseJsonSerialization(error.to_string())),
+        }
+    }
+
+    fn record_chunk(&mut self, chunk: ChatCompletionChunk) -> Result<ChatCompletionChunk> {
+        if let Some(usage) = &chunk.usage {
+            if chunk.choices.is_empty()
+                || chunk
+                    .choices
+                    .iter()
+                    .any(|choice| choice.finish_reason.is_some())
+            {
+                self.terminal_usage = Some(usage.clone());
+            }
+        }
+        Ok(chunk)
+    }
+}
+
+impl ConfidentialInference {
+    async fn stream_chat_request(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ConfidentialChatStream> {
+        if request.messages.is_empty() {
+            return Err(ClientError::MissingMessages);
+        }
+        let model = request.model.clone();
+        let mut candidates = self.select_routes(None, &model, RouteSelectionPurpose::Chat)?;
+        if candidates.is_empty() {
+            return Err(ClientError::RouteSelectionFailed {
+                provider: None,
+                model,
+                purpose: RouteSelectionPurpose::Chat.as_str(),
+            });
+        }
+        let first_candidate = candidates.first().cloned();
+        candidates.retain(|(definition, route)| {
+            route.streaming_allowed
+                && definition.request_encryption != EncryptionRequirement::Required
+                && definition.response_decryption != EncryptionRequirement::Required
+        });
+        if candidates.is_empty() {
+            if let Some((definition, route)) = first_candidate {
+                self.record_streaming_fail_closed(&definition, &route);
+                return Err(ClientError::StreamingNotSupported {
+                    route_id: route.route_id,
+                });
+            }
+        }
+        let (definition, route) = candidates.remove(0);
+        let verified = self
+            .verify_selected_route(
+                definition,
+                route,
+                VerificationRequestMode::for_chat_request(&request),
+            )
+            .await?;
+        verified.chat_stream(request).await
+    }
+}
 use base64::Engine;
+pub use confidential_inference_attestation::ReferenceValuesEnvelope;
 pub use confidential_inference_attestation::TrustedSigningKey;
 use confidential_inference_attestation::{
     chutes_provider_nonce, parse_tinfoil_live_capture, sha256_digest,
     verify_evidence_with_attestation_verifiers, ArtifactSignature, AttestationError,
     AttestationVerdict, AttestedRoute, BoundDataRequirement, ChannelBindingKind,
-    ChutesLiveEvidence, CpuTeeRequirement, EnforcementMode, FailClosedGpuAttestationVerifier,
+    ChutesLiveEvidence, CpuTeeRequirement, FailClosedGpuAttestationVerifier,
     FailClosedTinfoilQuoteVerifier, FreshnessPolicy, GpuAttestationVerifier, GpuTeeRequirement,
-    ModelBindingRequirement, NearLiveEvidence, ReferenceValuesEnvelope, ReferenceValuesPayload,
-    ReferenceValuesPin, ResponseIntegrityRequirement, ResponseIntegrityResult, SignatureMetadata,
-    StaleVerdictPolicy, TinfoilAttestationFormat, TinfoilQuoteVerifier, TrustTier,
-    VerificationPolicy, VerificationRequest,
+    ModelBindingRequirement, NearLiveEvidence, ReferenceValuesPayload, ReferenceValuesPin,
+    ResponseIntegrityRequirement, ResponseIntegrityResult, SevSnpTinfoilQuoteVerifier,
+    SignatureMetadata, StaleVerdictPolicy, TinfoilAttestationFormat, TinfoilQuoteVerifier,
+    TrustTier, VerificationRequest,
 };
+// `ConfidentialInferenceBuilder::policy` takes these; integrators must be able to name them.
+pub use confidential_inference_attestation::{EnforcementMode, VerificationPolicy};
+pub use confidential_inference_openai::{ChatCompletionChunk, Usage};
 use confidential_inference_openai::{
-    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Model, ModelList,
-    ResponseCompatibilityError, ResponseCreateRequest, ResponseInput, ResponseObject,
+    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, EmbeddingInput, EmbeddingsRequest,
+    EmbeddingsResponse, Model, ModelList, ResponseCompatibilityError, ResponseCreateRequest,
+    ResponseInput, ResponseObject,
 };
+pub use confidential_inference_openai::{
+    ResponseCancelRequest, ResponseCancelResponse, ResponseCompactRequest, ResponseCompactResponse,
+    ResponseDeleteRequest, ResponseDeleteResponse, ResponseInputTokensRequest,
+    ResponseInputTokensResponse, ResponseListInputItemsRequest, ResponseListInputItemsResponse,
+    ResponseRetrieveRequest, ResponseRetrieveResponse,
+};
+pub use confidential_inference_providers::DispatchOutcome;
+pub use confidential_inference_providers::ProviderCompatibilityMatrixEnvelope;
+pub use confidential_inference_providers::ProviderRegistryEnvelope;
 use confidential_inference_providers::{
-    ChutesHttpProvider, ConfidentialHttpProvider, DcapTdxCollateralResolver, DemoProvider,
-    EncryptionRequirement, EvidenceRequest, ModelBindingSupport, NearHttpProvider,
-    NvidiaNrasRemoteClient, OpenAiEndpoint, OpenAiHttpProvider, ProviderAdapter,
-    ProviderCompatibility, ProviderCompatibilityMatrix, ProviderError, ProviderRegistry,
-    ProviderRegistryEnvelope, ProviderRegistryPin, RegistryModel, RouteDefinition,
-    RouteExecutionStatus, RouteLifecycle, TinfoilHttpProvider,
+    AmdKdsSevSnpVcekResolver, ChutesHttpProvider, ConfidentialHttpProvider,
+    DcapTdxCollateralResolver, DemoProvider, EncryptionRequirement, EvidenceRequest,
+    ModelBindingSupport, NearHttpProvider, NvidiaNrasRemoteClient, OpenAiEndpoint,
+    OpenAiHttpProvider, ProviderAdapter, ProviderChatStream, ProviderCompatibility,
+    ProviderCompatibilityMatrix, ProviderError, ProviderRegistry, ProviderRegistryPin,
+    ProviderResponseManageRequest, RegistryModel, ResponseManageOperation, RouteDefinition,
+    RouteExecutionStatus, RouteLifecycle, SevSnpVcekResolver, TinfoilHttpProvider,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,6 +293,11 @@ pub enum ClientError {
     #[error("all policy-compatible chat route attempts failed for model {model}: {errors:?}")]
     RouteAttemptsFailed { model: String, errors: Vec<String> },
 
+    #[error(
+        "all policy-compatible embeddings route attempts failed for model {model}: {errors:?}"
+    )]
+    EmbeddingsRouteAttemptsFailed { model: String, errors: Vec<String> },
+
     #[error("invalid provider routing configuration for model {model}: {message}")]
     InvalidProviderRouting { model: String, message: String },
 
@@ -122,7 +320,7 @@ pub enum ClientError {
     VerifiedRouteExpired { expires_at: String },
 
     #[error(
-        "verified route {route_id} was bound to requested model {verified_model}, but chat request used model {request_model}"
+        "verified route {route_id} was bound to requested model {verified_model}, but request used model {request_model}"
     )]
     VerifiedRouteModelMismatch {
         route_id: String,
@@ -165,6 +363,88 @@ pub enum ClientError {
         "verification policy uses {enforcement:?} enforcement; call allow_insecure_plaintext(true) to acknowledge that observe/disabled modes can send plaintext or policy-failing traffic"
     )]
     InsecurePolicyRequiresOptIn { enforcement: EnforcementMode },
+
+    /// A provider chat execution failed after the route was verified. The
+    /// `outcome` says whether the provider may have processed the request.
+    #[error("provider chat failed on route {route_id} ({}): {error}", outcome.as_str())]
+    ProviderChat {
+        route_id: String,
+        outcome: DispatchOutcome,
+        error: ProviderError,
+    },
+
+    /// An embeddings execution failed after route verification.
+    #[error("provider embeddings failed on route {route_id} ({}): {error}", outcome.as_str())]
+    ProviderEmbeddings {
+        route_id: String,
+        outcome: DispatchOutcome,
+        error: ProviderError,
+    },
+    #[error("provider Responses follow-up failed on route {route_id} ({}): {error}", outcome.as_str())]
+    ProviderResponseManage {
+        route_id: String,
+        outcome: DispatchOutcome,
+        error: ProviderError,
+    },
+    /// The provider returned a response, but it failed post-response verdict
+    /// consistency checks; the response was discarded after work was done.
+    #[error("response for route {route_id} failed verification after execution: {message}")]
+    ResponseVerificationFailed { route_id: String, message: String },
+}
+
+impl ClientError {
+    /// Whether the provider may have processed the request.
+    pub fn dispatch_outcome(&self) -> DispatchOutcome {
+        match self {
+            ClientError::ProviderChat { outcome, .. }
+            | ClientError::ProviderEmbeddings { outcome, .. }
+            | ClientError::ProviderResponseManage { outcome, .. } => *outcome,
+            ClientError::ResponseVerificationFailed { .. }
+            | ClientError::ResponseJsonSerialization(_) => DispatchOutcome::Unknown,
+            _ => DispatchOutcome::NotDispatched,
+        }
+    }
+
+    /// Stable machine-readable error code for bindings.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ClientError::Attestation(_) => "attestation_failed",
+            ClientError::Provider(_) => "provider_failed",
+            ClientError::UnknownProvider(_) => "unknown_provider",
+            ClientError::RouteNotFound { .. } => "route_not_found",
+            ClientError::RouteSelectionFailed { .. } => "route_selection_failed",
+            ClientError::RouteAttemptsFailed { .. } => "route_attempts_failed",
+            ClientError::EmbeddingsRouteAttemptsFailed { .. } => "embeddings_route_attempts_failed",
+            ClientError::PolicyDenied { .. } => "policy_denied",
+            ClientError::StreamingNotSupported { .. } => "streaming_not_supported",
+            ClientError::InvalidProviderRouting { .. } => "invalid_provider_routing",
+            ClientError::ResponseCompatibility(_) => "response_compatibility_failed",
+            ClientError::ResponseJsonSerialization(_) => "response_serialization_failed",
+            ClientError::VerifiedRouteExpired { .. } => "verified_route_expired",
+            ClientError::VerifiedRouteModelMismatch { .. } => "verified_route_model_mismatch",
+            ClientError::VerificationWaitQueueFull { .. } => "verification_queue_full",
+            ClientError::VerificationWaitTimeout { .. } => "verification_wait_timeout",
+            ClientError::MissingModel => "missing_model",
+            ClientError::MissingMessages => "missing_messages",
+            ClientError::RegistryCache(_) => "registry_cache_failed",
+            ClientError::ReferenceValuesCache(_) => "reference_values_cache_failed",
+            ClientError::MissingOperatorSigningKeys { .. } => "missing_operator_signing_keys",
+            ClientError::BundledSourceRequiresTrust { .. } => "bundled_source_requires_trust",
+            ClientError::InsecurePolicyRequiresOptIn { .. } => "insecure_policy_requires_opt_in",
+            ClientError::ProviderChat { .. } => "provider_chat_failed",
+            ClientError::ProviderEmbeddings { .. } => "provider_embeddings_failed",
+            ClientError::ProviderResponseManage { .. } => "provider_response_manage_failed",
+            ClientError::ResponseVerificationFailed { .. } => "response_verification_failed",
+        }
+    }
+
+    /// The provider HTTP status for definitive provider rejections.
+    pub fn provider_http_status(&self) -> Option<u16> {
+        match self.dispatch_outcome() {
+            DispatchOutcome::Rejected { status } => Some(status),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -756,6 +1036,7 @@ struct ClientInner {
     gpu_attestation_verifier: Arc<dyn GpuAttestationVerifier>,
     gpu_attestation_verifier_is_custom: bool,
     tinfoil_dcap_tdx_collateral_resolver: Option<DcapTdxCollateralResolver>,
+    tinfoil_sev_snp_vcek_resolver: Option<Arc<dyn SevSnpVcekResolver>>,
     time_source: TimeSource,
     verdict_store: Arc<dyn VerdictStore>,
     metrics_recorder: Arc<dyn ConfidentialInferenceMetricsRecorder>,
@@ -874,6 +1155,7 @@ pub enum ConfidentialInferenceMetricStep {
     EvidenceVerification,
     TinfoilDcapTdxCollateralResolution,
     ProviderChat,
+    ProviderEmbeddings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1000,6 +1282,7 @@ impl ConfidentialInferenceMetricsRecorder for InMemoryConfidentialInferenceMetri
 enum RouteSelectionPurpose {
     Verify,
     Chat,
+    Embeddings,
 }
 
 impl RouteSelectionPurpose {
@@ -1007,6 +1290,7 @@ impl RouteSelectionPurpose {
         match self {
             RouteSelectionPurpose::Verify => "verification",
             RouteSelectionPurpose::Chat => "chat",
+            RouteSelectionPurpose::Embeddings => "embeddings",
         }
     }
 }
@@ -1107,7 +1391,9 @@ fn route_satisfies_policy(
 ) -> bool {
     (match purpose {
         RouteSelectionPurpose::Verify => route.route_status.selectable_for_verification(),
-        RouteSelectionPurpose::Chat => route.route_status.selectable_for_chat(),
+        RouteSelectionPurpose::Chat | RouteSelectionPurpose::Embeddings => {
+            route.route_status.selectable_for_chat()
+        }
     }) && route
         .channel_binding_kind
         .satisfies(&policy.channel_binding_requirement)
@@ -1134,6 +1420,10 @@ fn route_satisfies_policy(
                 compatibility.route_execution_status.allows_chat_execution()
                     && compatibility.supports_endpoint(OpenAiEndpoint::ChatCompletions)
             }
+            RouteSelectionPurpose::Embeddings => {
+                compatibility.route_execution_status.allows_chat_execution()
+                    && compatibility.supports_endpoint(OpenAiEndpoint::Embeddings)
+            }
         }
 }
 
@@ -1142,6 +1432,7 @@ enum VerificationRequestMode {
     VerifyOnly,
     NonStreamingChat,
     StreamingChat,
+    Embeddings,
 }
 
 impl VerificationRequestMode {
@@ -1158,6 +1449,7 @@ impl VerificationRequestMode {
             Self::VerifyOnly => "verify_only",
             Self::NonStreamingChat => "non_streaming_chat",
             Self::StreamingChat => "streaming_chat",
+            Self::Embeddings => "embeddings",
         }
     }
 }
@@ -1175,6 +1467,13 @@ impl ConfidentialInference {
             stream: None,
             max_tokens: None,
             temperature: None,
+        }
+    }
+    pub fn embeddings(&self) -> EmbeddingsBuilder {
+        EmbeddingsBuilder {
+            client: self.clone(),
+            model: None,
+            inputs: Vec::new(),
         }
     }
 
@@ -1222,6 +1521,17 @@ impl ConfidentialInference {
         })
     }
 
+    pub async fn manage_response(
+        &self,
+        provider: &str,
+        request: ResponseManageRequest,
+    ) -> Result<ConfidentialResponse<serde_json::Value>> {
+        self.verify_route(provider, "")
+            .await?
+            .manage_response(request)
+            .await
+    }
+
     pub async fn send_chat_completion_payload_json(
         &self,
         request: ChatCompletionRequestPayload,
@@ -1230,6 +1540,73 @@ impl ConfidentialInference {
             .send_chat_completion_request(request.into_inner())
             .await?;
         serialize_response_json(&response)
+    }
+    pub async fn send_chat_stream_payload_json(
+        &self,
+        request: ChatCompletionRequestPayload,
+    ) -> Result<ConfidentialChatStream> {
+        let mut request = request.into_inner();
+        request.stream = Some(true);
+        self.stream_chat_request(request).await
+    }
+    pub async fn send_embeddings_payload_json(
+        &self,
+        request: EmbeddingsRequestPayload,
+    ) -> Result<String> {
+        serialize_response_json(&self.send_embeddings_request(request.into_inner()).await?)
+    }
+
+    async fn send_embeddings_request(
+        &self,
+        request: EmbeddingsRequest,
+    ) -> Result<ConfidentialResponse<EmbeddingsResponse>> {
+        let model = request.model.clone();
+        let candidates = self.select_routes(None, &model, RouteSelectionPurpose::Embeddings)?;
+        if candidates.is_empty() {
+            return Err(ClientError::RouteSelectionFailed {
+                provider: None,
+                model,
+                purpose: RouteSelectionPurpose::Embeddings.as_str(),
+            });
+        }
+        let mut attempt_errors = Vec::new();
+        let mut last_error = None;
+        let mut unavailable_providers = BTreeSet::new();
+        for (route_definition, attested_route) in candidates {
+            let provider = attested_route.provider.clone();
+            if unavailable_providers.contains(&provider) {
+                continue;
+            }
+            match self
+                .verify_selected_route(
+                    route_definition,
+                    attested_route,
+                    VerificationRequestMode::Embeddings,
+                )
+                .await
+            {
+                Ok(verified) => match verified.embeddings(request.clone()).await {
+                    Ok(response) => return Ok(response),
+                    Err(error) if error.dispatch_outcome().allows_route_fallback() => {
+                        unavailable_providers.insert(provider);
+                        attempt_errors.push(error.to_string());
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
+                },
+                Err(error) => {
+                    attempt_errors.push(error.to_string());
+                    last_error = Some(error);
+                }
+            }
+        }
+        if attempt_errors.len() == 1 {
+            return Err(last_error.expect("single embeddings route error recorded"));
+        }
+        Err(ClientError::EmbeddingsRouteAttemptsFailed {
+            model,
+            errors: attempt_errors,
+        })
     }
 
     pub async fn create_response_payload_json(
@@ -1258,8 +1635,12 @@ impl ConfidentialInference {
         }
         if request.streaming() {
             let first_candidate = candidates.first().cloned();
-            candidates
-                .retain(|(route_definition, _)| route_definition.streaming.allows_streaming());
+            candidates.retain(|(route_definition, route)| {
+                route_definition.streaming.allows_streaming()
+                    && route_definition.request_encryption != EncryptionRequirement::Required
+                    && route_definition.response_decryption != EncryptionRequirement::Required
+                    && route.streaming_allowed
+            });
             if candidates.is_empty() {
                 if let Some((route_definition, attested_route)) = first_candidate {
                     self.record_streaming_fail_closed(&route_definition, &attested_route);
@@ -1286,17 +1667,14 @@ impl ConfidentialInference {
             {
                 Ok(verified) => match verified.chat(request.clone()).await {
                     Ok(response) => return Ok(response),
-                    Err(error)
-                        if matches!(
-                            &error,
-                            ClientError::Provider(provider_error)
-                                if provider_error.is_retryable_outage()
-                        ) =>
-                    {
+                    // Only failures that prove the provider did no work may
+                    // move to another route; anything else could replay a
+                    // request the first provider already processed.
+                    Err(error) if error.dispatch_outcome().allows_route_fallback() => {
                         tracing::warn!(
                             provider = %provider,
                             route_id = %route_id,
-                            "provider chat attempt was unavailable; trying next policy-compatible route"
+                            "provider chat attempt was not processed; trying next policy-compatible route"
                         );
                         attempt_errors.push(error.to_string());
                         last_error = Some(error);
@@ -1370,11 +1748,29 @@ impl ConfidentialInference {
         provider: impl AsRef<str>,
         model: impl AsRef<str>,
     ) -> Result<VerifiedRoute> {
-        let (route_definition, attested_route) = self.select_route(
-            Some(provider.as_ref()),
-            model.as_ref(),
-            RouteSelectionPurpose::Verify,
-        )?;
+        let provider = provider.as_ref();
+        let model = model.as_ref();
+        let model = if model.is_empty() {
+            self.inner
+                .registry
+                .models
+                .values()
+                .find(|candidate| {
+                    candidate
+                        .routes
+                        .iter()
+                        .any(|route| route.provider == provider)
+                })
+                .map(|candidate| candidate.canonical_model.as_str())
+                .ok_or_else(|| ClientError::RouteNotFound {
+                    provider: Some(provider.to_owned()),
+                    model: String::new(),
+                })?
+        } else {
+            model
+        };
+        let (route_definition, attested_route) =
+            self.select_route(Some(provider), model, RouteSelectionPurpose::Verify)?;
         self.verify_selected_route(
             route_definition,
             attested_route,
@@ -1511,7 +1907,12 @@ impl ConfidentialInference {
                 });
             }
 
-            if provider.is_none() && purpose == RouteSelectionPurpose::Chat {
+            if provider.is_none()
+                && matches!(
+                    purpose,
+                    RouteSelectionPurpose::Chat | RouteSelectionPurpose::Embeddings
+                )
+            {
                 let canonical_model = &candidates[0].0.canonical_model;
                 if let Some(provider_order) = self
                     .inner
@@ -1622,7 +2023,7 @@ impl ConfidentialInference {
                 ConfidentialInferenceVerificationCacheEvent::Miss,
             );
 
-            if self.cache_enabled() {
+            if self.cache_enabled_for(&cache_key) {
                 tracing::debug!("using single-flight route verification");
                 return self
                     .verify_selected_route_single_flight(
@@ -1845,7 +2246,7 @@ impl ConfidentialInference {
         let evidence_request = EvidenceRequest {
             requested_model: attested_route.requested_model.clone(),
             policy_digest,
-            nonce: self.evidence_nonce_for_policy(),
+            nonce: self.evidence_nonce_for(route_definition),
         };
         let fetch_started_at = Instant::now();
         let raw_evidence = adapter
@@ -1888,7 +2289,7 @@ impl ConfidentialInference {
             chat_executable,
             known_unsupported_modes,
             expected_freshness_nonce: self
-                .expected_freshness_nonce_for_policy(route_definition, &evidence_request),
+                .expected_freshness_nonce_for(route_definition, &evidence_request),
             policy: self.inner.policy.clone(),
             reference_values: self.inner.reference_values.clone(),
             reference_signature: self.inner.reference_signature.clone(),
@@ -1939,15 +2340,81 @@ impl ConfidentialInference {
         route_definition: &RouteDefinition,
         attested_route: &AttestedRoute,
     ) -> Result<Arc<dyn TinfoilQuoteVerifier>> {
+        if raw_schema(raw_evidence).as_deref()
+            != Some(confidential_inference_attestation::TinfoilLiveCaptureEvidence::SCHEMA)
+        {
+            // Chutes/NEAR evidence carries a raw TDX quote, verified through
+            // the same DCAP machinery as a Tinfoil TDX capture.
+            return match raw_tdx_quote_bytes(raw_evidence)? {
+                Some(quote_bytes) => {
+                    self.dcap_tdx_verifier_for_quote(quote_bytes, route_definition, attested_route)
+                        .await
+                }
+                None => Ok(self.inner.tinfoil_quote_verifier.clone()),
+            };
+        }
+        let parsed = parse_tinfoil_live_capture(raw_evidence)?;
+        match parsed.attestation_format {
+            TinfoilAttestationFormat::TdxGuestV2 => {
+                self.dcap_tdx_verifier_for_quote(
+                    parsed.quote_bytes,
+                    route_definition,
+                    attested_route,
+                )
+                .await
+            }
+            TinfoilAttestationFormat::SevSnpGuestV2 => {
+                let resolver = self
+                    .inner
+                    .tinfoil_sev_snp_vcek_resolver
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AttestationError::InvalidEvidence(
+                            "SEV-SNP live verification requires a configured VCEK resolver".into(),
+                        )
+                    })?;
+                let report = &parsed.quote_bytes;
+                if report.len() != 1184 {
+                    return Err(AttestationError::InvalidEvidence(
+                        "SEV-SNP report has wrong size".into(),
+                    )
+                    .into());
+                }
+                let hwid: [u8; 64] = report[416..480].try_into().map_err(|_| {
+                    AttestationError::InvalidEvidence("SEV-SNP report chip_id is malformed".into())
+                })?;
+                let reported_tcb =
+                    u64::from_le_bytes(report[384..392].try_into().map_err(|_| {
+                        AttestationError::InvalidEvidence("SEV-SNP report TCB is malformed".into())
+                    })?);
+                let tcb = [
+                    reported_tcb as u8,
+                    (reported_tcb >> 8) as u8,
+                    (reported_tcb >> 48) as u8,
+                    (reported_tcb >> 56) as u8,
+                ];
+                if hwid.iter().all(|byte| *byte == 0) || reported_tcb == 0 {
+                    return Err(AttestationError::InvalidEvidence(
+                        "SEV-SNP report chip_id or TCB is empty".into(),
+                    )
+                    .into());
+                }
+                let vcek = resolver.resolve_vcek("Genoa", &hwid, tcb).await?;
+                Ok(Arc::new(SevSnpTinfoilQuoteVerifier::new(vcek)))
+            }
+        }
+    }
+
+    async fn dcap_tdx_verifier_for_quote(
+        &self,
+        quote_bytes: Vec<u8>,
+        route_definition: &RouteDefinition,
+        attested_route: &AttestedRoute,
+    ) -> Result<Arc<dyn TinfoilQuoteVerifier>> {
         let Some(resolver) = &self.inner.tinfoil_dcap_tdx_collateral_resolver else {
             tracing::debug!("using configured generic Tinfoil quote verifier");
             return Ok(self.inner.tinfoil_quote_verifier.clone());
         };
-        let Some(quote_bytes) = raw_tdx_quote_bytes(raw_evidence)? else {
-            tracing::debug!("raw evidence does not contain a supported live TDX quote");
-            return Ok(self.inner.tinfoil_quote_verifier.clone());
-        };
-
         let quote_digest = sha256_digest(&quote_bytes);
         let resolver_started_at = Instant::now();
         let verifier = resolver
@@ -2237,7 +2704,7 @@ impl ConfidentialInference {
     }
 
     fn cached_verdict(&self, key: &VerificationCacheKey) -> Option<AttestationVerdict> {
-        let max_cache_age_ms = self.cache_age_limit_millis()?;
+        let max_cache_age_ms = self.cache_age_limit_millis_for(key)?;
 
         let mut cache = self.inner.verdict_cache.lock().ok()?;
         let cached = cache.get(key)?;
@@ -2253,7 +2720,7 @@ impl ConfidentialInference {
     }
 
     fn store_cached_verdict(&self, key: VerificationCacheKey, verdict: &AttestationVerdict) {
-        if !self.cache_enabled() {
+        if !self.cache_enabled_for(&key) {
             return;
         }
 
@@ -2320,11 +2787,16 @@ impl ConfidentialInference {
         }
     }
 
-    fn cache_enabled(&self) -> bool {
-        self.cache_age_limit_millis().is_some()
+    fn cache_enabled_for(&self, key: &VerificationCacheKey) -> bool {
+        self.cache_age_limit_millis_for(key).is_some()
     }
 
-    fn cache_age_limit_millis(&self) -> Option<u64> {
+    /// A route whose registry entry demands per-request freshness is never
+    /// served from the verdict cache, whatever the client-wide policy allows.
+    fn cache_age_limit_millis_for(&self, key: &VerificationCacheKey) -> Option<u64> {
+        if key.per_request_freshness {
+            return None;
+        }
         let ttl_ms = self.inner.policy.verdict_ttl_millis.0;
         if ttl_ms == 0 {
             return None;
@@ -2348,17 +2820,25 @@ impl ConfidentialInference {
         )
     }
 
-    fn evidence_nonce_for_policy(&self) -> Option<String> {
+    /// The stricter of the client policy and the route's registry freshness
+    /// class decides whether evidence must be bound to a fresh nonce.
+    fn requires_per_request_freshness(&self, route_definition: &RouteDefinition) -> bool {
         matches!(self.inner.policy.freshness, FreshnessPolicy::PerRequest)
+            || route_definition.freshness_class
+                == confidential_inference_attestation::FreshnessClass::PerRequest
+    }
+
+    fn evidence_nonce_for(&self, route_definition: &RouteDefinition) -> Option<String> {
+        self.requires_per_request_freshness(route_definition)
             .then(fresh_evidence_nonce)
     }
 
-    fn expected_freshness_nonce_for_policy(
+    fn expected_freshness_nonce_for(
         &self,
         route_definition: &RouteDefinition,
         request: &EvidenceRequest,
     ) -> Option<String> {
-        if !matches!(self.inner.policy.freshness, FreshnessPolicy::PerRequest) {
+        if !self.requires_per_request_freshness(route_definition) {
             return None;
         }
 
@@ -2366,7 +2846,9 @@ impl ConfidentialInference {
             .nonce
             .as_deref()
             .map(|nonce| match route_definition.evidence_family.as_str() {
-                "chutes_e2ee" => chutes_provider_nonce(nonce),
+                // The Chutes adapter binds the provider-transformed nonce for
+                // both the fixture and live evidence families.
+                "chutes_e2ee" | "chutes_live_e2ee" => chutes_provider_nonce(nonce),
                 _ => nonce.to_owned(),
             })
     }
@@ -2573,6 +3055,7 @@ fn metric_step_label(step: &ConfidentialInferenceMetricStep) -> &'static str {
             "tinfoil_dcap_tdx_collateral_resolution"
         }
         ConfidentialInferenceMetricStep::ProviderChat => "provider_chat",
+        ConfidentialInferenceMetricStep::ProviderEmbeddings => "provider_embeddings",
     }
 }
 
@@ -2611,6 +3094,7 @@ pub struct ConfidentialInferenceBuilder {
     gpu_attestation_verifier: Arc<dyn GpuAttestationVerifier>,
     gpu_attestation_verifier_is_custom: bool,
     tinfoil_dcap_tdx_collateral_resolver: Option<DcapTdxCollateralResolver>,
+    tinfoil_sev_snp_vcek_resolver: Option<Arc<dyn SevSnpVcekResolver>>,
     time_source: TimeSource,
     verdict_store: Arc<dyn VerdictStore>,
     metrics_recorder: Arc<dyn ConfidentialInferenceMetricsRecorder>,
@@ -2636,6 +3120,7 @@ impl ConfidentialInferenceBuilder {
             gpu_attestation_verifier: Arc::new(FailClosedGpuAttestationVerifier),
             gpu_attestation_verifier_is_custom: false,
             tinfoil_dcap_tdx_collateral_resolver: None,
+            tinfoil_sev_snp_vcek_resolver: None,
             time_source: Arc::new(now_epoch_millis),
             verdict_store: Arc::new(NoopVerdictStore),
             metrics_recorder: Arc::new(NoopConfidentialInferenceMetricsRecorder),
@@ -2877,6 +3362,14 @@ impl ConfidentialInferenceBuilder {
         self
     }
 
+    pub fn tinfoil_sev_snp_vcek_resolver<R>(mut self, resolver: R) -> Self
+    where
+        R: SevSnpVcekResolver + 'static,
+    {
+        self.tinfoil_sev_snp_vcek_resolver = Some(Arc::new(resolver));
+        self
+    }
+
     pub fn time_source<F>(mut self, time_source: F) -> Self
     where
         F: Fn() -> u64 + Send + Sync + 'static,
@@ -3002,15 +3495,9 @@ impl ConfidentialInferenceBuilder {
         compatibility_matrix.validate_registry_routes(&registry)?;
         let mut adapters = self.adapters;
         install_default_credential_adapters(&registry, &self.api_keys, &mut adapters)?;
-        let needs_live_tdx_collateral = registry.models.values().any(|model| {
-            model.routes.iter().any(|route| {
-                route.route_status == RouteLifecycle::Active
-                    && matches!(
-                        route.evidence_family.as_str(),
-                        "chutes_live_e2ee" | "near_hw_verified_tls"
-                    )
-            })
-        });
+        let collateral = LiveCollateralNeeds::for_registry(&registry);
+        let needs_live_tdx_collateral = collateral.tdx;
+        let needs_live_snp_vcek = collateral.snp_vcek;
         let tinfoil_dcap_tdx_collateral_resolver = match self.tinfoil_dcap_tdx_collateral_resolver {
             Some(resolver) => Some(resolver),
             None if needs_live_tdx_collateral => {
@@ -3018,6 +3505,12 @@ impl ConfidentialInferenceBuilder {
             }
             None => None,
         };
+        let tinfoil_sev_snp_vcek_resolver: Option<Arc<dyn SevSnpVcekResolver>> =
+            match self.tinfoil_sev_snp_vcek_resolver {
+                Some(resolver) => Some(resolver),
+                None if needs_live_snp_vcek => Some(Arc::new(AmdKdsSevSnpVcekResolver::new()?)),
+                None => None,
+            };
         validate_provider_routing(
             &self.provider_routing,
             &registry,
@@ -3054,6 +3547,7 @@ impl ConfidentialInferenceBuilder {
                 gpu_attestation_verifier: self.gpu_attestation_verifier,
                 gpu_attestation_verifier_is_custom: self.gpu_attestation_verifier_is_custom,
                 tinfoil_dcap_tdx_collateral_resolver,
+                tinfoil_sev_snp_vcek_resolver,
                 time_source,
                 verdict_store: self.verdict_store,
                 metrics_recorder: self.metrics_recorder,
@@ -3062,6 +3556,42 @@ impl ConfidentialInferenceBuilder {
                 in_flight_verifications: Mutex::new(BTreeMap::new()),
             }),
         })
+    }
+}
+
+/// Which live-verification collateral sources a registry's active routes need.
+/// Live Tinfoil evidence may be TDX or SEV-SNP, so its routes need both; a
+/// missing source makes live verification fail closed. Live Tinfoil is the
+/// `tinfoil` provider: offline fixtures share its evidence family but verify
+/// without network collateral.
+#[derive(Debug, PartialEq, Eq)]
+struct LiveCollateralNeeds {
+    tdx: bool,
+    snp_vcek: bool,
+}
+
+impl LiveCollateralNeeds {
+    fn for_registry(registry: &ProviderRegistry) -> Self {
+        let has_active = |matches: &dyn Fn(&RouteDefinition) -> bool| {
+            registry.models.values().any(|model| {
+                model
+                    .routes
+                    .iter()
+                    .any(|route| route.route_status == RouteLifecycle::Active && matches(route))
+            })
+        };
+        let live_tinfoil = |route: &RouteDefinition| {
+            route.provider == "tinfoil" && route.evidence_family == "tinfoil_hw_verified_tls"
+        };
+        Self {
+            tdx: has_active(&|route| {
+                matches!(
+                    route.evidence_family.as_str(),
+                    "chutes_live_e2ee" | "near_hw_verified_tls"
+                ) || live_tinfoil(route)
+            }),
+            snp_vcek: has_active(&live_tinfoil),
+        }
     }
 }
 
@@ -3162,6 +3692,211 @@ impl VerifiedRoute {
         &self.route
     }
 
+    pub async fn embeddings(
+        &self,
+        request: EmbeddingsRequest,
+    ) -> Result<ConfidentialResponse<EmbeddingsResponse>> {
+        if request.model != self.route.requested_model {
+            return Err(ClientError::VerifiedRouteModelMismatch {
+                route_id: self.route.route_id.clone(),
+                verified_model: self.route.requested_model.clone(),
+                request_model: request.model,
+            });
+        }
+        if !self.client.verdict_expiry_allows_use(&self.verdict) {
+            return Err(ClientError::VerifiedRouteExpired {
+                expires_at: self.verdict.expires_at.clone(),
+            });
+        }
+        let mut refreshed = self
+            .client
+            .verify_selected_route(
+                self.route_definition.clone(),
+                self.route.clone(),
+                VerificationRequestMode::Embeddings,
+            )
+            .await?;
+        let mut refreshed_after_rotation = false;
+        loop {
+            let adapter = refreshed.client.adapter(&refreshed.route.provider)?;
+            let compatibility = refreshed
+                .client
+                .inner
+                .compatibility_matrix
+                .provider(&refreshed.route.provider)?;
+            compatibility.validate_route(&refreshed.route_definition)?;
+            if !compatibility.route_execution_status.allows_chat_execution()
+                || !compatibility.supports_endpoint(OpenAiEndpoint::Embeddings)
+            {
+                return Err(ClientError::Provider(ProviderError::Compatibility(
+                    format!(
+                        "route {} cannot execute embeddings requests",
+                        refreshed.route.route_id
+                    ),
+                )));
+            }
+            let provider_request =
+                compatibility.adapt_embeddings_request(&refreshed.route_definition, &request)?;
+            let started_at = Instant::now();
+            let response = adapter
+                .embeddings(&refreshed.route_definition, provider_request)
+                .instrument(tracing::info_span!(
+                    "confidential-inference.provider_embeddings",
+                    provider = %refreshed.route.provider,
+                    route_id = %refreshed.route.route_id,
+                    requested_model = %refreshed.route.requested_model,
+                    provider_model = %refreshed.route.provider_model
+                ))
+                .await;
+            refreshed.client.record_latency(
+                ConfidentialInferenceRouteMetricLabels::from_route(
+                    &refreshed.route_definition,
+                    &refreshed.route,
+                ),
+                ConfidentialInferenceMetricStep::ProviderEmbeddings,
+                started_at.elapsed(),
+                response.is_ok(),
+            );
+            match response {
+                Ok(response) => {
+                    refreshed
+                        .verdict
+                        .validate_summary_consistency()
+                        .map_err(|error| ClientError::ResponseVerificationFailed {
+                            route_id: refreshed.route.route_id.clone(),
+                            message: error.to_string(),
+                        })?;
+                    return Ok(ConfidentialResponse {
+                        provider: refreshed.route.provider.clone(),
+                        provider_model: refreshed.route.provider_model.clone(),
+                        requested_model: refreshed.route.requested_model.clone(),
+                        response_channel_bound: refreshed.verdict.response_channel_bound,
+                        response_integrity_result: refreshed
+                            .verdict
+                            .response_integrity_result
+                            .clone(),
+                        route: refreshed.route,
+                        verdict: refreshed.verdict,
+                        response,
+                    });
+                }
+                Err(error) if error.is_key_rotation() && !refreshed_after_rotation => {
+                    refreshed_after_rotation = true;
+                    refreshed = refreshed
+                        .client
+                        .refresh_selected_route_after_key_rotation(
+                            refreshed.route_definition.clone(),
+                            refreshed.route.clone(),
+                            VerificationRequestMode::Embeddings,
+                        )
+                        .await?;
+                }
+                Err(error) => {
+                    return Err(ClientError::ProviderEmbeddings {
+                        route_id: refreshed.route.route_id.clone(),
+                        outcome: error.embeddings_dispatch_outcome(),
+                        error,
+                    });
+                }
+            }
+        }
+    }
+
+    pub async fn chat_stream(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ConfidentialChatStream> {
+        if self.route_definition.request_encryption == EncryptionRequirement::Required
+            || self.route_definition.response_decryption == EncryptionRequirement::Required
+        {
+            self.client
+                .record_streaming_fail_closed(&self.route_definition, &self.route);
+            return Err(ClientError::StreamingNotSupported {
+                route_id: self.route.route_id.clone(),
+            });
+        }
+        if request.model != self.route.requested_model {
+            return Err(ClientError::VerifiedRouteModelMismatch {
+                route_id: self.route.route_id.clone(),
+                verified_model: self.route.requested_model.clone(),
+                request_model: request.model,
+            });
+        }
+        if !request.streaming() || !self.route.streaming_allowed {
+            self.client
+                .record_streaming_fail_closed(&self.route_definition, &self.route);
+            return Err(ClientError::StreamingNotSupported {
+                route_id: self.route.route_id.clone(),
+            });
+        }
+        if !self.client.verdict_expiry_allows_use(&self.verdict) {
+            return Err(ClientError::VerifiedRouteExpired {
+                expires_at: self.verdict.expires_at.clone(),
+            });
+        }
+        let refreshed = self
+            .client
+            .verify_selected_route(
+                self.route_definition.clone(),
+                self.route.clone(),
+                VerificationRequestMode::for_chat_request(&request),
+            )
+            .await?;
+        if !refreshed.route.streaming_allowed {
+            return Err(ClientError::StreamingNotSupported {
+                route_id: refreshed.route.route_id,
+            });
+        }
+        refreshed
+            .verdict
+            .validate_summary_consistency()
+            .map_err(|error| ClientError::ResponseVerificationFailed {
+                route_id: refreshed.route.route_id.clone(),
+                message: error.to_string(),
+            })?;
+        let adapter = refreshed.client.adapter(&refreshed.route.provider)?;
+        let compatibility = refreshed
+            .client
+            .inner
+            .compatibility_matrix
+            .provider(&refreshed.route.provider)?;
+        compatibility.validate_route(&refreshed.route_definition)?;
+        if !compatibility.route_execution_status.allows_chat_execution() {
+            return Err(ClientError::Provider(ProviderError::Compatibility(
+                format!(
+                    "route {} cannot execute chat requests",
+                    refreshed.route.route_id
+                ),
+            )));
+        }
+        let provider_request =
+            compatibility.adapt_chat_request(&refreshed.route_definition, &request)?;
+        let stream = adapter
+            .chat_stream(&refreshed.route_definition, provider_request)
+            .instrument(tracing::info_span!(
+                "confidential-inference.provider_chat_stream",
+                provider = %refreshed.route.provider,
+                route_id = %refreshed.route.route_id,
+                provider_model = %refreshed.route.provider_model
+            ))
+            .await
+            .map_err(|error| ClientError::ProviderChat {
+                route_id: refreshed.route.route_id.clone(),
+                outcome: DispatchOutcome::Unknown,
+                error,
+            })?;
+        Ok(ConfidentialChatStream {
+            stream,
+            buffer: Vec::new(),
+            done: false,
+            provider: refreshed.route.provider.clone(),
+            provider_model: refreshed.route.provider_model.clone(),
+            route: refreshed.route,
+            verdict: refreshed.verdict,
+            terminal_usage: None,
+        })
+    }
+
     pub async fn chat(
         &self,
         request: ChatCompletionRequest,
@@ -3253,7 +3988,13 @@ impl VerifiedRoute {
 
             match response {
                 Ok(response) => {
-                    refreshed.verdict.validate_summary_consistency()?;
+                    refreshed
+                        .verdict
+                        .validate_summary_consistency()
+                        .map_err(|error| ClientError::ResponseVerificationFailed {
+                            route_id: refreshed.route.route_id.clone(),
+                            message: error.to_string(),
+                        })?;
                     return Ok(ConfidentialResponse {
                         provider: refreshed.route.provider.clone(),
                         provider_model: refreshed.route.provider_model.clone(),
@@ -3284,9 +4025,60 @@ impl VerifiedRoute {
                         )
                         .await?;
                 }
-                Err(error) => return Err(ClientError::Provider(error)),
+                Err(error) => {
+                    return Err(ClientError::ProviderChat {
+                        route_id: refreshed.route.route_id.clone(),
+                        outcome: error.chat_dispatch_outcome(),
+                        error,
+                    });
+                }
             }
         }
+    }
+
+    pub async fn manage_response(
+        &self,
+        request: ResponseManageRequest,
+    ) -> Result<ConfidentialResponse<serde_json::Value>> {
+        if !self.client.verdict_expiry_allows_use(&self.verdict) {
+            return Err(ClientError::VerifiedRouteExpired {
+                expires_at: self.verdict.expires_at.clone(),
+            });
+        }
+        let refreshed = self
+            .client
+            .verify_selected_route(
+                self.route_definition.clone(),
+                self.route.clone(),
+                VerificationRequestMode::VerifyOnly,
+            )
+            .await?;
+        let adapter = refreshed.client.adapter(&refreshed.route.provider)?;
+        let response = adapter
+            .response_manage(
+                &refreshed.route_definition,
+                ProviderResponseManageRequest {
+                    operation: request.op.into(),
+                    response_id: request.provider_response_id,
+                    params: request.params,
+                },
+            )
+            .await
+            .map_err(|error| ClientError::ProviderResponseManage {
+                route_id: refreshed.route.route_id.clone(),
+                outcome: error.chat_dispatch_outcome(),
+                error,
+            })?;
+        Ok(ConfidentialResponse {
+            response,
+            provider: refreshed.route.provider.clone(),
+            provider_model: refreshed.route.provider_model.clone(),
+            requested_model: refreshed.route.requested_model.clone(),
+            response_channel_bound: refreshed.verdict.response_channel_bound,
+            response_integrity_result: refreshed.verdict.response_integrity_result.clone(),
+            route: refreshed.route,
+            verdict: refreshed.verdict,
+        })
     }
 }
 
@@ -3325,6 +4117,91 @@ impl ChatCompletionRequestPayload {
     fn into_inner(self) -> ChatCompletionRequest {
         self.request
     }
+}
+#[derive(Clone, Debug)]
+pub struct EmbeddingsRequestPayload {
+    request: EmbeddingsRequest,
+}
+
+impl EmbeddingsRequestPayload {
+    pub fn from_json_str(request_json: &str) -> std::result::Result<Self, serde_json::Error> {
+        serde_json::from_str(request_json).map(|request| Self { request })
+    }
+
+    fn into_inner(self) -> EmbeddingsRequest {
+        self.request
+    }
+}
+pub struct EmbeddingsBuilder {
+    client: ConfidentialInference,
+    model: Option<String>,
+    inputs: Vec<String>,
+}
+
+impl EmbeddingsBuilder {
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn input(mut self, input: impl Into<String>) -> Self {
+        self.inputs.push(input.into());
+        self
+    }
+
+    pub fn inputs(mut self, inputs: Vec<String>) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    pub async fn send(self) -> Result<ConfidentialResponse<EmbeddingsResponse>> {
+        let model = self.model.ok_or(ClientError::MissingModel)?;
+        self.client
+            .send_embeddings_request(EmbeddingsRequest {
+                model,
+                input: if self.inputs.len() == 1 {
+                    EmbeddingInput::Text(self.inputs.into_iter().next().unwrap())
+                } else {
+                    EmbeddingInput::TextArray(self.inputs)
+                },
+                dimensions: None,
+                encoding_format: None,
+                extra: BTreeMap::new(),
+            })
+            .await
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseManageOp {
+    Retrieve,
+    ListInputItems,
+    Cancel,
+    Delete,
+    InputTokens,
+    Compact,
+}
+
+impl From<ResponseManageOp> for ResponseManageOperation {
+    fn from(value: ResponseManageOp) -> Self {
+        match value {
+            ResponseManageOp::Retrieve => Self::Retrieve,
+            ResponseManageOp::ListInputItems => Self::ListInputItems,
+            ResponseManageOp::Cancel => Self::Cancel,
+            ResponseManageOp::Delete => Self::Delete,
+            ResponseManageOp::InputTokens => Self::InputTokens,
+            ResponseManageOp::Compact => Self::Compact,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResponseManageRequest {
+    pub op: ResponseManageOp,
+    pub provider_response_id: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
@@ -3382,6 +4259,21 @@ impl ChatCompletionsBuilder {
         self
     }
 
+    pub async fn streaming(mut self) -> Result<ConfidentialChatStream> {
+        self.stream = Some(true);
+        let model = self.model.ok_or(ClientError::MissingModel)?;
+        self.client
+            .stream_chat_request(ChatCompletionRequest {
+                model,
+                messages: self.messages,
+                stream: self.stream,
+                max_tokens: self.max_tokens,
+                temperature: self.temperature,
+                extra: Default::default(),
+            })
+            .await
+    }
+
     pub async fn send(self) -> Result<ConfidentialResponse<ChatCompletionResponse>> {
         let model = self.model.ok_or(ClientError::MissingModel)?;
         let request = ChatCompletionRequest {
@@ -3390,6 +4282,7 @@ impl ChatCompletionsBuilder {
             stream: self.stream,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            extra: Default::default(),
         };
         self.client.send_chat_completion_request(request).await
     }
@@ -3599,6 +4492,7 @@ struct VerificationCacheKey {
     response_decryption: String,
     streaming_allowed: bool,
     request_mode: &'static str,
+    per_request_freshness: bool,
 }
 
 impl VerificationCacheKey {
@@ -3641,6 +4535,8 @@ impl VerificationCacheKey {
             response_decryption: format!("{:?}", route_definition.response_decryption),
             streaming_allowed: route.streaming_allowed,
             request_mode: request_mode.as_str(),
+            per_request_freshness: route_definition.freshness_class
+                == confidential_inference_attestation::FreshnessClass::PerRequest,
         }
     }
 
@@ -3999,12 +4895,19 @@ mod tests {
             let content = format!(
                 "sdk encrypted demo response for {}: {}",
                 route.provider_model,
-                request.last_user_message().unwrap_or("")
+                request.last_user_message().unwrap_or_default()
             );
             let prompt_tokens = request
                 .messages
                 .iter()
-                .map(|message| message.content.split_whitespace().count() as u32)
+                .map(|message| {
+                    message
+                        .content
+                        .text()
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .count() as u32
+                })
                 .sum::<u32>();
             let completion_tokens = content.split_whitespace().count() as u32;
 
@@ -4016,13 +4919,16 @@ mod tests {
                 choices: vec![ChatChoice {
                     index: 0,
                     message: ChatMessage::assistant(content),
-                    finish_reason: "stop".into(),
+                    finish_reason: Some("stop".into()),
+                    extra: Default::default(),
                 }],
                 usage: Some(Usage {
                     prompt_tokens,
                     completion_tokens,
                     total_tokens: prompt_tokens + completion_tokens,
+                    extra: Default::default(),
                 }),
+                extra: Default::default(),
             })
         }
     }
@@ -4389,6 +5295,7 @@ mod tests {
         Unavailable,
         HttpStatus(u16),
         Adapter,
+        Transport,
     }
 
     #[derive(Clone)]
@@ -4441,7 +5348,34 @@ mod tests {
                 Some(ScriptedChatFailure::Adapter) => Err(ProviderError::Adapter(
                     "scripted encrypted response failure".into(),
                 )),
+                Some(ScriptedChatFailure::Transport) => Err(ProviderError::Http(
+                    "scripted connection reset after request".into(),
+                )),
                 None => DemoProvider::valid().chat(route, request).await,
+            }
+        }
+        async fn embeddings(
+            &self,
+            route: &RouteDefinition,
+            request: confidential_inference_providers::ProviderEmbeddingsRequest,
+        ) -> std::result::Result<confidential_inference_openai::EmbeddingsResponse, ProviderError>
+        {
+            self.chat_attempts.fetch_add(1, Ordering::SeqCst);
+            match self.chat_failure {
+                Some(ScriptedChatFailure::Unavailable) => {
+                    Err(ProviderError::Unavailable(self.provider_id.clone()))
+                }
+                Some(ScriptedChatFailure::HttpStatus(status)) => Err(ProviderError::HttpStatus {
+                    status,
+                    message: "scripted upstream response".into(),
+                }),
+                Some(ScriptedChatFailure::Adapter) => {
+                    Err(ProviderError::Adapter("scripted failure".into()))
+                }
+                Some(ScriptedChatFailure::Transport) => Err(ProviderError::Http(
+                    "scripted connection reset after request".into(),
+                )),
+                None => DemoProvider::valid().embeddings(route, request).await,
             }
         }
     }
@@ -4530,6 +5464,7 @@ mod tests {
                 gpu_attestation_verifier: Arc::new(FailClosedGpuAttestationVerifier),
                 gpu_attestation_verifier_is_custom: false,
                 tinfoil_dcap_tdx_collateral_resolver: None,
+                tinfoil_sev_snp_vcek_resolver: None,
                 time_source: Arc::new(now_epoch_millis),
                 verdict_store: Arc::new(NoopVerdictStore),
                 metrics_recorder: Arc::new(NoopConfidentialInferenceMetricsRecorder),
@@ -4740,7 +5675,7 @@ mod tests {
                                 "provider model rewrite was not applied",
                             ));
                         }
-                        let prompt = chat_request.last_user_message().unwrap_or("");
+                        let prompt = chat_request.last_user_message().unwrap_or_default();
                         let content = format!(
                             "venice HTTP app-E2EE response for {}: {}",
                             server_route.provider_model, prompt
@@ -5105,7 +6040,7 @@ mod tests {
                                 "Phala provider model rewrite was not applied",
                             ));
                         }
-                        let prompt = chat_request.last_user_message().unwrap_or("");
+                        let prompt = chat_request.last_user_message().unwrap_or_default();
                         let content = format!(
                             "Phala direct app-E2EE response for {}: {}",
                             server_route.provider_model, prompt
@@ -5521,7 +6456,7 @@ mod tests {
                 adapter_managed_encryption: false,
                 attestation_endpoint_shape: "chutes_e2ee_http_test".into(),
                 required_credentials: Vec::new(),
-                freshness_class: FreshnessClass::PerSession,
+                freshness_class: route.freshness_class.clone(),
                 cacheability_class: CacheabilityClass::PerSessionVerdict,
                 expected_trust_tier: TrustTier::AppE2ee,
                 model_binding_support: ModelBindingSupport::Verified,
@@ -5587,6 +6522,63 @@ mod tests {
             std::process::id(),
             now_epoch_millis()
         ))
+    }
+
+    #[tokio::test]
+    async fn demo_embeddings_verifies_and_executes_end_to_end() {
+        let verdict_store = Arc::new(MemoryVerdictStore::default());
+        let client = ConfidentialInference::builder()
+            .with_demo_provider()
+            .verdict_store(verdict_store.clone())
+            .policy(VerificationPolicy::require_attested_e2ee())
+            .build()
+            .await
+            .unwrap();
+        let response = client
+            .embeddings()
+            .model("gpt-oss-120b")
+            .input("confidential embedding test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.provider, "demo");
+        assert_eq!(response.provider_model, "e2ee-gpt-oss-120b-p");
+        assert_eq!(response.verdict.status, VerificationStatus::Verified);
+        assert_eq!(response.response.usage.total_tokens, 1);
+        assert_eq!(response.response.data.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn embeddings_rejects_route_without_endpoint_support() {
+        let mut compatibility = ProviderCompatibilityMatrix::bundled().unwrap();
+        compatibility
+            .providers
+            .get_mut("demo")
+            .unwrap()
+            .supported_openai_endpoints
+            .retain(|endpoint| *endpoint != OpenAiEndpoint::Embeddings);
+        let client = ConfidentialInference::builder()
+            .with_demo_provider()
+            .compatibility_matrix(compatibility)
+            .policy(VerificationPolicy::require_attested_e2ee())
+            .build()
+            .await
+            .unwrap();
+        let error = client
+            .embeddings()
+            .model("gpt-oss-120b")
+            .input("no adapter endpoint")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::RouteSelectionFailed {
+                purpose: "embeddings",
+                ..
+            }
+        ));
+        assert_eq!(error.dispatch_outcome(), DispatchOutcome::NotDispatched);
     }
 
     #[tokio::test]
@@ -5737,11 +6729,7 @@ mod tests {
             .all(|record| !record.streaming_allowed));
         assert!(verdict_records
             .iter()
-            .all(|record| record.route_execution_status == "executable_fixture"));
-        assert!(verdict_records.iter().all(|record| record.chat_executable));
-        assert!(verdict_records
-            .iter()
-            .all(|record| record.known_unsupported_modes == vec!["streaming".to_owned()]));
+            .all(|record| record.known_unsupported_modes == ["streaming"]));
         assert!(verdict_records
             .iter()
             .all(|record| record.reference_values_source == "bundled"));
@@ -5897,7 +6885,13 @@ mod tests {
         assert!(!trace_text.contains(prompt));
         assert!(!trace_text.contains(api_key));
         assert!(!trace_text.contains("demo confidential response"));
-        assert!(!trace_text.contains(response.response.choices[0].message.content.as_str()));
+        assert!(!trace_text.contains(
+            &response.response.choices[0]
+                .message
+                .content
+                .text()
+                .expect("response text")
+        ));
     }
 
     #[test]
@@ -5988,6 +6982,33 @@ mod tests {
             Some(&CheckResult::Verified)
         );
         assert_eq!(audit.records.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn responses_lifecycle_on_demo_route_fails_closed_with_dispatch_classification() {
+        let client = ConfidentialInference::builder()
+            .with_demo_provider()
+            .policy(VerificationPolicy::require_attested_e2ee())
+            .build()
+            .await
+            .unwrap();
+        let error = client
+            .manage_response(
+                "demo",
+                ResponseManageRequest {
+                    op: ResponseManageOp::Retrieve,
+                    provider_response_id: "resp_demo".into(),
+                    params: serde_json::json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.dispatch_outcome(),
+            DispatchOutcome::Unknown,
+            "{error:?}"
+        );
+        assert_eq!(error.code(), "provider_response_manage_failed");
     }
 
     #[tokio::test]
@@ -6321,7 +7342,7 @@ mod tests {
             .iter()
             .find(|route| route.provider == "demo")
             .unwrap();
-        assert_eq!(demo_route.known_unsupported_modes, vec!["streaming"]);
+        assert!(!demo_route.streaming_allowed);
         let venice_route = confidential_models[0]
             .routes
             .iter()
@@ -6475,7 +7496,11 @@ mod tests {
 
         assert!(matches!(
             error,
-            ClientError::Provider(ProviderError::Unavailable(_))
+            ClientError::ProviderChat {
+                error: ProviderError::Unavailable(_),
+                outcome: DispatchOutcome::NotDispatched,
+                ..
+            }
         ));
         assert_eq!(listed_evidence_fetches.load(Ordering::SeqCst), 1);
         assert_eq!(listed_chat_attempts.load(Ordering::SeqCst), 1);
@@ -6617,10 +7642,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_send_does_not_fail_over_on_non_retryable_provider_error() {
-        for failure in [
-            ScriptedChatFailure::HttpStatus(401),
-            ScriptedChatFailure::Adapter,
+    async fn chat_send_does_not_fail_over_when_provider_may_have_processed_request() {
+        for (failure, expected_outcome) in [
+            (
+                ScriptedChatFailure::HttpStatus(401),
+                DispatchOutcome::Rejected { status: 401 },
+            ),
+            (
+                ScriptedChatFailure::HttpStatus(500),
+                DispatchOutcome::Rejected { status: 500 },
+            ),
+            (
+                ScriptedChatFailure::HttpStatus(502),
+                DispatchOutcome::Rejected { status: 502 },
+            ),
+            (
+                ScriptedChatFailure::HttpStatus(504),
+                DispatchOutcome::Rejected { status: 504 },
+            ),
+            (ScriptedChatFailure::Transport, DispatchOutcome::Unknown),
+            (ScriptedChatFailure::Adapter, DispatchOutcome::Unknown),
         ] {
             let (client, _, primary_chat_attempts, fallback_fetches, fallback_chat_attempts) =
                 scripted_failover_client(Some(failure), None);
@@ -6633,11 +7674,54 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            assert!(matches!(error, ClientError::Provider(_)));
+            assert!(matches!(error, ClientError::ProviderChat { .. }));
+            assert_eq!(error.dispatch_outcome(), expected_outcome);
+            assert_eq!(error.code(), "provider_chat_failed");
             assert_eq!(primary_chat_attempts.load(Ordering::SeqCst), 1);
             assert_eq!(fallback_fetches.load(Ordering::SeqCst), 0);
             assert_eq!(fallback_chat_attempts.load(Ordering::SeqCst), 0);
         }
+    }
+    #[tokio::test]
+    async fn embeddings_send_does_not_fail_over_on_http_500_or_transport_failure() {
+        for failure in [
+            ScriptedChatFailure::HttpStatus(500),
+            ScriptedChatFailure::Transport,
+        ] {
+            let (client, _, primary_attempts, fallback_fetches, fallback_attempts) =
+                scripted_failover_client(Some(failure), None);
+            let error = client
+                .embeddings()
+                .model("gpt-oss-120b")
+                .input("do not replay")
+                .send()
+                .await
+                .unwrap_err();
+            assert!(matches!(error, ClientError::ProviderEmbeddings { .. }));
+            assert_eq!(primary_attempts.load(Ordering::SeqCst), 1);
+            assert_eq!(fallback_fetches.load(Ordering::SeqCst), 0);
+            assert_eq!(fallback_attempts.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_dispatch_errors_report_not_dispatched() {
+        let client = ConfidentialInference::builder()
+            .with_demo_provider()
+            .build()
+            .await
+            .unwrap();
+
+        let error = client
+            .chat_completions()
+            .model("no-such-model")
+            .message(ChatMessage::user("route me"))
+            .send()
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.dispatch_outcome(), DispatchOutcome::NotDispatched);
+        assert_eq!(error.provider_http_status(), None);
     }
 
     #[tokio::test]
@@ -6843,6 +7927,41 @@ mod tests {
     }
 
     #[test]
+    fn live_tinfoil_routes_need_tdx_and_snp_collateral() {
+        let none = LiveCollateralNeeds {
+            tdx: false,
+            snp_vcek: false,
+        };
+        // The offline tinfoil-fixture route shares the live evidence family but
+        // must not pull in network collateral resolvers.
+        let mut registry = ProviderRegistry::phase2_fixtures().unwrap();
+        assert_eq!(LiveCollateralNeeds::for_registry(&registry), none);
+
+        let set_tinfoil_routes = |registry: &mut ProviderRegistry, status: RouteLifecycle| {
+            for route in registry
+                .models
+                .values_mut()
+                .flat_map(|model| model.routes.iter_mut())
+                .filter(|route| route.evidence_family == "tinfoil_hw_verified_tls")
+            {
+                route.provider = "tinfoil".into();
+                route.route_status = status.clone();
+            }
+        };
+        set_tinfoil_routes(&mut registry, RouteLifecycle::Active);
+        assert_eq!(
+            LiveCollateralNeeds::for_registry(&registry),
+            LiveCollateralNeeds {
+                tdx: true,
+                snp_vcek: true,
+            }
+        );
+
+        set_tinfoil_routes(&mut registry, RouteLifecycle::VerificationOnly);
+        assert_eq!(LiveCollateralNeeds::for_registry(&registry), none);
+    }
+
+    #[test]
     fn client_api_key_debug_redacts_secret_value() {
         let api_key = ClientApiKey::from("sk-client-debug-secret".to_owned());
 
@@ -6882,6 +8001,92 @@ mod tests {
         assert!(events[1].cache_hit);
     }
 
+    // Regression: the SEV-SNP dispatch rewrite dropped raw-TDX extraction for
+    // non-Tinfoil evidence, so live Chutes/NEAR quotes reached the fail-closed
+    // default verifier ("raw TDX quote verification is not configured").
+    #[test]
+    fn raw_tdx_quote_bytes_covers_live_evidence_schemas() {
+        let quote = vec![7_u8; 32];
+        let chutes = serde_json::to_vec(&ChutesLiveEvidence {
+            schema: ChutesLiveEvidence::SCHEMA.into(),
+            provider: "chutes".into(),
+            route_id: "chutes:model:live".into(),
+            evidence_family: "chutes_live_e2ee".into(),
+            requested_model: "model".into(),
+            policy_digest: "sha256:test".into(),
+            request_nonce: "nonce".into(),
+            evidence_endpoint: "https://example.test".into(),
+            chute_id: "chute".into(),
+            instance_id: "instance".into(),
+            e2e_public_key_base64: String::new(),
+            quote_base64: base64::engine::general_purpose::STANDARD.encode(&quote),
+            certificate_der_base64: String::new(),
+            gpu_attestation: None,
+        })
+        .unwrap();
+        assert_eq!(raw_tdx_quote_bytes(&chutes).unwrap(), Some(quote.clone()));
+
+        let near_body = serde_json::to_vec(&serde_json::json!({
+            "intel_quote": lower_hex(&quote),
+        }))
+        .unwrap();
+        let near = serde_json::to_vec(&NearLiveEvidence {
+            schema: NearLiveEvidence::SCHEMA.into(),
+            provider: "near".into(),
+            route_id: "near:model:live".into(),
+            evidence_family: "near_hw_verified_tls".into(),
+            requested_model: "model".into(),
+            policy_digest: "sha256:test".into(),
+            request_nonce: "nonce".into(),
+            evidence_endpoint: "https://example.test".into(),
+            live_tls_spki_sha256: String::new(),
+            live_tls_leaf_certificate_der_base64: String::new(),
+            raw_attestation_body_base64: base64::engine::general_purpose::STANDARD
+                .encode(&near_body),
+            gpu_attestation: None,
+        })
+        .unwrap();
+        assert_eq!(raw_tdx_quote_bytes(&near).unwrap(), Some(quote));
+
+        let unknown = serde_json::to_vec(&serde_json::json!({"schema": "other.v1"})).unwrap();
+        assert_eq!(raw_tdx_quote_bytes(&unknown).unwrap(), None);
+    }
+
+    // Regression: per-route freshness made live Chutes routes send a nonce,
+    // but the expected-nonce transform only matched the fixture family name,
+    // so every live chat failed nonce binding.
+    #[tokio::test]
+    async fn expected_freshness_nonce_transforms_live_chutes_family() {
+        let client = ConfidentialInference::builder()
+            .with_demo_provider()
+            .build()
+            .await
+            .unwrap();
+        let request = EvidenceRequest {
+            requested_model: "model".into(),
+            policy_digest: "sha256:test".into(),
+            nonce: Some("0123456789abcdef".into()),
+        };
+        let expected = chutes_provider_nonce("0123456789abcdef");
+        for family in ["chutes_e2ee", "chutes_live_e2ee"] {
+            let mut route = DemoProvider::valid().routes().remove(0);
+            route.evidence_family = family.into();
+            route.freshness_class = confidential_inference_attestation::FreshnessClass::PerRequest;
+            assert_eq!(
+                client.expected_freshness_nonce_for(&route, &request),
+                Some(expected.clone()),
+                "family {family}"
+            );
+        }
+        let mut route = DemoProvider::valid().routes().remove(0);
+        route.evidence_family = "demo_e2ee".into();
+        route.freshness_class = confidential_inference_attestation::FreshnessClass::PerRequest;
+        assert_eq!(
+            client.expected_freshness_nonce_for(&route, &request),
+            Some("0123456789abcdef".into())
+        );
+    }
+
     #[tokio::test]
     async fn chat_revalidates_once_after_provider_key_rotation() {
         let audit = Arc::new(MemoryVerdictStore::default());
@@ -6918,7 +8123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_and_non_streaming_chat_use_distinct_verification_cache_keys() {
+    async fn e2ee_chat_streaming_fails_closed_without_provider_dispatch() {
         let fetches = Arc::new(AtomicUsize::new(0));
         let client = ConfidentialInference::builder()
             .with_demo_provider()
@@ -6931,45 +8136,30 @@ mod tests {
             .await
             .unwrap();
 
-        client
+        match client
             .chat_completions()
             .model("gpt-oss-120b")
-            .message(ChatMessage::user("non-streaming cache entry"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(fetches.load(Ordering::SeqCst), 1);
-
-        client
-            .chat_completions()
-            .model("gpt-oss-120b")
-            .message(ChatMessage::user("streaming cache entry"))
+            .message(ChatMessage::user("E2EE streaming is unsupported"))
             .stream(true)
-            .send()
+            .streaming()
             .await
-            .unwrap();
-        assert_eq!(fetches.load(Ordering::SeqCst), 2);
-
         {
-            let cache = client.inner.verdict_cache.lock().unwrap();
-            let request_modes = cache.keys().map(|key| key.request_mode).collect::<Vec<_>>();
-            assert_eq!(request_modes.len(), 2);
-            assert!(request_modes.contains(&"non_streaming_chat"));
-            assert!(request_modes.contains(&"streaming_chat"));
-            assert!(!request_modes.contains(&"verify_only"));
+            Err(ClientError::StreamingNotSupported { .. }) => {}
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("E2EE streaming should fail closed"),
         }
-
-        client
+        assert_eq!(fetches.load(Ordering::SeqCst), 0);
+        let error = client
             .chat_completions()
             .model("gpt-oss-120b")
-            .message(ChatMessage::user("reuse streaming cache entry"))
+            .message(ChatMessage::user("E2EE streaming is unsupported"))
             .stream(true)
             .send()
             .await
-            .unwrap();
-        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+            .expect_err("E2EE streaming should fail closed");
+        assert!(matches!(error, ClientError::StreamingNotSupported { .. }));
+        assert_eq!(fetches.load(Ordering::SeqCst), 0);
     }
-
     #[test]
     fn verification_cache_key_includes_route_encryption_modes() {
         let route_definition = DemoProvider::valid().routes().remove(0);
@@ -7197,6 +8387,8 @@ mod tests {
         assert!(response.response.choices[0]
             .message
             .content
+            .text()
+            .unwrap_or_default()
             .contains("auto registered encrypted provider"));
         {
             let raw_chat_requests = raw_chat_requests.lock().unwrap();
@@ -7288,6 +8480,8 @@ mod tests {
         assert!(response.response.choices[0]
             .message
             .content
+            .text()
+            .unwrap_or_default()
             .contains("direct Phala encrypted provider"));
         {
             let raw_chat_requests = raw_chat_requests.lock().unwrap();
@@ -7387,6 +8581,47 @@ mod tests {
         );
         assert_eq!(
             verified.verdict().check("per_request_freshness"),
+            Some(&CheckResult::Verified)
+        );
+        server.await.unwrap().unwrap();
+    }
+
+    /// A per-request route must get a fresh, verified nonce even when the
+    /// client-wide policy only asks for per-session freshness (regression:
+    /// live Chutes routes failed with "requires a per-request 32-byte nonce").
+    #[tokio::test]
+    async fn per_request_route_requires_nonce_under_per_session_policy() {
+        let (mut route, server) = spawn_chutes_e2ee_http_server().await;
+        route.freshness_class = FreshnessClass::PerRequest;
+        let registry = signed_chutes_http_registry(route.clone());
+        let reference_values = signed_chutes_http_reference_values(&route);
+        let mut policy = VerificationPolicy::require_attested_e2ee();
+        policy.freshness = FreshnessPolicy::PerSession;
+        policy.hardware.cpu = CpuTeeRequirement::NotRequired;
+        policy.hardware.gpu = GpuTeeRequirement::one_of(vec![GpuTeeKind::NvidiaCc]);
+        policy.model_binding_requirement = ModelBindingRequirement::Required;
+        policy.provenance.workload_image = true;
+        policy.provenance.model_artifacts = true;
+        let client = ConfidentialInference::builder()
+            .registry(registry)
+            .reference_values(reference_values)
+            .trusted_artifact_signing_key(custom_trusted_signing_key())
+            .compatibility_matrix(chutes_http_compatibility(&route))
+            .api_key("redpill-http-test", "sk-redpill-http-test")
+            .gpu_attestation_verifier(StaticGpuAttestationVerifier)
+            .policy(policy)
+            .build()
+            .await
+            .unwrap();
+
+        let verified = client
+            .verify_route("redpill-http-test", "gpt-oss-120b")
+            .await
+            .unwrap();
+
+        assert_eq!(verified.verdict().status, VerificationStatus::Verified);
+        assert_eq!(
+            verified.verdict().check("nonce_binding"),
             Some(&CheckResult::Verified)
         );
         server.await.unwrap().unwrap();
@@ -8313,10 +9548,14 @@ mod tests {
         assert!(first.response.choices[0]
             .message
             .content
+            .text()
+            .unwrap_or_default()
             .contains("first concurrent prompt"));
         assert!(second.response.choices[0]
             .message
             .content
+            .text()
+            .unwrap_or_default()
             .contains("second concurrent prompt"));
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
@@ -8983,5 +10222,17 @@ mod tests {
             Ok(_) => panic!("invalid registry unexpectedly built a client"),
             Err(other) => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn model_binding_policy_marks_snp_router_unsupported_unless_required() {
+        assert!(route_model_binding_satisfies_policy(
+            &ModelBindingSupport::Unsupported,
+            &ModelBindingRequirement::IfProviderSupports,
+        ));
+        assert!(!route_model_binding_satisfies_policy(
+            &ModelBindingSupport::Unsupported,
+            &ModelBindingRequirement::Required,
+        ));
     }
 }
