@@ -3,40 +3,127 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    Text(String),
+    TextArray(Vec<String>),
+    Tokens(Vec<u32>),
+    TokenArrays(Vec<Vec<u32>>),
+    Parts(Vec<Value>),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EmbeddingsRequest {
+    pub model: String,
+    pub input: EmbeddingInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding_format: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl EmbeddingsRequest {
+    pub fn with_model(&self, model: impl Into<String>) -> Self {
+        let mut request = self.clone();
+        request.model = model.into();
+        request
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EmbeddingsResponse {
+    pub object: String,
+    pub data: Vec<EmbeddingsData>,
+    pub model: String,
+    pub usage: EmbeddingsUsage,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EmbeddingsData {
+    pub object: String,
+    pub embedding: Vec<f64>,
+    pub index: u32,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingsUsage {
+    pub prompt_tokens: u32,
+    pub total_tokens: u32,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatRole {
     System,
+    Developer,
     User,
     Assistant,
     Tool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatContent {
+    Text(String),
+    Parts(Vec<Value>),
+    Null,
+}
+
+impl ChatContent {
+    pub fn text(&self) -> Option<String> {
+        match self {
+            Self::Text(text) => Some(text.clone()),
+            Self::Parts(parts) => Some(
+                parts
+                    .iter()
+                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect(),
+            ),
+            Self::Null => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
-    pub content: String,
+    pub content: ChatContent,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::System,
-            content: content.into(),
+            content: ChatContent::Text(content.into()),
+            extra: BTreeMap::new(),
         }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::User,
-            content: content.into(),
+            content: ChatContent::Text(content.into()),
+            extra: BTreeMap::new(),
         }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::Assistant,
-            content: content.into(),
+            content: ChatContent::Text(content.into()),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -51,6 +138,8 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl ChatCompletionRequest {
@@ -61,6 +150,7 @@ impl ChatCompletionRequest {
             stream: None,
             max_tokens: None,
             temperature: None,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -74,12 +164,12 @@ impl ChatCompletionRequest {
         request
     }
 
-    pub fn last_user_message(&self) -> Option<&str> {
+    pub fn last_user_message(&self) -> Option<String> {
         self.messages
             .iter()
             .rev()
             .find(|message| message.role == ChatRole::User)
-            .map(|message| message.content.as_str())
+            .and_then(|message| message.content.text())
     }
 }
 
@@ -92,13 +182,17 @@ pub struct ChatCompletionResponse {
     pub choices: Vec<ChatChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatChoice {
     pub index: u32,
     pub message: ChatMessage,
-    pub finish_reason: String,
+    pub finish_reason: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +200,43 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One OpenAI chat-completion SSE data payload. `[DONE]` is the SSE protocol
+/// sentinel and is intentionally not represented as JSON.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatCompletionChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatCompletionChunkChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatCompletionChunkChoice {
+    pub index: u32,
+    pub delta: ChatCompletionChunkDelta,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChatCompletionChunkDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<ChatRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,9 +333,58 @@ impl ResponseCreateRequest {
             stream: self.stream,
             max_tokens: self.max_output_tokens,
             temperature: self.temperature,
+            extra: BTreeMap::new(),
         })
     }
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseRetrieveRequest {
+    #[serde(flatten)]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseListInputItemsRequest {
+    #[serde(flatten)]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseCancelRequest {
+    #[serde(flatten)]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseDeleteRequest {
+    #[serde(flatten)]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseInputTokensRequest {
+    #[serde(flatten)]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseCompactRequest {
+    #[serde(flatten)]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResponseRetrieveResponse {
+    #[serde(flatten)]
+    pub data: BTreeMap<String, serde_json::Value>,
+}
+
+pub type ResponseListInputItemsResponse = ResponseRetrieveResponse;
+pub type ResponseCancelResponse = ResponseRetrieveResponse;
+pub type ResponseDeleteResponse = ResponseRetrieveResponse;
+pub type ResponseInputTokensResponse = ResponseRetrieveResponse;
+pub type ResponseCompactResponse = ResponseRetrieveResponse;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -244,7 +424,11 @@ impl ResponseInputItem {
             ResponseInputRole::User => ChatRole::User,
             ResponseInputRole::Assistant => ChatRole::Assistant,
         };
-        Ok(ChatMessage { role, content })
+        Ok(ChatMessage {
+            role,
+            content: ChatContent::Text(content),
+            extra: BTreeMap::new(),
+        })
     }
 }
 
@@ -359,15 +543,15 @@ impl ResponseObject {
             .map(|choice| {
                 ResponseOutputItem::message(
                     format!("msg_{}_{}", response.id, choice.index),
-                    choice.message.content.clone(),
-                    choice.finish_reason.clone(),
+                    choice.message.content.text().unwrap_or_default(),
+                    choice.finish_reason.clone().unwrap_or_default(),
                 )
             })
             .collect::<Vec<_>>();
         let output_text = response
             .choices
             .first()
-            .map(|choice| choice.message.content.clone())
+            .map(|choice| choice.message.content.text().unwrap_or_default())
             .unwrap_or_default();
         let mut metadata = BTreeMap::new();
         metadata.insert(
@@ -387,6 +571,44 @@ impl ResponseObject {
             usage: response.usage,
             metadata,
         }
+    }
+}
+
+#[cfg(test)]
+mod responses_manage_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_request_and_response_round_trip_unknown_fields() {
+        let request = r#"{"vendor_option":{"x":1}}"#;
+        macro_rules! assert_request {
+            ($ty:ty) => {{
+                let decoded: $ty = serde_json::from_str(request).unwrap();
+                let encoded = serde_json::to_value(decoded).unwrap();
+                assert_eq!(encoded["vendor_option"]["x"], 1);
+            }};
+        }
+        assert_request!(ResponseRetrieveRequest);
+        assert_request!(ResponseListInputItemsRequest);
+        assert_request!(ResponseCancelRequest);
+        assert_request!(ResponseDeleteRequest);
+        assert_request!(ResponseInputTokensRequest);
+        assert_request!(ResponseCompactRequest);
+
+        let response = r#"{"id":"resp_1","vendor_result":[1,2]}"#;
+        macro_rules! assert_response {
+            ($ty:ty) => {{
+                let decoded: $ty = serde_json::from_str(response).unwrap();
+                let encoded = serde_json::to_value(decoded).unwrap();
+                assert_eq!(encoded["vendor_result"][1], 2);
+            }};
+        }
+        assert_response!(ResponseRetrieveResponse);
+        assert_response!(ResponseListInputItemsResponse);
+        assert_response!(ResponseCancelResponse);
+        assert_response!(ResponseDeleteResponse);
+        assert_response!(ResponseInputTokensResponse);
+        assert_response!(ResponseCompactResponse);
     }
 }
 
@@ -438,6 +660,17 @@ impl ResponseOutputContent {
 mod tests {
     use super::*;
 
+    #[test]
+    fn chat_completion_chunk_preserves_unknown_fields_and_null_finish_reason() {
+        let chunk: ChatCompletionChunk = serde_json::from_str(
+            r#"{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi","vendor_delta":{"x":1}},"finish_reason":null,"vendor_choice":true}],"vendor_top":"kept"}"#,
+        )
+        .unwrap();
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+        assert_eq!(chunk.choices[0].finish_reason, None);
+        assert_eq!(chunk.choices[0].delta.extra["vendor_delta"]["x"], 1);
+        assert_eq!(chunk.extra["vendor_top"], "kept");
+    }
     #[test]
     fn responses_text_input_converts_to_chat_request() {
         let request = ResponseCreateRequest::text("gpt-oss-120b", "hello");
@@ -518,13 +751,16 @@ mod tests {
             choices: vec![ChatChoice {
                 index: 0,
                 message: ChatMessage::assistant("ok"),
-                finish_reason: "stop".into(),
+                finish_reason: Some("stop".into()),
+                extra: BTreeMap::new(),
             }],
             usage: Some(Usage {
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 total_tokens: 2,
+                extra: BTreeMap::new(),
             }),
+            extra: BTreeMap::new(),
         };
 
         let response = ResponseObject::from_chat_completion(response);
@@ -537,5 +773,114 @@ mod tests {
                 .get("confidential_inference_compatibility"),
             Some(&"responses_to_chat_shim".to_owned())
         );
+    }
+    #[test]
+    fn chat_completion_roundtrips_lossless_request_and_response_fields() {
+        let request = serde_json::json!({
+            "model": "gpt",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe "},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+                ],
+                "name": "caller"
+            }],
+            "tools": [{"type": "function", "function": {"name": "lookup"}}],
+            "tool_choice": "auto",
+            "response_format": {"type": "json_object"},
+            "stop": ["END"],
+            "seed": 7
+        });
+        let parsed: ChatCompletionRequest = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(parsed.last_user_message().as_deref(), Some("describe "));
+        assert_eq!(serde_json::to_value(parsed).unwrap(), request);
+
+        let response = serde_json::json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup"}}]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 1},
+                "completion_tokens_details": {"reasoning_tokens": 2}
+            }
+        });
+        let parsed: ChatCompletionResponse = serde_json::from_value(response.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), response);
+    }
+
+    #[test]
+    fn chat_completion_accepts_null_response_content_and_finish_reason() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": null},
+                "finish_reason": null
+            }]
+        });
+        let parsed: ChatCompletionResponse = serde_json::from_value(response.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), response);
+    }
+
+    #[test]
+    fn chat_message_rejects_unknown_roles() {
+        assert!(serde_json::from_value::<ChatMessage>(serde_json::json!({
+            "role": "systematic",
+            "content": "not a supported role"
+        }))
+        .is_err());
+        assert_eq!(
+            serde_json::from_value::<ChatMessage>(serde_json::json!({
+                "role": "developer",
+                "content": "system instruction"
+            }))
+            .unwrap()
+            .role,
+            ChatRole::Developer
+        );
+    }
+
+    #[test]
+    fn embeddings_preserve_input_shapes_extras_and_f64_vectors() {
+        let inputs = [
+            serde_json::json!({"model":"m","input":"text","custom":true}),
+            serde_json::json!({"model":"m","input":["one","two"]}),
+            serde_json::json!({"model":"m","input":[1,2,3]}),
+            serde_json::json!({"model":"m","input":[[1,2],[3,4]]}),
+            serde_json::json!({"model":"m","input":[{"type":"text","text":"part"}]}),
+        ];
+        for json in inputs {
+            let request: EmbeddingsRequest = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(request).unwrap(), json);
+        }
+        let json = serde_json::json!({
+            "object":"list",
+            "data":[{"object":"embedding","index":0,"embedding":[0.125,0.5],"vendor_field":"x"}],
+            "model":"m",
+            "usage":{"prompt_tokens":2,"total_tokens":2,"vendor_usage":7},
+            "vendor_response":"y"
+        });
+        let response: EmbeddingsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(response.data[0].embedding, vec![0.125_f64, 0.5]);
+        assert_eq!(response.data[0].extra["vendor_field"], "x");
+        assert_eq!(response.usage.extra["vendor_usage"], 7);
+        assert_eq!(response.extra["vendor_response"], "y");
     }
 }
