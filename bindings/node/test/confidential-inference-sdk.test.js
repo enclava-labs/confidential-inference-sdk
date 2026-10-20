@@ -10,6 +10,8 @@ const {
   Stream,
   ConfidentialInferenceError,
   status: ffiStatus,
+  _validateAbiVersion,
+  CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION,
 } = require('../index.js');
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -25,6 +27,15 @@ test('status reports blocking and stream capabilities', () => {
   const status = ffiStatus();
   assert.equal(status.blocking_helpers_available, true);
   assert.equal(status.stream_handle_abi_available, true);
+});
+
+test('ABI version validation rejects mismatches', () => {
+  assert.throws(
+    () => _validateAbiVersion(2),
+    (error) => error instanceof ConfidentialInferenceError && error.error.code === 'abi_version_mismatch'
+  );
+  assert.throws(() => _validateAbiVersion(undefined), ConfidentialInferenceError);
+  assert.doesNotThrow(() => _validateAbiVersion(CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION));
 });
 
 test('chat returns a verified confidential response', async () => {
@@ -47,6 +58,36 @@ test('chat returns a verified confidential response', async () => {
   }
 });
 
+test('embeddings returns a verified confidential embedding response', async () => {
+  const client = new Client();
+  try {
+    const response = await client.embeddings({
+      model: 'gpt-oss-120b',
+      input: 'node embeddings binding path',
+    }, 5_000);
+    assert.equal(response.provider, 'demo');
+    assert.equal(response.verdict.status, 'verified');
+    assert.ok(Array.isArray(response.response.data));
+    assert.ok(response.response.data.length > 0);
+  } finally {
+    client.close();
+  }
+});
+
+test('embedding operation failures preserve dispatch classification', async () => {
+  const client = new Client();
+  try {
+    await client.embeddings({ model: 'missing-model', input: 'test' });
+    assert.fail('expected an operation failure');
+  } catch (error) {
+    assert.ok(error instanceof ConfidentialInferenceError);
+    assert.equal(error.status, 7);
+    assert.equal(error.dispatch, 'not_dispatched');
+  } finally {
+    client.close();
+  }
+});
+
 test('verify returns a route verdict', async () => {
   const client = new Client();
   try {
@@ -64,6 +105,27 @@ test('response returns the Responses shim object', async () => {
     const response = await client.response({ model: 'gpt-oss-120b', input: 'responses path' }, 5_000);
     assert.equal(response.provider, 'demo');
     assert.equal(response.response.object, 'response');
+  } finally {
+    client.close();
+  }
+});
+test('responseManage preserves structured operation errors', async () => {
+  const client = new Client();
+  try {
+    await assert.rejects(
+      client.responseManage({
+        op: 'retrieve',
+        provider: 'demo',
+        provider_response_id: 'resp_demo',
+        params: {},
+      }, 5_000),
+      (error) => {
+        assert.ok(error instanceof ConfidentialInferenceError);
+        assert.ok(error.error.code);
+        assert.ok(error.dispatch);
+        return true;
+      }
+    );
   } finally {
     client.close();
   }
@@ -101,10 +163,11 @@ test('stream fails closed for a non-streaming route', async () => {
     for await (const event of client.stream(chatRequest('stream path'), { timeoutMs: 5_000 })) {
       events.push(event);
     }
-    // The demo route does not support streaming; the SDK fails closed with a
-    // structured error event instead of emitting an unverified stream.
+    assert.equal(events.length, 1);
     assert.equal(events[0].type, 'error');
     assert.equal(events[0].status, 'failed');
+    assert.equal(events[0].error.code, 'streaming_not_supported');
+    assert.equal(events[0].error.dispatch, 'not_dispatched');
   } finally {
     client.close();
   }

@@ -28,23 +28,42 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-// FFI status codes from confidential_inference_ffi.h.
+// FFI ABI version and status codes from confidential_inference_ffi.h.
 const (
-	StatusOK              = 0
-	StatusInvalidArgument = 1
-	StatusPanic           = 2
-	StatusBusy            = 3
-	StatusPending         = 4
-	StatusUnsupported     = 5
-	StatusInternal        = 6
+	CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION = 1
+	StatusOK                               = 0
+	StatusInvalidArgument                  = 1
+	StatusPanic                            = 2
+	StatusBusy                             = 3
+	StatusPending                          = 4
+	StatusUnsupported                      = 5
+	StatusInternal                         = 6
+	// StatusOperationFailed reports a failed operation; Error.Dispatch says whether
+	// the provider may have processed it.
+	StatusOperationFailed = 7
+)
+
+// Dispatch values reported on operation failures.
+const (
+	// DispatchNotDispatched: the request provably never reached a provider.
+	DispatchNotDispatched = "not_dispatched"
+	// DispatchRejected: the provider answered with a non-success HTTPStatus.
+	DispatchRejected = "rejected"
+	// DispatchUnknown: the provider may have processed the request (for
+	// example a transport failure after sending, or a timeout). Treat as
+	// possibly executed: do not retry elsewhere and do not account as free.
+	DispatchUnknown = "unknown"
 )
 
 // Error is a failure reported by the FFI. Status is one of the Status*
-// constants; Code and Message come from the FFI error envelope.
+// constants; Code and Message come from the FFI error envelope. Dispatch and
+// HTTPStatus are set for operation failures and timeouts.
 type Error struct {
-	Status  int
-	Code    string
-	Message string
+	Status     int
+	Code       string
+	Message    string
+	Dispatch   string
+	HTTPStatus int
 }
 
 func (e *Error) Error() string { return e.Code + ": " + e.Message }
@@ -75,7 +94,9 @@ type native struct {
 	sdkNew                  func(configJSON unsafe.Pointer, outClient *unsafe.Pointer) int32
 	sdkFree                 func(client unsafe.Pointer) int32
 	chatBlocking            func(client unsafe.Pointer, requestJSON unsafe.Pointer, timeoutMS uint64, out *unsafe.Pointer) int32
+	embeddingsBlocking      func(client unsafe.Pointer, requestJSON unsafe.Pointer, timeoutMS uint64, out *unsafe.Pointer) int32
 	responseBlocking        func(client unsafe.Pointer, requestJSON unsafe.Pointer, timeoutMS uint64, out *unsafe.Pointer) int32
+	responseManageBlocking  func(client unsafe.Pointer, requestJSON unsafe.Pointer, timeoutMS uint64, out *unsafe.Pointer) int32
 	verifyBlocking          func(client unsafe.Pointer, requestJSON unsafe.Pointer, timeoutMS uint64, out *unsafe.Pointer) int32
 	modelsBlocking          func(client unsafe.Pointer, out *unsafe.Pointer) int32
 	confidentialityBlocking func(client unsafe.Pointer, out *unsafe.Pointer) int32
@@ -107,7 +128,9 @@ func openNative(opts []Option) (*native, error) {
 		"confidential_inference_sdk_new":                         &n.sdkNew,
 		"confidential_inference_sdk_free":                        &n.sdkFree,
 		"confidential_inference_chat_blocking":                   &n.chatBlocking,
+		"confidential_inference_embeddings_blocking":             &n.embeddingsBlocking,
 		"confidential_inference_response_blocking":               &n.responseBlocking,
+		"confidential_inference_response_manage_blocking":        &n.responseManageBlocking,
 		"confidential_inference_verify_blocking":                 &n.verifyBlocking,
 		"confidential_inference_models_blocking":                 &n.modelsBlocking,
 		"confidential_inference_confidentiality_blocking":        &n.confidentialityBlocking,
@@ -127,6 +150,15 @@ func openNative(opts []Option) (*native, error) {
 			return nil, &Error{Status: StatusInvalidArgument, Code: "library_load_failed", Message: fmt.Sprintf("%s: %v", name, err)}
 		}
 		purego.RegisterFunc(target, symbol)
+	}
+	status, err := n.statusObject()
+	if err != nil {
+		closeLibrary(n.handle)
+		return nil, err
+	}
+	if err := validateABIVersion(status); err != nil {
+		closeLibrary(n.handle)
+		return nil, err
 	}
 	return n, nil
 }
@@ -163,8 +195,14 @@ func (n *native) takeJSON(ptr unsafe.Pointer, out any) error {
 
 // ffiErrorDetail is the error object inside the FFI error envelope.
 type ffiErrorDetail struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Dispatch   string `json:"dispatch"`
+	HTTPStatus int    `json:"http_status"`
+}
+
+func (d *ffiErrorDetail) toError(status int32) *Error {
+	return &Error{Status: int(status), Code: d.Code, Message: d.Message, Dispatch: d.Dispatch, HTTPStatus: d.HTTPStatus}
 }
 
 // statusError converts a failed FFI status into an error. If out carries the
@@ -181,11 +219,11 @@ func (n *native) statusError(status int32, out unsafe.Pointer) error {
 			Error *ffiErrorDetail `json:"error"`
 		}
 		if err := n.takeJSON(out, &envelope); err == nil && envelope.Error != nil {
-			return &Error{Status: int(status), Code: envelope.Error.Code, Message: envelope.Error.Message}
+			return envelope.Error.toError(status)
 		}
 	}
 	if detail := n.lastErrorDetail(); detail != nil {
-		return &Error{Status: int(status), Code: detail.Code, Message: detail.Message}
+		return detail.toError(status)
 	}
 	return &Error{
 		Status:  int(status),
@@ -224,6 +262,18 @@ func (n *native) statusObject() (map[string]any, error) {
 	})
 }
 
+func validateABIVersion(status map[string]any) error {
+	version := status["abi_version"]
+	if version != float64(CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION) {
+		return &Error{
+			Status:  StatusInvalidArgument,
+			Code:    "abi_version_mismatch",
+			Message: fmt.Sprintf("Confidential Inference FFI ABI version mismatch: binding expects %d, library reports %v", CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION, version),
+		}
+	}
+	return nil
+}
+
 // Status reports the FFI capability JSON without creating a client.
 func Status(opts ...Option) (map[string]any, error) {
 	n, err := openNative(opts)
@@ -243,9 +293,46 @@ type Client struct {
 	inFlight int
 }
 
+// APIKeyConfig selects an environment variable or explicitly allowed inline key.
+type APIKeyConfig struct {
+	Env    string `json:"env,omitempty"`
+	Inline string `json:"inline,omitempty"`
+}
+
+// Config mirrors the FFI ClientConfig schema. Envelopes and routing are raw
+// JSON to preserve the SDK's evolving signed-artifact schema.
+type Config struct {
+	DemoProvider              *bool                   `json:"demo_provider,omitempty"`
+	AllowInlineAPIKeys        bool                    `json:"allow_inline_api_keys,omitempty"`
+	APIKeys                   map[string]APIKeyConfig `json:"api_keys,omitempty"`
+	Routing                   json.RawMessage         `json:"routing,omitempty"`
+	TrustedEd25519SigningKeys []TrustedSigningKey     `json:"trusted_ed25519_signing_keys,omitempty"`
+	CompatibilityMatrix       json.RawMessage         `json:"compatibility_matrix,omitempty"`
+	Registry                  json.RawMessage         `json:"registry,omitempty"`
+	ReferenceValues           json.RawMessage         `json:"reference_values,omitempty"`
+	// Policy is the operator's VerificationPolicy JSON; enforce-mode only and
+	// rejected with the demo provider.
+	Policy json.RawMessage `json:"policy,omitempty"`
+}
+
+// TrustedSigningKey is an operator-controlled Ed25519 public trust root.
+type TrustedSigningKey struct {
+	Signer             string `json:"signer"`
+	KeyID              string `json:"key_id"`
+	PublicKeyBase64URL string `json:"public_key_base64url"`
+}
+
+// NewConfiguredClient marshals typed configuration to the exact FFI schema.
+func NewConfiguredClient(config Config, opts ...Option) (*Client, error) {
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return nil, localError("invalid_config_json", err.Error())
+	}
+	return NewClient(raw, opts...)
+}
+
 // NewClient creates a client from a JSON configuration. Pass nil for the
-// default configuration, which installs the offline demo provider. See the
-// Python and Node bindings for the configuration schema.
+// default configuration, which installs the offline demo provider.
 func NewClient(config json.RawMessage, opts ...Option) (*Client, error) {
 	n, err := openNative(opts)
 	if err != nil {
@@ -388,6 +475,11 @@ func (c *Client) Chat(request any, timeout time.Duration) (map[string]any, error
 	return c.callJSON(request, timeout, c.native.chatBlocking)
 }
 
+// Embeddings runs a blocking OpenAI-shaped embeddings request.
+func (c *Client) Embeddings(request any, timeout time.Duration) (map[string]any, error) {
+	return c.callJSON(request, timeout, c.native.embeddingsBlocking)
+}
+
 // CreateResponse runs a blocking Responses request.
 func (c *Client) CreateResponse(request any, timeout time.Duration) (map[string]any, error) {
 	return c.callJSON(request, timeout, c.native.responseBlocking)
@@ -396,6 +488,11 @@ func (c *Client) CreateResponse(request any, timeout time.Duration) (map[string]
 // Response is an alias for CreateResponse.
 func (c *Client) Response(request any, timeout time.Duration) (map[string]any, error) {
 	return c.CreateResponse(request, timeout)
+}
+
+// ResponseManage performs a Responses lifecycle operation for a provider.
+func (c *Client) ResponseManage(request any, timeout time.Duration) (map[string]any, error) {
+	return c.callJSON(request, timeout, c.native.responseManageBlocking)
 }
 
 // Verify verifies the route for provider and model and returns the verdict.

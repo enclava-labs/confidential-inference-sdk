@@ -27,7 +27,9 @@ python3 -m unittest discover -s bindings/python/tests
 
 The binding searches the workspace `target/debug` and `target/release`
 directories. Set `CONFIDENTIAL_INFERENCE_FFI_LIBRARY` to an explicit shared
-library path when embedding it elsewhere.
+library path when embedding it elsewhere. It checks the loaded library's
+reported ABI version at initialization and rejects incompatible versions.
+
 
 ## Example
 
@@ -60,11 +62,22 @@ request.
 
 ## API
 
-`Client` provides blocking and async Chat Completions, Responses, route
-verification, model discovery, and active policy / trust-artifact inspection.
-`Client.stream_async` and `Stream.events_async` expose fail-closed stream
-events as async iterators. Async methods run the blocking FFI call through
-`asyncio.to_thread` so they never block the event loop.
+`Client` provides blocking and async Chat Completions, embeddings, Responses,
+Responses lifecycle management (`response_manage`), route verification, model
+discovery, and active policy / trust-artifact inspection. `Client.stream_async`
+and `Stream.events_async` expose every native event as it arrives through async
+iterators. The demo and other non-plaintext routes that cannot stream fail
+closed with a structured error event.
+Async methods run the blocking FFI call through `asyncio.to_thread` so they
+never block the event loop.
+Embedding requests may use text or token IDs. Token IDs are encrypted with the
+request on supported E2EE routes; an adapter that cannot encrypt them may pass
+them through only on a plaintext-compatible route. Otherwise the SDK fails
+closed.
+`Client.response_manage` accepts `{op, provider, provider_response_id, params}`;
+supported operations are `retrieve`, `list_input_items`, `cancel`, `delete`,
+`input_tokens`, and `compact`.
+
 
 Rust owns every attestation/policy/registry/digest/signature decision; the
 binding only parses the JSON that crosses the ABI and applies minimal
@@ -98,6 +111,23 @@ client = Client(
 Combining `demo_provider: True` with a non-empty `trusted_ed25519_signing_keys`
 list is rejected as ambiguous. The bundled fixture keys can never verify
 remote or custom artifacts.
+
+The configuration also accepts `registry` and `reference_values`, each a
+signed envelope object matching the SDK's provider-registry and reference-
+values envelope schemas. They are REQUIRED together. `compatibility_matrix`
+accepts a signed provider-compatibility-matrix envelope object; all three
+options are only allowed with `demo_provider: False` and are verified against
+the configured trusted signing keys by Rust.
+
+```python
+client = Client(config={
+    "demo_provider": False,
+    "trusted_ed25519_signing_keys": [...],
+    "registry": {...},
+    "reference_values": {...},
+    "compatibility_matrix": {...},
+})
+```
 
 ## Credentials
 

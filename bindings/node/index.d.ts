@@ -1,8 +1,15 @@
 export type JsonObject = Record<string, unknown>;
 
+export type ClientConfig = JsonObject & {
+  registry?: JsonObject;
+  reference_values?: JsonObject;
+  compatibility_matrix?: JsonObject;
+};
+
 export type ClientOptions = {
   libraryPath?: string;
 };
+
 
 export type StreamOptions = {
   timeoutMs?: number;
@@ -14,6 +21,10 @@ export type StreamEvent = JsonObject & { type?: string };
 export class ConfidentialInferenceError extends Error {
   status: number;
   error: JsonObject;
+  /** Whether the provider may have processed the request (operation failures). */
+  dispatch?: 'not_dispatched' | 'rejected' | 'unknown';
+  /** Provider HTTP status for `rejected` operation failures. */
+  httpStatus?: number;
 }
 
 /**
@@ -25,12 +36,14 @@ export class ConfidentialInferenceError extends Error {
  * they never block the Node event loop.
  */
 export class Client {
-  constructor(config?: JsonObject | null, options?: ClientOptions | string);
+  constructor(config?: ClientConfig | null, options?: ClientOptions | string);
   status(): JsonObject;
   close(): void;
   chat(request: JsonObject, timeoutMs?: number): Promise<JsonObject>;
+  embeddings(request: JsonObject, timeoutMs?: number): Promise<JsonObject>;
   createResponse(request: JsonObject, timeoutMs?: number): Promise<JsonObject>;
   response(request: JsonObject, timeoutMs?: number): Promise<JsonObject>;
+  responseManage(request: JsonObject, timeoutMs?: number): Promise<JsonObject>;
   verify(provider: string, model: string, timeoutMs?: number): Promise<JsonObject>;
   models(): Promise<JsonObject>;
   confidentialModels(): Promise<JsonObject[]>;
@@ -55,6 +68,8 @@ export class Stream {
 
 export function status(options?: ClientOptions | string): JsonObject;
 
+/** Native library ABI version this binding accepts; mismatches are refused. */
+export const CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION: 1;
 export const CONFIDENTIAL_INFERENCE_FFI_OK: 0;
 export const CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT: 1;
 export const CONFIDENTIAL_INFERENCE_FFI_PANIC: 2;
@@ -62,3 +77,4 @@ export const CONFIDENTIAL_INFERENCE_FFI_BUSY: 3;
 export const CONFIDENTIAL_INFERENCE_FFI_PENDING: 4;
 export const CONFIDENTIAL_INFERENCE_FFI_UNSUPPORTED: 5;
 export const CONFIDENTIAL_INFERENCE_FFI_INTERNAL: 6;
+export const CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED: 7;

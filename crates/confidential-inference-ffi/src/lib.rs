@@ -5,8 +5,10 @@
 //! `confidential-inference-sdk` and lower crates.
 
 use confidential_inference_sdk::{
-    ChatCompletionRequestPayload, ClientError, ConfidentialInference, ProviderRoutingConfig,
-    ResponseCreateRequestPayload, TrustedSigningKey,
+    ChatCompletionRequestPayload, ClientError, ConfidentialInference, EmbeddingsRequestPayload,
+    EnforcementMode, ProviderCompatibilityMatrixEnvelope, ProviderRegistryEnvelope,
+    ProviderRoutingConfig, ReferenceValuesEnvelope, ResponseCreateRequestPayload, ResponseManageOp,
+    ResponseManageRequest, TrustedSigningKey, VerificationPolicy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,6 +26,7 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+pub const CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION: u32 = 1;
 pub const CONFIDENTIAL_INFERENCE_FFI_OK: c_int = 0;
 pub const CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT: c_int = 1;
 pub const CONFIDENTIAL_INFERENCE_FFI_PANIC: c_int = 2;
@@ -31,6 +34,9 @@ pub const CONFIDENTIAL_INFERENCE_FFI_BUSY: c_int = 3;
 pub const CONFIDENTIAL_INFERENCE_FFI_PENDING: c_int = 4;
 pub const CONFIDENTIAL_INFERENCE_FFI_UNSUPPORTED: c_int = 5;
 pub const CONFIDENTIAL_INFERENCE_FFI_INTERNAL: c_int = 6;
+/// An SDK operation (chat, response, verify) failed. The error envelope's
+/// `dispatch` says whether the provider may have processed the request.
+pub const CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED: c_int = 7;
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<FfiErrorJson>> = const { RefCell::new(None) };
@@ -45,6 +51,40 @@ fn take_last_error() -> Option<FfiErrorJson> {
 struct FfiErrorJson {
     code: &'static str,
     message: String,
+    /// `not_dispatched`, `rejected` or `unknown` for operation failures.
+    dispatch: Option<&'static str>,
+    /// Provider HTTP status for `rejected` operation failures.
+    http_status: Option<u16>,
+}
+
+/// A failed SDK operation with its dispatch classification.
+struct FfiOperationError {
+    code: &'static str,
+    message: String,
+    dispatch: &'static str,
+    http_status: Option<u16>,
+}
+
+impl FfiOperationError {
+    fn not_dispatched(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            dispatch: "not_dispatched",
+            http_status: None,
+        }
+    }
+}
+
+impl From<ClientError> for FfiOperationError {
+    fn from(error: ClientError) -> Self {
+        Self {
+            code: error.code(),
+            dispatch: error.dispatch_outcome().as_str(),
+            http_status: error.provider_http_status(),
+            message: error.to_string(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -60,8 +100,16 @@ struct ClientConfig {
     routing: ProviderRoutingConfig,
     #[serde(default)]
     trusted_ed25519_signing_keys: Vec<TrustedEd25519SigningKeyConfig>,
+    #[serde(default)]
+    registry: Option<ProviderRegistryEnvelope>,
+    #[serde(default)]
+    reference_values: Option<ReferenceValuesEnvelope>,
+    #[serde(default)]
+    compatibility_matrix: Option<ProviderCompatibilityMatrixEnvelope>,
+    /// Operator-chosen verification policy; only with an operator trust root.
+    #[serde(default)]
+    policy: Option<VerificationPolicy>,
 }
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TrustedEd25519SigningKeyConfig {
@@ -87,6 +135,10 @@ impl Default for ClientConfig {
             api_keys: BTreeMap::new(),
             routing: ProviderRoutingConfig::default(),
             trusted_ed25519_signing_keys: Vec::new(),
+            registry: None,
+            reference_values: None,
+            compatibility_matrix: None,
+            policy: None,
         }
     }
 }
@@ -130,6 +182,51 @@ fn resolve_trusted_signing_keys(
         ));
     }
     Ok(keys)
+}
+
+fn validate_trust_artifact_config(config: &ClientConfig) -> Result<(), ConfigError> {
+    if config.demo_provider
+        && (config.registry.is_some()
+            || config.reference_values.is_some()
+            || config.compatibility_matrix.is_some())
+    {
+        return Err(ConfigError {
+            code: "trust_artifacts_ambiguous",
+            message: "registry, reference_values, and compatibility_matrix cannot be combined with demo_provider=true"
+                .to_owned(),
+        });
+    }
+    if config.compatibility_matrix.is_some() && config.trusted_ed25519_signing_keys.is_empty() {
+        return Err(ConfigError {
+            code: "compatibility_matrix_trust_keys_required",
+            message: "compatibility_matrix requires trusted_ed25519_signing_keys".to_owned(),
+        });
+    }
+    if let Some(policy) = &config.policy {
+        if config.demo_provider {
+            return Err(ConfigError {
+                code: "policy_requires_operator_trust",
+                message: "policy cannot be combined with demo_provider=true".to_owned(),
+            });
+        }
+        // The FFI exposes no insecure-mode opt-in, so only enforcing policies are accepted.
+        if policy.enforcement != EnforcementMode::Enforce {
+            return Err(ConfigError {
+                code: "policy_enforcement_must_be_enforce",
+                message: format!(
+                    "policy enforcement must be enforce, got {:?}",
+                    policy.enforcement
+                ),
+            });
+        }
+    }
+    if config.registry.is_some() != config.reference_values.is_some() {
+        return Err(ConfigError {
+            code: "trust_artifact_pair_required",
+            message: "registry and reference_values must be provided together".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,7 +298,7 @@ fn resolve_api_keys(
                     message: format!(
                         "api key environment variable {env_name} for provider {provider} is not set"
                     ),
-                })
+                });
             }
             Err(env::VarError::NotUnicode(_)) => {
                 return Err(ConfigError {
@@ -209,7 +306,7 @@ fn resolve_api_keys(
                     message: format!(
                         "api key environment variable {env_name} for provider {provider} is not valid Unicode"
                     ),
-                })
+                });
             }
         };
         if value.is_empty() {
@@ -232,6 +329,14 @@ struct VerifyRequest {
     model: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseManageEnvelope {
+    op: ResponseManageOp,
+    provider: String,
+    provider_response_id: String,
+    params: serde_json::Value,
+}
 pub struct ConfidentialInferenceFfiClient {
     shared: Arc<ClientShared>,
 }
@@ -298,6 +403,7 @@ impl StreamState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FfiStatus {
+    pub abi_version: u32,
     pub stream_handle_abi_available: bool,
     pub blocking_helpers_available: bool,
     pub reason: &'static str,
@@ -305,9 +411,10 @@ pub struct FfiStatus {
 
 pub fn status() -> FfiStatus {
     FfiStatus {
+        abi_version: CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION,
         stream_handle_abi_available: true,
         blocking_helpers_available: true,
-        reason: "chat, responses, verify, model discovery, confidentiality catalog, active policy, active trust artifacts, stream handles, and blocking helper wrappers are available; current stream execution preserves SDK fail-closed streaming semantics",
+        reason: "chat, Responses creation and lifecycle management, verify, model discovery, confidentiality catalog, active policy, active trust artifacts, stream handles, and blocking helper wrappers are available; current stream execution preserves SDK fail-closed streaming semantics",
     }
 }
 
@@ -358,7 +465,7 @@ pub unsafe extern "C" fn confidential_inference_sdk_new(
                     CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                     "invalid_config_json",
                     &message,
-                )
+                );
             }
         };
 
@@ -369,10 +476,17 @@ pub unsafe extern "C" fn confidential_inference_sdk_new(
                     CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
                     "runtime_create_failed",
                     &format!("failed to create Tokio runtime: {error}"),
-                )
+                );
             }
         };
 
+        if let Err(error) = validate_trust_artifact_config(&config) {
+            return ffi_error(
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                error.code,
+                &error.message,
+            );
+        }
         let trusted_signing_keys = match resolve_trusted_signing_keys(&config) {
             Ok(keys) => keys,
             Err(error) => {
@@ -380,15 +494,44 @@ pub unsafe extern "C" fn confidential_inference_sdk_new(
                     CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                     error.code,
                     &error.message,
-                )
+                );
             }
         };
+        let compatibility_matrix = match config.compatibility_matrix.clone() {
+            Some(envelope) => match envelope.into_verified_payload_with_keys(&trusted_signing_keys)
+            {
+                Ok(matrix) => Some(matrix),
+                Err(error) => {
+                    let (code, message) =
+                        if error.to_string().contains("unknown artifact signing key") {
+                            ("compatibility_matrix_untrusted_signer", error.to_string())
+                        } else {
+                            ("compatibility_matrix_tampered", error.to_string())
+                        };
+                    return ffi_error(CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT, code, &message);
+                }
+            },
+            None => None,
+        };
+        let registry = config.registry.clone();
+        let reference_values = config.reference_values.clone();
         let provider_routing = config.routing.clone();
         let mut builder = ConfidentialInference::builder().provider_routing(provider_routing);
         if config.demo_provider {
             builder = builder.with_demo_provider();
         } else {
             builder = builder.exclusive_trusted_artifact_signing_keys(trusted_signing_keys);
+            if let (Some(registry), Some(reference_values)) = (registry, reference_values) {
+                builder = builder
+                    .registry(registry)
+                    .reference_values(reference_values);
+            }
+        }
+        if let Some(compatibility_matrix) = compatibility_matrix {
+            builder = builder.compatibility_matrix(compatibility_matrix);
+        }
+        if let Some(policy) = config.policy.clone() {
+            builder = builder.policy(policy);
         }
         for (provider, api_key) in match resolve_api_keys(config) {
             Ok(api_keys) => api_keys,
@@ -397,7 +540,7 @@ pub unsafe extern "C" fn confidential_inference_sdk_new(
                     CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                     error.code,
                     &error.message,
-                )
+                );
             }
         } {
             builder = builder.api_key(provider, api_key.as_str());
@@ -409,14 +552,14 @@ pub unsafe extern "C" fn confidential_inference_sdk_new(
                     CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                     "invalid_provider_routing",
                     &error.to_string(),
-                )
+                );
             }
             Err(error) => {
                 return ffi_error(
                     CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
                     "client_build_failed",
                     &format!("failed to build ConfidentialInference client: {error}"),
-                )
+                );
             }
         };
 
@@ -525,7 +668,7 @@ pub unsafe extern "C" fn confidential_inference_chat_blocking(
                     CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                     "invalid_argument",
                     &message,
-                )
+                );
             }
         };
         if out_response_json.is_null() {
@@ -552,6 +695,62 @@ pub unsafe extern "C" fn confidential_inference_chat_blocking(
     })
 }
 
+#[no_mangle]
+/// Runs a Responses lifecycle operation synchronously and returns its confidential response JSON.
+///
+/// # Safety
+///
+/// `client` must be a valid live client handle. `request_json` must point to a
+/// valid NUL-terminated UTF-8 C string for the duration of the call.
+/// `out_response_json` must be a valid writable pointer. The returned string
+/// must be freed with `confidential_inference_string_free`. A `timeout_ms` of zero waits
+/// without a timeout.
+pub unsafe extern "C" fn confidential_inference_response_manage_blocking(
+    client: *mut ConfidentialInferenceFfiClient,
+    request_json: *const c_char,
+    timeout_ms: u64,
+    out_response_json: *mut *mut c_char,
+) -> c_int {
+    ffi_boundary_with_error(out_response_json, || unsafe {
+        let Some(shared) = client_shared(client) else {
+            return ffi_error(
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                "invalid_client",
+                "client must not be null",
+            );
+        };
+        let request_json = match required_c_string(request_json, "request_json") {
+            Ok(value) => value,
+            Err(message) => {
+                return ffi_error(
+                    CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                    "invalid_argument",
+                    &message,
+                );
+            }
+        };
+        if out_response_json.is_null() {
+            return ffi_error(
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                "invalid_argument",
+                "out_response_json must not be null",
+            );
+        }
+        *out_response_json = ptr::null_mut();
+
+        let request = match parse_response_manage_request(&request_json) {
+            Ok(request) => request,
+            Err(code) => return code,
+        };
+        let response_json = match run_blocking_result_json(shared, timeout_ms, move || async move {
+            response_manage_result_json(request).await
+        }) {
+            Ok(response_json) => response_json,
+            Err(code) => return code,
+        };
+        write_c_string(out_response_json, response_json)
+    })
+}
 #[no_mangle]
 /// Runs a Responses API operation synchronously and returns a newly allocated JSON string.
 ///
@@ -583,7 +782,7 @@ pub unsafe extern "C" fn confidential_inference_response_blocking(
                     CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                     "invalid_argument",
                     &message,
-                )
+                );
             }
         };
         if out_response_json.is_null() {
@@ -602,6 +801,64 @@ pub unsafe extern "C" fn confidential_inference_response_blocking(
 
         let response_json = match run_blocking_result_json(shared, timeout_ms, move || async move {
             response_result_json(request).await
+        }) {
+            Ok(response_json) => response_json,
+            Err(code) => return code,
+        };
+        write_c_string(out_response_json, response_json)
+    })
+}
+
+#[no_mangle]
+/// Runs an embeddings operation synchronously and returns a newly allocated JSON string.
+///
+/// # Safety
+///
+/// `client` must be a valid live client handle. `request_json` must point to a
+/// valid NUL-terminated UTF-8 C string for the duration of the call.
+/// `out_response_json` must be a valid writable pointer. The returned string
+/// must be freed with `confidential_inference_string_free`. A `timeout_ms` of zero waits
+/// without a timeout.
+pub unsafe extern "C" fn confidential_inference_embeddings_blocking(
+    client: *mut ConfidentialInferenceFfiClient,
+    request_json: *const c_char,
+    timeout_ms: u64,
+    out_response_json: *mut *mut c_char,
+) -> c_int {
+    ffi_boundary_with_error(out_response_json, || unsafe {
+        let Some(shared) = client_shared(client) else {
+            return ffi_error(
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                "invalid_client",
+                "client must not be null",
+            );
+        };
+        let request_json = match required_c_string(request_json, "request_json") {
+            Ok(value) => value,
+            Err(message) => {
+                return ffi_error(
+                    CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                    "invalid_argument",
+                    &message,
+                );
+            }
+        };
+        if out_response_json.is_null() {
+            return ffi_error(
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                "invalid_argument",
+                "out_response_json must not be null",
+            );
+        }
+        *out_response_json = ptr::null_mut();
+
+        let request = match parse_embeddings_request(&request_json, "embeddings") {
+            Ok(request) => request,
+            Err(code) => return code,
+        };
+
+        let response_json = match run_blocking_result_json(shared, timeout_ms, move || async move {
+            embeddings_result_json(request).await
         }) {
             Ok(response_json) => response_json,
             Err(code) => return code,
@@ -642,7 +899,7 @@ pub unsafe extern "C" fn confidential_inference_verify_blocking(
                     CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                     "invalid_argument",
                     &message,
-                )
+                );
             }
         };
         if out_verdict_json.is_null() {
@@ -705,7 +962,7 @@ pub unsafe extern "C" fn confidential_inference_models_blocking(
                     CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
                     "models_serialization_failed",
                     &format!("failed to serialize model discovery JSON: {error}"),
-                )
+                );
             }
         };
         write_c_string(out_models_json, models_json)
@@ -748,7 +1005,7 @@ pub unsafe extern "C" fn confidential_inference_confidentiality_blocking(
                     CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
                     "confidentiality_serialization_failed",
                     &format!("failed to serialize confidentiality catalog JSON: {error}"),
-                )
+                );
             }
         };
         write_c_string(out_catalog_json, catalog_json)
@@ -791,7 +1048,7 @@ pub unsafe extern "C" fn confidential_inference_active_policy_blocking(
                     CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
                     "active_policy_digest_failed",
                     &format!("failed to compute active policy digest: {error}"),
-                )
+                );
             }
         };
         let policy_json = match serde_json::to_string(&snapshot) {
@@ -801,7 +1058,7 @@ pub unsafe extern "C" fn confidential_inference_active_policy_blocking(
                     CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
                     "active_policy_serialization_failed",
                     &format!("failed to serialize active policy JSON: {error}"),
-                )
+                );
             }
         };
         write_c_string(out_policy_json, policy_json)
@@ -844,7 +1101,7 @@ pub unsafe extern "C" fn confidential_inference_active_trust_artifacts_blocking(
                     CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
                     "active_trust_artifacts_serialization_failed",
                     &format!("failed to serialize active trust artifacts JSON: {error}"),
-                )
+                );
             }
         };
         write_c_string(out_artifacts_json, artifacts_json)
@@ -852,7 +1109,10 @@ pub unsafe extern "C" fn confidential_inference_active_trust_artifacts_blocking(
 }
 
 #[no_mangle]
-/// Starts a chat stream handle from OpenAI-shaped request JSON.
+/// Starts a chat stream handle from OpenAI-shaped request JSON. Streaming fails
+/// closed unless the SDK verifies route evidence before returning the stream.
+/// Events contain a first `verdict`, normalized OpenAI JSON `chunk` events,
+/// optional terminal `usage`, and `done` (or an error event).
 ///
 /// # Safety
 ///
@@ -879,7 +1139,7 @@ pub unsafe extern "C" fn confidential_inference_chat_stream_start(
                     CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
                     "invalid_argument",
                     &message,
-                )
+                );
             }
         };
         if out_stream.is_null() {
@@ -895,10 +1155,9 @@ pub unsafe extern "C" fn confidential_inference_chat_stream_start(
             Ok(request) => request,
             Err(code) => return code,
         };
-        let request = request.with_streaming(true);
-
-        let stream =
-            spawn_stream_with_client(shared, move || async move { stream_events(request).await });
+        let stream = spawn_stream_with_client(shared, move |client, state| async move {
+            stream_events(client, request, state).await
+        });
         let stream = Box::into_raw(stream);
         register_handle(live_stream_handles(), stream);
         *out_stream = stream;
@@ -908,7 +1167,8 @@ pub unsafe extern "C" fn confidential_inference_chat_stream_start(
 }
 
 #[no_mangle]
-/// Returns the next stream event as a newly allocated JSON string.
+/// Returns the next available event in order: verdict, zero or more raw chat
+/// chunks, optional terminal usage, then done. Failure returns an error event.
 ///
 /// # Safety
 ///
@@ -1098,30 +1358,61 @@ pub unsafe extern "C" fn confidential_inference_string_free(ptr: *mut c_char) {
     }));
 }
 
-async fn chat_result_json(request: ChatCompletionRequestPayload) -> Result<String, String> {
-    let client = current_operation_client().ok_or_else(|| "operation client missing".to_owned())?;
-    client
-        .send_chat_completion_payload_json(request)
-        .await
-        .map_err(|error| error.to_string())
+async fn chat_result_json(
+    request: ChatCompletionRequestPayload,
+) -> Result<String, FfiOperationError> {
+    let client = current_operation_client().ok_or_else(missing_operation_client)?;
+    Ok(client.send_chat_completion_payload_json(request).await?)
 }
 
-async fn response_result_json(request: ResponseCreateRequestPayload) -> Result<String, String> {
-    let client = current_operation_client().ok_or_else(|| "operation client missing".to_owned())?;
-    client
-        .create_response_payload_json(request)
-        .await
-        .map_err(|error| error.to_string())
+async fn embeddings_result_json(
+    request: EmbeddingsRequestPayload,
+) -> Result<String, FfiOperationError> {
+    let client = current_operation_client().ok_or_else(missing_operation_client)?;
+    Ok(client.send_embeddings_payload_json(request).await?)
 }
 
-async fn verify_result_json(request: VerifyRequest) -> Result<String, String> {
-    let client = current_operation_client().ok_or_else(|| "operation client missing".to_owned())?;
-    let verified = client
-        .verify_route(request.provider, request.model)
-        .await
-        .map_err(|error| error.to_string())?;
-    serde_json::to_string(verified.verdict())
-        .map_err(|error| format!("failed to serialize attestation verdict JSON: {error}"))
+async fn response_result_json(
+    request: ResponseCreateRequestPayload,
+) -> Result<String, FfiOperationError> {
+    let client = current_operation_client().ok_or_else(missing_operation_client)?;
+    Ok(client.create_response_payload_json(request).await?)
+}
+
+async fn response_manage_result_json(
+    request: ResponseManageEnvelope,
+) -> Result<String, FfiOperationError> {
+    let client = current_operation_client().ok_or_else(missing_operation_client)?;
+    let response = client
+        .manage_response(
+            &request.provider,
+            ResponseManageRequest {
+                op: request.op,
+                provider_response_id: request.provider_response_id,
+                params: request.params,
+            },
+        )
+        .await?;
+    serde_json::to_string(&response).map_err(|error| {
+        FfiOperationError::not_dispatched(
+            "response_serialization_failed",
+            format!("failed to serialize Responses lifecycle JSON: {error}"),
+        )
+    })
+}
+async fn verify_result_json(request: VerifyRequest) -> Result<String, FfiOperationError> {
+    let client = current_operation_client().ok_or_else(missing_operation_client)?;
+    let verified = client.verify_route(request.provider, request.model).await?;
+    serde_json::to_string(verified.verdict()).map_err(|error| {
+        FfiOperationError::not_dispatched(
+            "verdict_serialization_failed",
+            format!("failed to serialize attestation verdict JSON: {error}"),
+        )
+    })
+}
+
+fn missing_operation_client() -> FfiOperationError {
+    FfiOperationError::not_dispatched("operation_client_missing", "operation client missing")
 }
 
 tokio::task_local! {
@@ -1145,6 +1436,19 @@ fn parse_chat_request(
     })
 }
 
+fn parse_embeddings_request(
+    request_json: &str,
+    operation: &'static str,
+) -> Result<EmbeddingsRequestPayload, c_int> {
+    EmbeddingsRequestPayload::from_json_str(request_json).map_err(|error| {
+        ffi_error(
+            CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+            "invalid_request_json",
+            &format!("failed to parse {operation} request JSON: {error}"),
+        )
+    })
+}
+
 fn parse_response_request(
     request_json: &str,
     operation: &'static str,
@@ -1154,6 +1458,15 @@ fn parse_response_request(
             CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
             "invalid_request_json",
             &format!("failed to parse {operation} request JSON: {error}"),
+        )
+    })
+}
+fn parse_response_manage_request(request_json: &str) -> Result<ResponseManageEnvelope, c_int> {
+    serde_json::from_str::<ResponseManageEnvelope>(request_json).map_err(|error| {
+        ffi_error(
+            CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+            "invalid_request_json",
+            &format!("failed to parse response manage request JSON: {error}"),
         )
     })
 }
@@ -1178,7 +1491,7 @@ fn run_blocking_result_json<F, Fut>(
 ) -> Result<String, c_int>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<String, String>>,
+    Fut: Future<Output = Result<String, FfiOperationError>>,
 {
     let client = shared.client.clone();
     let future = async move { OPERATION_CLIENT.scope(client, operation()).await };
@@ -1190,31 +1503,44 @@ where
         }) {
             Ok(result) => result,
             Err(_) => {
-                return Err(ffi_error(
+                // The dropped operation may already have sent its request.
+                return Err(ffi_error_detail(
                     CONFIDENTIAL_INFERENCE_FFI_PENDING,
-                    "operation_timeout",
-                    "blocking operation did not complete before timeout",
-                ))
+                    FfiErrorJson {
+                        code: "operation_timeout",
+                        message: "blocking operation did not complete before timeout".into(),
+                        dispatch: Some("unknown"),
+                        http_status: None,
+                    },
+                ));
             }
         }
     };
 
-    Ok(match result {
-        Ok(json) => json,
-        Err(message) => async_error_json(&message),
+    result.map_err(|error| {
+        ffi_error_detail(
+            CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED,
+            FfiErrorJson {
+                code: error.code,
+                message: error.message,
+                dispatch: Some(error.dispatch),
+                http_status: error.http_status,
+            },
+        )
     })
 }
 
-fn spawn_stream<F>(shared: Arc<ClientShared>, future: F) -> Box<ConfidentialInferenceFfiStream>
+fn spawn_stream<F, Fut>(shared: Arc<ClientShared>, future: F) -> Box<ConfidentialInferenceFfiStream>
 where
-    F: std::future::Future<Output = Vec<String>> + Send + 'static,
+    F: FnOnce(Arc<(Mutex<StreamState>, Condvar)>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     shared.live_operations.fetch_add(1, Ordering::SeqCst);
     let state = Arc::new((Mutex::new(StreamState::new()), Condvar::new()));
     let task_state = state.clone();
     let join = shared.runtime.spawn(async move {
-        let events = future.await;
-        complete_stream(&task_state, events);
+        future(task_state.clone()).await;
+        finish_stream(&task_state);
     });
 
     Box::new(ConfidentialInferenceFfiStream {
@@ -1229,57 +1555,122 @@ fn spawn_stream_with_client<F, Fut>(
     stream: F,
 ) -> Box<ConfidentialInferenceFfiStream>
 where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Vec<String>> + Send + 'static,
+    F: FnOnce(ConfidentialInference, Arc<(Mutex<StreamState>, Condvar)>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     let client = shared.client.clone();
-    spawn_stream(shared, async move {
-        OPERATION_CLIENT.scope(client, stream()).await
-    })
+    spawn_stream(shared, move |state| stream(client, state))
 }
 
-async fn stream_events(request: ChatCompletionRequestPayload) -> Vec<String> {
-    let Some(client) = current_operation_client() else {
-        return vec![stream_error_event("operation client missing")];
+async fn stream_events(
+    client: ConfidentialInference,
+    request: ChatCompletionRequestPayload,
+    state: Arc<(Mutex<StreamState>, Condvar)>,
+) {
+    let mut stream = match client.send_chat_stream_payload_json(request).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            let error = FfiOperationError::from(error);
+            complete_stream(&state, vec![stream_operation_error_event(&error)]);
+            return;
+        }
     };
+    let verdict = match serde_json::to_value(&stream.verdict) {
+        Ok(verdict) => verdict,
+        Err(error) => {
+            complete_stream(
+                &state,
+                vec![stream_operation_error_event(&FfiOperationError {
+                    code: "stream_verdict_serialization_failed",
+                    message: error.to_string(),
+                    dispatch: "unknown",
+                    http_status: None,
+                })],
+            );
+            return;
+        }
+    };
+    if verdict["response_integrity_result"] == "receipt_bound" {
+        complete_stream(
+            &state,
+            vec![stream_operation_error_event(&FfiOperationError {
+                code: "stream_verdict_receipt_bound",
+                message:
+                    "stream verdict cannot be receipt-bound before a terminal response receipt"
+                        .into(),
+                dispatch: "unknown",
+                http_status: None,
+            })],
+        );
+        return;
+    }
+    push_stream_event(&state, stream_verdict_event(verdict));
 
-    match client.send_chat_completion_payload_json(request).await {
-        Ok(response_json) => match stream_response_events(&response_json) {
-            Ok(events) => events,
-            Err(error) => vec![stream_error_event(&error)],
-        },
-        Err(error) => vec![stream_error_event(&error.to_string())],
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(chunk) => match serde_json::to_value(chunk) {
+                Ok(chunk) => push_stream_event(&state, stream_chunk_event(chunk)),
+                Err(error) => {
+                    let error = FfiOperationError {
+                        code: "stream_chunk_serialization_failed",
+                        message: error.to_string(),
+                        dispatch: "unknown",
+                        http_status: None,
+                    };
+                    complete_stream(&state, vec![stream_operation_error_event(&error)]);
+                    return;
+                }
+            },
+            Err(error) => {
+                let mut error = FfiOperationError::from(error);
+                error.dispatch = "unknown";
+                error.http_status = None;
+                complete_stream(&state, vec![stream_operation_error_event(&error)]);
+                return;
+            }
+        }
+    }
+    if let Some(usage) = stream.terminal_usage {
+        push_stream_event(&state, stream_usage_event(usage));
+    }
+    push_stream_event(&state, json!({ "type": "done" }).to_string());
+}
+fn stream_verdict_event(verdict: serde_json::Value) -> String {
+    let response_channel_bound = verdict["response_channel_bound"].clone();
+    let response_integrity_result = verdict["response_integrity_result"].clone();
+    json!({
+        "type": "verdict",
+        "verdict": verdict,
+        "response_channel_bound": response_channel_bound,
+        "response_integrity_result": response_integrity_result,
+    })
+    .to_string()
+}
+
+fn stream_chunk_event(chunk: serde_json::Value) -> String {
+    json!({ "type": "chunk", "chunk": chunk }).to_string()
+}
+
+fn stream_usage_event(usage: impl Serialize) -> String {
+    json!({ "type": "usage", "usage": usage }).to_string()
+}
+
+fn push_stream_event(state: &Arc<(Mutex<StreamState>, Condvar)>, event: String) {
+    let (state_lock, ready) = &**state;
+    if let Ok(mut state) = state_lock.lock() {
+        if !state.terminal {
+            state.events.push_back(event);
+            ready.notify_all();
+        }
     }
 }
 
-fn stream_response_events(response_json: &str) -> Result<Vec<String>, String> {
-    let response: serde_json::Value = serde_json::from_str(response_json)
-        .map_err(|error| format!("failed to parse chat response JSON: {error}"))?;
-    let response_integrity_result = response
-        .get("response_integrity_result")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "chat response JSON is missing response_integrity_result".to_owned())?;
-    if response_integrity_result == "receipt_bound" {
-        return Err(
-            "stream opening verdict must not report receipt-bound response integrity before a terminal response_receipt event"
-                .into(),
-        );
+fn finish_stream(state: &Arc<(Mutex<StreamState>, Condvar)>) {
+    let (state_lock, ready) = &**state;
+    if let Ok(mut state) = state_lock.lock() {
+        state.terminal = true;
+        ready.notify_all();
     }
-    Ok(vec![
-        json!({
-            "type": "verdict",
-            "response_channel_bound": response["response_channel_bound"].clone(),
-            "response_integrity_result": response["response_integrity_result"].clone(),
-            "verdict": response["verdict"].clone(),
-        })
-        .to_string(),
-        json!({
-            "type": "response",
-            "response": response["response"].clone(),
-        })
-        .to_string(),
-        json!({ "type": "done" }).to_string(),
-    ])
 }
 
 fn stream_error_event(message: &str) -> String {
@@ -1292,6 +1683,19 @@ fn stream_error_event(message: &str) -> String {
         }
     })
     .to_string()
+}
+
+fn stream_operation_error_event(error: &FfiOperationError) -> String {
+    let mut detail = json!({
+        "type": "confidential_inference_stream_error",
+        "code": error.code,
+        "message": error.message,
+        "dispatch": error.dispatch,
+    });
+    if let Some(http_status) = error.http_status {
+        detail["http_status"] = json!(http_status);
+    }
+    json!({ "type": "error", "status": "failed", "error": detail }).to_string()
 }
 
 fn complete_stream(state: &Arc<(Mutex<StreamState>, Condvar)>, events: Vec<String>) {
@@ -1385,17 +1789,6 @@ fn next_stream_event(state: &Arc<(Mutex<StreamState>, Condvar)>, timeout: Durati
 
 fn stream_is_pending(state: &Arc<(Mutex<StreamState>, Condvar)>) -> bool {
     state.0.lock().map(|state| !state.terminal).unwrap_or(false)
-}
-
-fn async_error_json(message: &str) -> String {
-    json!({
-        "status": "failed",
-        "error": {
-            "type": "confidential_inference_async_error",
-            "message": message,
-        }
-    })
-    .to_string()
 }
 
 fn in_tokio_runtime_context() -> bool {
@@ -1517,14 +1910,20 @@ fn attach_error_json(out_json: *mut *mut c_char, status: c_int) -> c_int {
 
 fn error_json_body(error: Option<&FfiErrorJson>) -> String {
     match error {
-        Some(error) => json!({
-            "error": {
+        Some(error) => {
+            let mut body = json!({
                 "type": "confidential_inference_ffi_error",
                 "code": error.code,
                 "message": error.message,
+            });
+            if let Some(dispatch) = error.dispatch {
+                body["dispatch"] = json!(dispatch);
             }
-        })
-        .to_string(),
+            if let Some(http_status) = error.http_status {
+                body["http_status"] = json!(http_status);
+            }
+            json!({ "error": body }).to_string()
+        }
         None => json!({ "error": null }).to_string(),
     }
 }
@@ -1542,10 +1941,18 @@ fn write_error_c_string(out: *mut *mut c_char, error: &FfiErrorJson) {
 }
 
 fn ffi_error(status: c_int, code: &'static str, message: &str) -> c_int {
-    let error = FfiErrorJson {
-        code,
-        message: message.to_owned(),
-    };
+    ffi_error_detail(
+        status,
+        FfiErrorJson {
+            code,
+            message: message.to_owned(),
+            dispatch: None,
+            http_status: None,
+        },
+    )
+}
+
+fn ffi_error_detail(status: c_int, error: FfiErrorJson) -> c_int {
     LAST_ERROR.with(|slot| {
         *slot.borrow_mut() = Some(error);
     });
@@ -1607,6 +2014,10 @@ mod tests {
             })
             .to_string(),
         )
+    }
+
+    fn embeddings_request_json(model: &str) -> CString {
+        c_string(&json!({"model": model, "input": "hello"}).to_string())
     }
 
     unsafe fn take_string(ptr: *mut c_char) -> String {
@@ -1678,6 +2089,34 @@ mod tests {
     }
 
     #[test]
+    fn ffi_embeddings_blocking_returns_confidential_response_json() {
+        unsafe {
+            let client = new_demo_client();
+            let request_json = embeddings_request_json("gpt-oss-120b");
+            let mut result = ptr::null_mut();
+
+            assert_eq!(
+                confidential_inference_embeddings_blocking(
+                    client,
+                    request_json.as_ptr(),
+                    2_000,
+                    &mut result
+                ),
+                CONFIDENTIAL_INFERENCE_FFI_OK
+            );
+            let result: Value = serde_json::from_str(&take_string(result)).unwrap();
+            assert_eq!(result["provider"], "demo");
+            assert_eq!(result["verdict"]["status"], "verified");
+            assert_eq!(result["response"]["object"], "list");
+
+            assert_eq!(
+                confidential_inference_sdk_free(client),
+                CONFIDENTIAL_INFERENCE_FFI_OK
+            );
+        }
+    }
+
+    #[test]
     fn ffi_response_blocking_returns_responses_shim_json() {
         unsafe {
             let client = new_demo_client();
@@ -1707,6 +2146,34 @@ mod tests {
                 "demo confidential response for e2ee-gpt-oss-120b-p: ffi blocking response path"
             );
 
+            assert_eq!(
+                confidential_inference_sdk_free(client),
+                CONFIDENTIAL_INFERENCE_FFI_OK
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_response_manage_accepts_envelope_and_classifies_unsupported_route() {
+        unsafe {
+            let client = new_demo_client();
+            let request_json = c_string(
+                r#"{"op":"retrieve","provider":"demo","provider_response_id":"resp_demo","params":{}}"#,
+            );
+            let mut result = ptr::null_mut();
+            assert_eq!(
+                confidential_inference_response_manage_blocking(
+                    client,
+                    request_json.as_ptr(),
+                    2_000,
+                    &mut result
+                ),
+                CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED
+            );
+            let result: Value = serde_json::from_str(&take_string(result)).unwrap();
+            assert_eq!(result["error"]["code"], "provider_response_manage_failed");
+            assert_eq!(result["error"]["dispatch"], "unknown");
+            assert!(result["error"].get("http_status").is_none());
             assert_eq!(
                 confidential_inference_sdk_free(client),
                 CONFIDENTIAL_INFERENCE_FFI_OK
@@ -1879,7 +2346,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_chat_blocking_returns_sdk_failure_as_result_json() {
+    fn ffi_chat_blocking_reports_sdk_failure_as_operation_error() {
         unsafe {
             let client = new_demo_client();
             let request_json = streaming_chat_request_json("ffi blocking unsupported stream");
@@ -1892,16 +2359,47 @@ mod tests {
                     2_000,
                     &mut result
                 ),
-                CONFIDENTIAL_INFERENCE_FFI_OK
+                CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED
             );
             let result_json = take_string(result);
             let result: Value = serde_json::from_str(&result_json).unwrap();
-            assert_eq!(result["status"], "failed");
+            assert_eq!(result["error"]["code"], "streaming_not_supported");
+            assert_eq!(result["error"]["dispatch"], "not_dispatched");
+            assert!(result["error"].get("http_status").is_none());
             assert!(result["error"]["message"]
                 .as_str()
                 .unwrap()
                 .contains("streaming is not supported"));
             assert!(!result_json.contains("ffi blocking unsupported stream"));
+
+            assert_eq!(
+                confidential_inference_sdk_free(client),
+                CONFIDENTIAL_INFERENCE_FFI_OK
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_embeddings_blocking_reports_sdk_failure_as_operation_error() {
+        unsafe {
+            let client = new_demo_client();
+            let request_json = embeddings_request_json("no-such-model");
+            let mut result = ptr::null_mut();
+
+            assert_eq!(
+                confidential_inference_embeddings_blocking(
+                    client,
+                    request_json.as_ptr(),
+                    2_000,
+                    &mut result
+                ),
+                CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED
+            );
+            let result: Value = serde_json::from_str(&take_string(result)).unwrap();
+            assert_eq!(result["error"]["dispatch"], "not_dispatched");
+            assert!(result["error"]["code"].as_str().is_some());
+            assert!(result["error"]["message"].as_str().is_some());
+            assert!(result["error"].get("http_status").is_none());
 
             assert_eq!(
                 confidential_inference_sdk_free(client),
@@ -1927,7 +2425,10 @@ mod tests {
                 confidential_inference_last_error(&mut error),
                 CONFIDENTIAL_INFERENCE_FFI_OK
             );
-            assert!(take_string(error).contains("operation_timeout"));
+            let error = take_string(error);
+            assert!(error.contains("operation_timeout"));
+            // A timed-out request may already be in flight.
+            assert!(error.contains("\"dispatch\":\"unknown\""));
             assert_eq!(
                 confidential_inference_sdk_free(client),
                 CONFIDENTIAL_INFERENCE_FFI_OK
@@ -1986,6 +2487,162 @@ mod tests {
                 CONFIDENTIAL_INFERENCE_FFI_OK
             );
         }
+    }
+
+    const PHASE2_FIXTURE_KEY: &str = "cN-eInmtvsbRK_KSEYTJIi6yTthSAFv2QBOfUuWc2a4";
+
+    fn phase2_operator_config() -> Value {
+        json!({
+            "demo_provider": false,
+            "trusted_ed25519_signing_keys": [{
+                "signer": "confidential-inference",
+                "key_id": "confidential-inference-phase2-fixture-ed25519-2026",
+                "public_key_base64url": PHASE2_FIXTURE_KEY
+            }],
+            "registry": serde_json::from_str::<Value>(include_str!("../../../fixtures/registry/phase2-fixtures-registry.json")).unwrap(),
+            "reference_values": serde_json::from_str::<Value>(include_str!("../../../fixtures/reference-values/phase2-fixtures-envelope.json")).unwrap()
+        })
+    }
+
+    fn ffi_config_result(config: &Value) -> (c_int, Option<String>) {
+        unsafe {
+            let config = c_string(&config.to_string());
+            let mut client = ptr::null_mut();
+            let status = confidential_inference_sdk_new(config.as_ptr(), &mut client);
+            let code = if status == CONFIDENTIAL_INFERENCE_FFI_OK {
+                assert_eq!(
+                    confidential_inference_sdk_free(client),
+                    CONFIDENTIAL_INFERENCE_FFI_OK
+                );
+                None
+            } else {
+                Some(
+                    last_error_value()["error"]["code"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                )
+            };
+            (status, code)
+        }
+    }
+
+    #[test]
+    fn ffi_client_config_accepts_operator_signed_trust_artifacts() {
+        let (status, code) = ffi_config_result(&phase2_operator_config());
+        assert_eq!(
+            status, CONFIDENTIAL_INFERENCE_FFI_OK,
+            "error code: {code:?}"
+        );
+    }
+    #[test]
+    fn ffi_client_config_accepts_and_rejects_operator_compatibility_matrix() {
+        const MATRIX_KEY: &str = "bjLBl0Hwr4JgYSrpn9E9ijiURyLgiWTdI5c49VKmFTs";
+        let matrix = serde_json::from_str::<Value>(include_str!(
+            "../../../crates/confidential-inference-providers/assets/providers/compatibility-matrix-envelope.json"
+        ))
+        .unwrap();
+        let mut config = phase2_operator_config();
+        config["trusted_ed25519_signing_keys"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "signer": "confidential-inference",
+                "key_id": "confidential-inference-compatibility-fixture-ed25519-2026",
+                "public_key_base64url": MATRIX_KEY
+            }));
+        config["compatibility_matrix"] = matrix.clone();
+        assert_eq!(ffi_config_result(&config).0, CONFIDENTIAL_INFERENCE_FFI_OK);
+
+        let mut untrusted = config.clone();
+        untrusted["trusted_ed25519_signing_keys"][1]["key_id"] = json!("untrusted");
+        assert_eq!(
+            ffi_config_result(&untrusted).1.as_deref(),
+            Some("compatibility_matrix_untrusted_signer")
+        );
+
+        let mut tampered = config.clone();
+        tampered["compatibility_matrix"]["payload"]["providers"]["demo"]["streaming"] =
+            json!("supported");
+        assert_eq!(
+            ffi_config_result(&tampered).1.as_deref(),
+            Some("compatibility_matrix_tampered")
+        );
+
+        let mut demo = config.clone();
+        demo["demo_provider"] = json!(true);
+        assert_eq!(
+            ffi_config_result(&demo).1.as_deref(),
+            Some("trust_artifacts_ambiguous")
+        );
+
+        let mut no_keys = config;
+        no_keys["trusted_ed25519_signing_keys"] = json!([]);
+        assert_eq!(
+            ffi_config_result(&no_keys).1.as_deref(),
+            Some("compatibility_matrix_trust_keys_required")
+        );
+    }
+
+    #[test]
+    fn ffi_client_config_accepts_enforcing_operator_policy_only() {
+        let policy = serde_json::to_value(
+            confidential_inference_sdk::VerificationPolicy::require_hw_verified_tls(),
+        )
+        .unwrap();
+        let mut config = phase2_operator_config();
+        config["policy"] = policy.clone();
+        assert_eq!(ffi_config_result(&config).0, CONFIDENTIAL_INFERENCE_FFI_OK);
+
+        let mut observe = config.clone();
+        observe["policy"]["enforcement"] = json!("observe");
+        assert_eq!(
+            ffi_config_result(&observe).1.as_deref(),
+            Some("policy_enforcement_must_be_enforce")
+        );
+
+        let mut demo = json!({ "demo_provider": true });
+        demo["policy"] = policy.clone();
+        assert_eq!(
+            ffi_config_result(&demo).1.as_deref(),
+            Some("policy_requires_operator_trust")
+        );
+
+        let mut unknown_field = config;
+        unknown_field["policy"]["skip_attestation"] = json!(true);
+        assert_eq!(
+            ffi_config_result(&unknown_field).1.as_deref(),
+            Some("invalid_config_json")
+        );
+    }
+
+    #[test]
+    fn ffi_client_config_rejects_demo_artifacts_and_incomplete_pair() {
+        let mut config = phase2_operator_config();
+        config["demo_provider"] = json!(true);
+        assert_eq!(
+            ffi_config_result(&config).1.as_deref(),
+            Some("trust_artifacts_ambiguous")
+        );
+
+        let mut config = phase2_operator_config();
+        config.as_object_mut().unwrap().remove("reference_values");
+        assert_eq!(
+            ffi_config_result(&config).1.as_deref(),
+            Some("trust_artifact_pair_required")
+        );
+    }
+
+    #[test]
+    fn ffi_client_config_rejects_untrusted_and_tampered_artifacts() {
+        let mut config = phase2_operator_config();
+        config["trusted_ed25519_signing_keys"][0]["public_key_base64url"] =
+            json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        assert!(ffi_config_result(&config).0 != CONFIDENTIAL_INFERENCE_FFI_OK);
+
+        let mut config = phase2_operator_config();
+        config["registry"]["payload"]["version"] = json!("tampered");
+        assert!(ffi_config_result(&config).0 != CONFIDENTIAL_INFERENCE_FFI_OK);
     }
 
     #[test]
@@ -2160,6 +2817,12 @@ mod tests {
             assert_eq!(error["error"]["code"], "credential_source_ambiguous");
             assert!(!error_json.contains(secret));
         }
+    }
+
+    #[test]
+    fn status_json_reports_abi_version() {
+        let value = serde_json::to_value(status()).unwrap();
+        assert_eq!(value["abi_version"], CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION);
     }
 
     #[test]
@@ -2344,45 +3007,94 @@ mod tests {
     }
 
     #[test]
-    fn ffi_stream_response_events_reject_receipt_bound_opening_verdict() {
-        let response = json!({
-            "response_channel_bound": false,
-            "response_integrity_result": "receipt_bound",
-            "verdict": {
-                "response_channel_bound": false,
-                "response_integrity_result": "receipt_bound"
-            },
-            "response": {}
+    fn ffi_stream_event_builders_preserve_verdict_chunk_and_usage_payloads() {
+        let verdict = json!({
+            "response_channel_bound": true,
+            "response_integrity_result": "channel_bound",
+            "status": "verified"
         });
+        let chunk = json!({
+            "id": "chunk-id",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "model",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}],
+            "provider_extra": {"preserved": true}
+        });
+        let usage = json!({"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3});
 
-        let error = stream_response_events(&response.to_string()).unwrap_err();
+        let verdict_event: Value =
+            serde_json::from_str(&stream_verdict_event(verdict.clone())).unwrap();
+        let chunk_value = chunk.clone();
+        let chunk: confidential_inference_sdk::ChatCompletionChunk =
+            serde_json::from_value(chunk).unwrap();
+        let chunk_event: Value =
+            serde_json::from_str(&stream_chunk_event(serde_json::to_value(&chunk).unwrap()))
+                .unwrap();
+        let usage_event: Value = serde_json::from_str(&stream_usage_event(usage.clone())).unwrap();
 
-        assert!(error.contains("opening verdict"));
-        assert!(error.contains("receipt-bound"));
+        assert_eq!(verdict_event["type"], "verdict");
+        assert_eq!(verdict_event["verdict"], verdict);
+        assert_eq!(verdict_event["response_channel_bound"], true);
+        assert_eq!(chunk_event["type"], "chunk");
+        assert_eq!(chunk_event["chunk"], chunk_value);
+        assert_eq!(usage_event["type"], "usage");
+        assert_eq!(usage_event["usage"], usage);
     }
 
     #[test]
-    fn ffi_stream_response_events_preserve_non_receipt_verdict_event() {
-        let response = json!({
-            "response_channel_bound": true,
-            "response_integrity_result": "channel_bound",
-            "verdict": {
-                "response_channel_bound": true,
-                "response_integrity_result": "channel_bound"
-            },
-            "response": {"choices": []}
+    fn ffi_stream_error_event_keeps_dispatch_classification() {
+        let error = FfiOperationError {
+            code: "stream_failed",
+            message: "stream failed".into(),
+            dispatch: "unknown",
+            http_status: None,
+        };
+        let event: Value = serde_json::from_str(&stream_operation_error_event(&error)).unwrap();
+        assert_eq!(event["type"], "error");
+        assert_eq!(event["status"], "failed");
+        assert_eq!(event["error"]["dispatch"], "unknown");
+    }
+
+    #[test]
+    fn ffi_stream_open_error_preserves_sdk_dispatch_metadata() {
+        let preflight = FfiOperationError::from(ClientError::StreamingNotSupported {
+            route_id: "route".into(),
         });
+        let dispatched = FfiOperationError::from(ClientError::ResponseJsonSerialization(
+            "invalid response".into(),
+        ));
 
-        let events = stream_response_events(&response.to_string()).unwrap();
-        let verdict_event: Value = serde_json::from_str(&events[0]).unwrap();
-        let response_event: Value = serde_json::from_str(&events[1]).unwrap();
-        let done_event: Value = serde_json::from_str(&events[2]).unwrap();
+        assert_eq!(preflight.dispatch, "not_dispatched");
+        assert_eq!(dispatched.dispatch, "unknown");
+    }
 
-        assert_eq!(verdict_event["type"], "verdict");
-        assert_eq!(verdict_event["response_channel_bound"], true);
-        assert_eq!(verdict_event["response_integrity_result"], "channel_bound");
-        assert_eq!(response_event["type"], "response");
-        assert_eq!(done_event["type"], "done");
+    #[test]
+    fn ffi_stream_queue_publishes_before_terminal_completion() {
+        let state = Arc::new((Mutex::new(StreamState::new()), Condvar::new()));
+        for event_type in ["verdict", "chunk", "usage", "done"] {
+            push_stream_event(&state, json!({ "type": event_type }).to_string());
+        }
+
+        for event_type in ["verdict", "chunk", "usage", "done"] {
+            match next_stream_event(&state, Duration::ZERO) {
+                StreamNext::Event(event) => {
+                    let event: Value = serde_json::from_str(&event).unwrap();
+                    assert_eq!(event["type"], event_type);
+                }
+                _ => panic!("incremental event was not available"),
+            }
+        }
+        assert!(matches!(
+            next_stream_event(&state, Duration::ZERO),
+            StreamNext::Pending
+        ));
+
+        finish_stream(&state);
+        assert!(matches!(
+            next_stream_event(&state, Duration::ZERO),
+            StreamNext::Closed
+        ));
     }
 
     #[test]
@@ -2430,9 +3142,8 @@ mod tests {
         unsafe {
             let client = new_demo_client();
             let shared = client_shared(client).unwrap();
-            let stream = Box::into_raw(spawn_stream(shared, async {
+            let stream = Box::into_raw(spawn_stream(shared, |_| async {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                vec![json!({ "type": "late" }).to_string()]
             }));
             register_handle(live_stream_handles(), stream);
 
@@ -2517,7 +3228,7 @@ mod tests {
             assert!(status["reason"]
                 .as_str()
                 .unwrap()
-                .contains("chat, responses, verify"));
+                .contains("chat, Responses creation and lifecycle management, verify"));
 
             assert_eq!(
                 confidential_inference_status(ptr::null_mut()),
@@ -2549,6 +3260,7 @@ mod tests {
             "int confidential_inference_sdk_new(",
             "int confidential_inference_sdk_free(",
             "int confidential_inference_chat_blocking(",
+            "int confidential_inference_embeddings_blocking(",
             "int confidential_inference_response_blocking(",
             "int confidential_inference_verify_blocking(",
             "int confidential_inference_models_blocking(",

@@ -27,6 +27,8 @@ npm test
 The binding searches the workspace `target/debug` and `target/release`
 directories. Set `CONFIDENTIAL_INFERENCE_FFI_LIBRARY` to an explicit shared
 library path when embedding it elsewhere.
+Each binding checks the library's reported ABI version when loading it and
+rejects incompatible versions before use.
 
 ## Example
 
@@ -62,10 +64,20 @@ request.
 
 ## API
 
-`Client` provides Promise-based Chat Completions, Responses, route
-verification, model discovery, and active policy / trust-artifact inspection.
-`Client.stream` and `Stream` expose fail-closed stream events as async
-iterables. See `index.d.ts` for the complete API.
+`Client` provides Promise-based Chat Completions, Responses, Responses lifecycle
+management (`responseManage`), embeddings, route verification, model discovery,
+and active policy / trust-artifact inspection.
+`Client.stream` and `Stream` expose every native event as it arrives through
+async iterables. The demo and other non-plaintext routes that cannot stream
+fail closed with a structured error event. See `index.d.ts` for the complete API.
+Embedding requests may use text or token IDs. Token IDs are encrypted with the
+request on supported E2EE routes; an adapter that cannot encrypt them may pass
+them through only on a plaintext-compatible route. Otherwise the SDK fails
+closed.
+`Client.responseManage` accepts `{op, provider, provider_response_id, params}`;
+supported operations are `retrieve`, `list_input_items`, `cancel`, `delete`,
+`input_tokens`, and `compact`.
+
 
 Inference methods run the blocking FFI call on a Koffi worker thread, so they
 do not block the Node event loop. Rust owns every
@@ -100,6 +112,23 @@ const client = new Client({
 Combining `demo_provider: true` with a non-empty `trusted_ed25519_signing_keys`
 list is rejected as ambiguous. The bundled fixture keys can never verify
 remote or custom artifacts.
+
+The configuration also accepts `registry` and `reference_values`, each a
+signed envelope object matching the SDK's provider-registry and reference-
+values envelope schemas. They are REQUIRED together. `compatibility_matrix`
+accepts a signed provider-compatibility-matrix envelope object; all three
+options are only allowed with `demo_provider: false` and are verified against
+the configured trusted signing keys by Rust.
+
+```js
+const client = new Client({
+  demo_provider: false,
+  trusted_ed25519_signing_keys: [...],
+  registry: {...},
+  reference_values: {...},
+  compatibility_matrix: {...},
+});
+```
 
 ## Credentials
 

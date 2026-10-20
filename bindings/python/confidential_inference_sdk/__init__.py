@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
+CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION = 1
 CONFIDENTIAL_INFERENCE_FFI_OK = 0
 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT = 1
 CONFIDENTIAL_INFERENCE_FFI_PANIC = 2
@@ -25,6 +26,8 @@ CONFIDENTIAL_INFERENCE_FFI_BUSY = 3
 CONFIDENTIAL_INFERENCE_FFI_PENDING = 4
 CONFIDENTIAL_INFERENCE_FFI_UNSUPPORTED = 5
 CONFIDENTIAL_INFERENCE_FFI_INTERNAL = 6
+# A chat, response or verify operation failed; see ConfidentialInferenceError.dispatch.
+CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED = 7
 
 
 class ConfidentialInferenceError(RuntimeError):
@@ -34,6 +37,20 @@ class ConfidentialInferenceError(RuntimeError):
         code = self.error.get("code", "ffi_error")
         message = self.error.get("message", f"FFI status {status}")
         super().__init__(f"{code}: {message}")
+
+    @property
+    def dispatch(self) -> str | None:
+        """``not_dispatched``, ``rejected`` or ``unknown`` for operation failures.
+
+        ``unknown`` means the provider may have processed the request: do not
+        retry it elsewhere and do not account it as free.
+        """
+        return self.error.get("dispatch")
+
+    @property
+    def http_status(self) -> int | None:
+        """Provider HTTP status for ``rejected`` operation failures."""
+        return self.error.get("http_status")
 
 
 def _json_bytes(value: dict[str, Any] | bytes) -> bytes:
@@ -65,6 +82,7 @@ class _Native:
         self.path = _resolve_library_path(library_path)
         self.lib = ctypes.CDLL(str(self.path))
         self._configure()
+        self._validate_abi()
 
     def _configure(self) -> None:
         void_pp = ctypes.POINTER(ctypes.c_void_p)
@@ -77,7 +95,9 @@ class _Native:
         c.confidential_inference_sdk_free.restype = ctypes.c_int
         for name in (
             "confidential_inference_chat_blocking",
+            "confidential_inference_embeddings_blocking",
             "confidential_inference_response_blocking",
+            "confidential_inference_response_manage_blocking",
             "confidential_inference_verify_blocking",
         ):
             fn = getattr(c, name)
@@ -112,6 +132,23 @@ class _Native:
         c.confidential_inference_last_error.restype = ctypes.c_int
         c.confidential_inference_string_free.argtypes = [ctypes.c_void_p]
         c.confidential_inference_string_free.restype = None
+
+    @staticmethod
+    def _validate_abi_version(status: dict[str, Any]) -> None:
+        version = status.get("abi_version")
+        if version != CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION:
+            raise ConfidentialInferenceError(
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+                {
+                    "code": "abi_version_mismatch",
+                    "message": "Confidential Inference FFI ABI version mismatch: "
+                    f"binding expects {CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION}, "
+                    f"library reports {version!r}",
+                },
+            )
+
+    def _validate_abi(self) -> None:
+        self._validate_abi_version(self.status())
 
     def take_json_string(self, ptr: ctypes.c_void_p) -> Any:
         if not ptr:
@@ -248,14 +285,17 @@ class Stream:
     async def events_async(
         self, timeout_ms: int = 0, poll_interval: float = 0.01
     ) -> AsyncIterator[dict[str, Any]]:
-        while True:
-            event = await _to_thread_and_drain(self.next, timeout_ms)
-            if event is None:
-                await asyncio.sleep(poll_interval)
-                continue
-            yield event
-            if str(event.get("type")).lower() in {"closed", "done", "cancelled", "error"}:
-                break
+        try:
+            while True:
+                event = await _to_thread_and_drain(self.next, timeout_ms)
+                if event is None:
+                    await asyncio.sleep(poll_interval)
+                    continue
+                yield event
+                if str(event.get("type")).lower() in {"closed", "done", "cancelled", "error"}:
+                    break
+        finally:
+            await _to_thread_and_drain(self.close)
 
     def __del__(self) -> None:
         try:
@@ -332,6 +372,15 @@ class Client:
             self._native.lib.confidential_inference_chat_blocking, request, timeout_ms
         )
 
+    def embeddings(
+        self, request: dict[str, Any], timeout_ms: int = 0
+    ) -> dict[str, Any]:
+        return self._call_json(
+            self._native.lib.confidential_inference_embeddings_blocking,
+            request,
+            timeout_ms,
+        )
+
     def create_response(
         self, request: dict[str, Any], timeout_ms: int = 0
     ) -> dict[str, Any]:
@@ -342,6 +391,12 @@ class Client:
     def response(self, request: dict[str, Any], timeout_ms: int = 0) -> dict[str, Any]:
         return self.create_response(request, timeout_ms=timeout_ms)
 
+    def response_manage(self, request: dict[str, Any], timeout_ms: int = 0) -> dict[str, Any]:
+        return self._call_json(
+            self._native.lib.confidential_inference_response_manage_blocking,
+            request,
+            timeout_ms,
+        )
     def verify(self, provider: str, model: str, timeout_ms: int = 0) -> dict[str, Any]:
         return self._call_json(
             self._native.lib.confidential_inference_verify_blocking,

@@ -5,10 +5,112 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestValidateABIVersion(t *testing.T) {
+	if err := validateABIVersion(map[string]any{"abi_version": float64(CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION)}); err != nil {
+		t.Fatalf("matching ABI version rejected: %v", err)
+	}
+	if err := validateABIVersion(map[string]any{"abi_version": float64(CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION + 1)}); err == nil || !strings.Contains(err.Error(), "ABI version mismatch") {
+		t.Fatalf("mismatched ABI version was not rejected: %v", err)
+	}
+}
+
+func phase2Config(t *testing.T) Config {
+	t.Helper()
+	root := repoRoot(t)
+	registry, err := os.ReadFile(filepath.Join(root, "fixtures", "registry", "phase2-fixtures-registry.json"))
+	if err != nil {
+		t.Fatalf("read registry fixture: %v", err)
+	}
+	referenceValues, err := os.ReadFile(filepath.Join(root, "fixtures", "reference-values", "phase2-fixtures-envelope.json"))
+	if err != nil {
+		t.Fatalf("read reference-values fixture: %v", err)
+	}
+	demo := false
+	return Config{
+		DemoProvider: &demo,
+		TrustedEd25519SigningKeys: []TrustedSigningKey{{
+			Signer:             "confidential-inference",
+			KeyID:              "confidential-inference-phase2-fixture-ed25519-2026",
+			PublicKeyBase64URL: "cN-eInmtvsbRK_KSEYTJIi6yTthSAFv2QBOfUuWc2a4",
+		}},
+		Registry: registry, ReferenceValues: referenceValues,
+	}
+}
+
+func TestConfiguredClientOperatorTrustArtifacts(t *testing.T) {
+	config := phase2Config(t)
+	client, err := NewConfiguredClient(config)
+	if err != nil {
+		t.Fatalf("new operator client: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close operator client: %v", err)
+	}
+
+	demo := true
+	config.DemoProvider = &demo
+	if _, err := NewConfiguredClient(config); err == nil {
+		t.Fatal("accepted artifacts with demo_provider=true")
+	}
+
+	config = phase2Config(t)
+	config.ReferenceValues = nil
+	if _, err := NewConfiguredClient(config); err == nil {
+		t.Fatal("accepted incomplete artifact pair")
+	}
+
+	config = phase2Config(t)
+	config.TrustedEd25519SigningKeys[0].PublicKeyBase64URL = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if _, err := NewConfiguredClient(config); err == nil {
+		t.Fatal("accepted artifacts from untrusted signer")
+	}
+
+	config = phase2Config(t)
+	var envelope map[string]any
+	if err := json.Unmarshal(config.Registry, &envelope); err != nil {
+		t.Fatalf("parse registry fixture: %v", err)
+	}
+	envelope["payload"].(map[string]any)["version"] = "tampered"
+	config.Registry, err = json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal tampered registry: %v", err)
+	}
+	if _, err := NewConfiguredClient(config); err == nil {
+		t.Fatal("accepted tampered registry envelope")
+	}
+}
+
+func TestConfiguredClientCompatibilityMatrixTrust(t *testing.T) {
+	envelope, err := os.ReadFile(filepath.Join(repoRoot(t), "fixtures", "providers", "compatibility-matrix-envelope.json"))
+	if err != nil {
+		t.Fatalf("read compatibility matrix fixture: %v", err)
+	}
+	config := phase2Config(t)
+	config.TrustedEd25519SigningKeys = append(config.TrustedEd25519SigningKeys, TrustedSigningKey{
+		Signer:             "confidential-inference",
+		KeyID:              "confidential-inference-compatibility-fixture-ed25519-2026",
+		PublicKeyBase64URL: "bjLBl0Hwr4JgYSrpn9E9ijiURyLgiWTdI5c49VKmFTs",
+	})
+	config.CompatibilityMatrix = envelope
+	client, err := NewConfiguredClient(config)
+	if err != nil {
+		t.Fatalf("new client with signed compatibility matrix: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+
+	config.TrustedEd25519SigningKeys[1].PublicKeyBase64URL = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if _, err := NewConfiguredClient(config); err == nil {
+		t.Fatal("accepted compatibility matrix from untrusted signer")
+	}
+}
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -24,6 +126,9 @@ func chatRequest(prompt string) map[string]any {
 		"model":    "gpt-oss-120b",
 		"messages": []map[string]any{{"role": "user", "content": prompt}},
 	}
+}
+func embeddingsRequest(model string) map[string]any {
+	return map[string]any{"model": model, "input": "hello"}
 }
 
 func asError(t *testing.T, err error) *Error {
@@ -89,6 +194,20 @@ func TestChatReturnsVerifiedResponse(t *testing.T) {
 		t.Fatalf("content = %v", content)
 	}
 }
+func TestEmbeddingsReturnsResponse(t *testing.T) {
+	client, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+	result, err := client.Embeddings(embeddingsRequest("gpt-oss-120b"), 5*time.Second)
+	if err != nil {
+		t.Fatalf("embeddings: %v", err)
+	}
+	if result["response"].(map[string]any)["object"] != "list" {
+		t.Fatalf("object = %v, want list", result["response"].(map[string]any)["object"])
+	}
+}
 
 func TestVerifyReturnsRouteVerdict(t *testing.T) {
 	client, err := NewClient(nil)
@@ -122,6 +241,23 @@ func TestResponseReturnsShimObject(t *testing.T) {
 	}
 	if response["response"].(map[string]any)["object"] != "response" {
 		t.Fatalf("response.object = %v", response["response"])
+	}
+}
+func TestResponseManageReturnsStructuredUnsupportedOperationError(t *testing.T) {
+	client, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+
+	_, err = client.ResponseManage(map[string]any{
+		"op": "retrieve", "provider": "demo", "provider_response_id": "resp_demo", "params": map[string]any{},
+	}, 5*time.Second)
+	if err == nil {
+		t.Fatal("expected unsupported lifecycle operation")
+	}
+	if ffiErr := asError(t, err); ffiErr.Code == "" || ffiErr.Dispatch == "" {
+		t.Fatalf("response manage error lacks code/dispatch: %+v", ffiErr)
 	}
 }
 
@@ -187,13 +323,12 @@ func TestStreamFailsClosedForNonStreamingRoute(t *testing.T) {
 		}
 		events = append(events, event)
 	}
-	// The demo route does not support streaming; the SDK fails closed with a
-	// structured error event instead of emitting an unverified stream.
-	if len(events) == 0 {
-		t.Fatal("expected at least one event")
+	if len(events) != 1 || events[0]["type"] != "error" || events[0]["status"] != "failed" {
+		t.Fatalf("events = %v", events)
 	}
-	if events[0]["type"] != "error" || events[0]["status"] != "failed" {
-		t.Fatalf("first event = %v", events[0])
+	detail, _ := events[0]["error"].(map[string]any)
+	if detail["code"] != "streaming_not_supported" || detail["dispatch"] != DispatchNotDispatched {
+		t.Fatalf("stream error lacks code/dispatch classification: %v", detail)
 	}
 }
 
@@ -248,22 +383,38 @@ func TestStreamCloseWhileNextInFlightRefusesAndPreservesHandle(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 	defer client.Close()
-	stream, err := client.StartStream(chatRequest("busy stream"))
-	if err != nil {
-		t.Fatalf("start stream: %v", err)
-	}
-	// A 30s poll keeps stream_next blocked inside the FFI, so Close observes a
-	// deterministically in-flight call once inFlight is bumped.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _ = stream.Next(30 * time.Second)
-	}()
-	for {
-		stream.mu.Lock()
-		inFlight := stream.inFlight
-		stream.mu.Unlock()
-		if inFlight > 0 {
+	// Next may return before this goroutine observes it in flight (the demo
+	// stream can terminate quickly); retry with a fresh stream until Close
+	// provably races a running Next.
+	var stream *Stream
+	var done chan struct{}
+	for observed := false; !observed; {
+		stream, err = client.StartStream(chatRequest("busy stream"))
+		if err != nil {
+			t.Fatalf("start stream: %v", err)
+		}
+		done = make(chan struct{})
+		go func(s *Stream, d chan struct{}) {
+			defer close(d)
+			_, _ = s.Next(30 * time.Second)
+		}(stream, done)
+		for {
+			stream.mu.Lock()
+			inFlight := stream.inFlight
+			stream.mu.Unlock()
+			if inFlight > 0 {
+				observed = true
+				break
+			}
+			select {
+			case <-done:
+				if err := stream.Close(); err != nil {
+					t.Fatalf("close settled stream: %v", err)
+				}
+			default:
+				runtime.Gosched()
+				continue
+			}
 			break
 		}
 	}
@@ -287,19 +438,35 @@ func TestClientCloseWhileCallInFlightRefusesAndPreservesHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	done := make(chan error, 1)
-	go func() {
-		response, err := client.Chat(chatRequest("in-flight"), 5*time.Second)
-		if err == nil && response["verdict"].(map[string]any)["status"] != "verified" {
-			err = localError("unexpected_verdict", "chat verdict was not verified")
-		}
-		done <- err
-	}()
-	for {
-		client.mu.Lock()
-		inFlight := client.inFlight
-		client.mu.Unlock()
-		if inFlight > 0 {
+	// The demo call is fast and may finish before this goroutine observes it
+	// in flight; retry until Close provably races a running call.
+	var done chan error
+	for observed := false; !observed; {
+		done = make(chan error, 1)
+		go func() {
+			response, err := client.Chat(chatRequest("in-flight"), 5*time.Second)
+			if err == nil && response["verdict"].(map[string]any)["status"] != "verified" {
+				err = localError("unexpected_verdict", "chat verdict was not verified")
+			}
+			done <- err
+		}()
+		for {
+			client.mu.Lock()
+			inFlight := client.inFlight
+			client.mu.Unlock()
+			if inFlight > 0 {
+				observed = true
+				break
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("chat: %v", err)
+				}
+			default:
+				runtime.Gosched()
+				continue
+			}
 			break
 		}
 	}
@@ -336,6 +503,52 @@ func TestFailedInferenceSurfacesNativeErrorCode(t *testing.T) {
 	}
 	if !strings.Contains(ffiErr.Message, "missing field `model`") {
 		t.Fatalf("message = %q", ffiErr.Message)
+	}
+}
+
+// SDK operation failures must surface as errors, never as a successful result
+// map, and must say whether the provider may have processed the request.
+func TestOperationFailureIsErrorWithDispatchClassification(t *testing.T) {
+	client, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+
+	result, err := client.Chat(map[string]any{
+		"model":    "no-such-model",
+		"messages": []map[string]any{{"role": "user", "content": "route me"}},
+	}, 5*time.Second)
+	if result != nil {
+		t.Fatalf("failed operation returned a result: %v", result)
+	}
+	ffiErr := asError(t, err)
+	if ffiErr.Status != StatusOperationFailed {
+		t.Fatalf("status = %d, want StatusOperationFailed", ffiErr.Status)
+	}
+	if ffiErr.Dispatch != DispatchNotDispatched || ffiErr.HTTPStatus != 0 {
+		t.Fatalf("dispatch = %q http_status = %d, want not_dispatched/0", ffiErr.Dispatch, ffiErr.HTTPStatus)
+	}
+	if ffiErr.Code == "" || ffiErr.Message == "" {
+		t.Fatalf("operation error missing code/message: %+v", ffiErr)
+	}
+}
+func TestEmbeddingsOperationFailureClassified(t *testing.T) {
+	client, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+	result, err := client.Embeddings(embeddingsRequest("no-such-model"), 5*time.Second)
+	if result != nil {
+		t.Fatalf("failed operation returned a result: %v", result)
+	}
+	ffiErr := asError(t, err)
+	if ffiErr.Status != StatusOperationFailed || ffiErr.Dispatch != DispatchNotDispatched || ffiErr.HTTPStatus != 0 {
+		t.Fatalf("unexpected operation classification: %+v", ffiErr)
+	}
+	if ffiErr.Code == "" || ffiErr.Message == "" {
+		t.Fatalf("operation error missing code/message: %+v", ffiErr)
 	}
 }
 

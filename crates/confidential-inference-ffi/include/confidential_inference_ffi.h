@@ -7,6 +7,7 @@
 extern "C" {
 #endif
 
+#define CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION 1
 #define CONFIDENTIAL_INFERENCE_FFI_OK 0
 #define CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT 1
 #define CONFIDENTIAL_INFERENCE_FFI_PANIC 2
@@ -14,6 +15,10 @@ extern "C" {
 #define CONFIDENTIAL_INFERENCE_FFI_PENDING 4
 #define CONFIDENTIAL_INFERENCE_FFI_UNSUPPORTED 5
 #define CONFIDENTIAL_INFERENCE_FFI_INTERNAL 6
+/* An SDK operation failed. The error envelope carries "code", "message",
+ * "dispatch" ("not_dispatched" | "rejected" | "unknown": whether the provider
+ * may have processed the request) and, for "rejected", "http_status". */
+#define CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED 7
 
 typedef struct ConfidentialInferenceFfiClient ConfidentialInferenceFfiClient;
 typedef struct ConfidentialInferenceFfiStream ConfidentialInferenceFfiStream;
@@ -38,6 +43,19 @@ int confidential_inference_response_blocking(
     uint64_t timeout_ms,
     char **out_response_json
 );
+int confidential_inference_response_manage_blocking(
+    ConfidentialInferenceFfiClient *client,
+    const char *request_json,
+    uint64_t timeout_ms,
+    char **out_response_json
+);
+int confidential_inference_embeddings_blocking(
+    ConfidentialInferenceFfiClient *client,
+    const char *request_json,
+    uint64_t timeout_ms,
+    char **out_response_json
+);
+
 int confidential_inference_verify_blocking(
     ConfidentialInferenceFfiClient *client,
     const char *request_json,

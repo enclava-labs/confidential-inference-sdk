@@ -19,7 +19,13 @@ from confidential_inference_sdk import (  # noqa: E402
     Client,
     ConfidentialInferenceError,
     Stream,
+    _Native,
+    CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION,
 )
+
+
+def _embeddings_request(model: str = "gpt-oss-120b") -> dict:
+    return {"model": model, "input": "python embeddings binding path"}
 
 
 def _chat_request(prompt: str = "python binding path") -> dict:
@@ -30,6 +36,20 @@ def _chat_request(prompt: str = "python binding path") -> dict:
 
 
 class ConfidentialInferencePythonBindingTests(unittest.TestCase):
+    def test_abi_version_validation_rejects_mismatch(self) -> None:
+        with self.assertRaises(ConfidentialInferenceError) as raised:
+            _Native._validate_abi_version(
+                {"abi_version": CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION + 1}
+            )
+        self.assertEqual(raised.exception.error["code"], "abi_version_mismatch")
+        with self.assertRaises(ConfidentialInferenceError):
+            _Native._validate_abi_version({})
+
+    def test_abi_version_validation_accepts_match(self) -> None:
+        _Native._validate_abi_version(
+            {"abi_version": CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION}
+        )
+
     def test_status_reports_blocking_and_stream_capabilities(self) -> None:
         with Client() as client:
             status = client.status()
@@ -52,6 +72,14 @@ class ConfidentialInferencePythonBindingTests(unittest.TestCase):
             "demo confidential response for e2ee-gpt-oss-120b-p: python binding path",
         )
 
+    def test_embeddings_blocking_returns_verified_response(self) -> None:
+        with Client() as client:
+            response = client.embeddings(_embeddings_request(), timeout_ms=5_000)
+        self.assertEqual(response["provider"], "demo")
+        self.assertEqual(response["verdict"]["status"], "verified")
+        self.assertEqual(response["response"]["object"], "list")
+        self.assertTrue(response["response"]["data"])
+
     def test_verify_blocking_returns_route_verdict(self) -> None:
         with Client() as client:
             verdict = client.verify("demo", "gpt-oss-120b", timeout_ms=5_000)
@@ -65,6 +93,20 @@ class ConfidentialInferencePythonBindingTests(unittest.TestCase):
             )
         self.assertEqual(response["provider"], "demo")
         self.assertEqual(response["response"]["object"], "response")
+
+    def test_response_manage_preserves_structured_operation_error(self) -> None:
+        with Client() as client:
+            with self.assertRaises(ConfidentialInferenceError) as raised:
+                client.response_manage(
+                    {
+                        "op": "retrieve",
+                        "provider": "demo",
+                        "provider_response_id": "resp_demo",
+                        "params": {},
+                    },
+                    timeout_ms=5_000,
+                )
+        self.assertTrue(raised.exception.error.get("code"))
 
     def test_model_discovery_and_confidentiality_catalog(self) -> None:
         with Client() as client:
@@ -115,23 +157,20 @@ class ConfidentialInferencePythonBindingTests(unittest.TestCase):
 
         asyncio.run(main())
 
-    def test_stream_fails_closed_for_non_streaming_route(self) -> None:
-        with Client() as client:
+
+    def test_stream_events_async_fails_closed_with_error_classification(self) -> None:
+        async def main() -> None:
+            client = Client()
             stream = client.start_stream(_chat_request("stream path"))
-            self.assertIsInstance(stream, Stream)
-            events = []
-            while True:
-                event = stream.next(timeout_ms=5_000)
-                if event is None:
-                    continue
-                events.append(event)
-                if event.get("type") in {"done", "closed", "cancelled", "error"}:
-                    break
-            stream.close()
-        # The demo route does not support streaming; the SDK fails closed with
-        # a structured error event rather than emitting an unverified stream.
-        self.assertEqual(events[0]["type"], "error")
-        self.assertEqual(events[0]["status"], "failed")
+            events = [event async for event in stream.events_async(timeout_ms=5_000)]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["type"], "error")
+            self.assertEqual(events[0]["error"]["code"], "streaming_not_supported")
+            self.assertEqual(events[0]["error"]["dispatch"], "not_dispatched")
+            self.assertTrue(stream.closed)
+            client.close()
+
+        asyncio.run(main())
 
     def test_closed_client_rejects_calls(self) -> None:
         client = Client()
@@ -199,6 +238,15 @@ class ConfidentialInferencePythonBindingTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error["code"], "invalid_request_json")
         self.assertIn("model", ctx.exception.error["message"])
         client.close()
+    def test_embeddings_operation_failure_is_classified(self) -> None:
+        with Client() as client:
+            with self.assertRaises(ConfidentialInferenceError) as ctx:
+                client.embeddings(_embeddings_request("no-such-model"), timeout_ms=5_000)
+        self.assertEqual(ctx.exception.status, 7)
+        self.assertEqual(ctx.exception.dispatch, "not_dispatched")
+        self.assertEqual(ctx.exception.http_status, None)
+        self.assertTrue(ctx.exception.error["code"])
+        self.assertTrue(ctx.exception.error["message"])
 
     def test_concurrent_async_calls_all_resolve(self) -> None:
         async def main() -> None:

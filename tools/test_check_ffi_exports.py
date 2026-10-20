@@ -35,6 +35,7 @@ class CheckFfiExportsTests(unittest.TestCase):
         self.assertEqual(report["violations"], [])
         self.assertIn("confidential_inference_sdk_new", report["rust_exports"])
         self.assertIn("confidential_inference_string_free", report["rust_exports"])
+        self.assertIn("confidential_inference_response_manage_blocking", report["rust_exports"])
 
     def test_valid_export_surface_passes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -93,7 +93,12 @@ COMPATIBILITY_ENUM_VALUES = {
     "model_binding_support": {"unsupported", "partial", "verified"},
 }
 COMPATIBILITY_LIST_ENUM_VALUES = {
-    "supported_openai_endpoints": {"chat_completions", "models", "confidentiality"},
+    "supported_openai_endpoints": {
+        "chat_completions",
+        "models",
+        "confidentiality",
+        "embeddings",
+    },
     "required_credentials": {"bearer_token", "api_key_header"},
 }
 COMPATIBILITY_PROFILE_REPORT_FIELDS = (

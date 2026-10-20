@@ -32,6 +32,7 @@ function callAsync(fn, ...args) {
   });
 }
 
+const CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION = 1;
 const CONFIDENTIAL_INFERENCE_FFI_OK = 0;
 const CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT = 1;
 const CONFIDENTIAL_INFERENCE_FFI_PANIC = 2;
@@ -39,6 +40,8 @@ const CONFIDENTIAL_INFERENCE_FFI_BUSY = 3;
 const CONFIDENTIAL_INFERENCE_FFI_PENDING = 4;
 const CONFIDENTIAL_INFERENCE_FFI_UNSUPPORTED = 5;
 const CONFIDENTIAL_INFERENCE_FFI_INTERNAL = 6;
+// A chat, response or verify operation failed; see ConfidentialInferenceError#dispatch.
+const CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED = 7;
 
 class ConfidentialInferenceError extends Error {
   constructor(status, error) {
@@ -49,6 +52,20 @@ class ConfidentialInferenceError extends Error {
     this.name = 'ConfidentialInferenceError';
     this.status = status;
     this.error = detail;
+    // 'not_dispatched' | 'rejected' | 'unknown' for operation failures;
+    // 'unknown' means the provider may have processed the request.
+    this.dispatch = detail.dispatch;
+    this.httpStatus = detail.http_status;
+  }
+}
+
+// Refuse a native library built for a different ABI before creating clients.
+function validateAbiVersion(version) {
+  if (version !== CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION) {
+    throw new ConfidentialInferenceError(CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT, {
+      code: 'abi_version_mismatch',
+      message: `Confidential Inference FFI ABI version mismatch: binding expects ${CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION}, library reports ${JSON.stringify(version)}`,
+    });
   }
 }
 
@@ -92,7 +109,19 @@ function configureFunctions(lib) {
       'uint64_t',
       StringOut,
     ]),
+    confidential_inference_embeddings_blocking: lib.func('confidential_inference_embeddings_blocking', 'int', [
+      ClientPtr,
+      'str',
+      'uint64_t',
+      StringOut,
+    ]),
     confidential_inference_response_blocking: lib.func('confidential_inference_response_blocking', 'int', [
+      ClientPtr,
+      'str',
+      'uint64_t',
+      StringOut,
+    ]),
+    confidential_inference_response_manage_blocking: lib.func('confidential_inference_response_manage_blocking', 'int', [
       ClientPtr,
       'str',
       'uint64_t',
@@ -147,6 +176,7 @@ class Native {
     this.path = resolveLibraryPath(libraryPath);
     this.lib = koffi.load(this.path);
     this.functions = configureFunctions(this.lib);
+    this.validateAbi();
   }
 
   takeJsonString(ptr) {
@@ -170,6 +200,10 @@ class Native {
     const status = this.functions.confidential_inference_status(out);
     this.raiseForStatus(status);
     return asObject(this.takeJsonString(out[0]));
+  }
+
+  validateAbi() {
+    validateAbiVersion(this.status().abi_version);
   }
 
   lastError() {
@@ -357,6 +391,13 @@ class Client {
     );
   }
 
+  async embeddings(request, timeoutMs = 0) {
+    return this._callJson(
+      this._native.functions.confidential_inference_embeddings_blocking,
+      request,
+      timeoutMs
+    );
+  }
   async createResponse(request, timeoutMs = 0) {
     return this._callJson(
       this._native.functions.confidential_inference_response_blocking,
@@ -367,6 +408,13 @@ class Client {
 
   async response(request, timeoutMs = 0) {
     return this.createResponse(request, timeoutMs);
+  }
+  async responseManage(request, timeoutMs = 0) {
+    return this._callJson(
+      this._native.functions.confidential_inference_response_manage_blocking,
+      request,
+      timeoutMs
+    );
   }
 
   async verify(provider, model, timeoutMs = 0) {
@@ -525,7 +573,9 @@ module.exports = {
   Client,
   Stream,
   ConfidentialInferenceError,
+  _validateAbiVersion: validateAbiVersion,
   status,
+  CONFIDENTIAL_INFERENCE_FFI_ABI_VERSION,
   CONFIDENTIAL_INFERENCE_FFI_OK,
   CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
   CONFIDENTIAL_INFERENCE_FFI_PANIC,
@@ -533,4 +583,5 @@ module.exports = {
   CONFIDENTIAL_INFERENCE_FFI_PENDING,
   CONFIDENTIAL_INFERENCE_FFI_UNSUPPORTED,
   CONFIDENTIAL_INFERENCE_FFI_INTERNAL,
+  CONFIDENTIAL_INFERENCE_FFI_OPERATION_FAILED,
 };
