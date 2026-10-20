@@ -1,0 +1,27 @@
+[package]
+name = "confidential-inference-trust-cli"
+description = "Operator tooling for pinning confidential inference trust artifacts."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "confidential-inference-trust"
+path = "src/main.rs"
+
+[dependencies]
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+confidential-inference-attestation = { version = "0.1.0", path = "../confidential-inference-attestation" }
+confidential-inference-openai = { version = "0.1.0", path = "../confidential-inference-openai" }
+confidential-inference-providers = { version = "0.1.0", path = "../confidential-inference-providers" }
+confidential-inference-sdk = { version = "0.1.0", path = "../confidential-inference-sdk" }
+ed25519-compact = { version = "2.1.1", default-features = false, features = ["std"] }
+getrandom.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio.workspace = true

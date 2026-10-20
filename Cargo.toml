@@ -7,6 +7,7 @@ members = [
     "crates/confidential-inference-sdk",
     "crates/confidential-inference-proxy",
     "crates/confidential-inference-ffi",
+    "crates/confidential-inference-trust-cli",
     "demo/confidential-demo",
 ]
 
@@ -24,6 +25,8 @@ categories = ["cryptography", "network-programming"]
 
 [workspace.dependencies]
 async-trait = "0.1"
+futures-core = "0.3"
+futures-util = "0.3"
 base64ct = { version = "1", default-features = false }
 getrandom = "0.4"
 serde = { version = "1", features = ["derive"] }
