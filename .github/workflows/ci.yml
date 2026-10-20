@@ -39,6 +39,7 @@ jobs:
       - name: Fuzz target build when targets are checked in
         run: |
           if [ -d fuzz ]; then
+            rustup toolchain install nightly --profile minimal
             cargo install --locked cargo-fuzz
             cargo fuzz build
           else
@@ -76,6 +77,76 @@ jobs:
       - name: Node binding tests
         run: npm test
         working-directory: bindings/node
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25"
+
+      - name: Go binding tests
+        run: go test -race -count=1 ./...
+        working-directory: bindings/go
+
+  msrv:
+    name: MSRV check (rust-version)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install workspace rust-version (1.97)
+        run: rustup toolchain install 1.97 --profile minimal
+
+      - name: Workspace check at MSRV
+        run: cargo +1.97 check --workspace --locked --all-targets
+
+  ffi-bindings-matrix:
+    name: FFI build and binding tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Select stable Rust
+        run: rustup default stable
+
+      - name: FFI build
+        run: cargo build -p confidential-inference-ffi --locked
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+
+      - name: Node binding dependencies
+        run: npm ci
+        working-directory: bindings/node
+
+      - name: Node binding tests
+        run: npm test
+        working-directory: bindings/node
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25"
+
+      - name: Go binding tests
+        run: go test -count=1 ./...
+        working-directory: bindings/go
 
   live-conformance:
     name: Live conformance dry run
