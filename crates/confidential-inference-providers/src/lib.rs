@@ -14,6 +14,8 @@ mod provider;
 mod provider_evidence_corpus;
 mod reference_values_generator;
 mod registry;
+mod sev_snp;
+pub use sev_snp::{AmdKdsSevSnpVcekResolver, SevSnpVcekResolver};
 
 pub use chutes_live::ChutesHttpProvider;
 pub use compatibility::{
@@ -49,14 +51,16 @@ pub use nvidia::{
 };
 pub use phase2_fixtures::{TinfoilFixtureProvider, VeniceFixtureProvider};
 pub use provider::{
-    EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderError,
-    ProviderRequestConfidentiality, Result, SdkAppE2eeConfig, SdkAppE2eeSecretKey,
-    SdkAppE2eeSession, SdkEncryptedChatEnvelope, SdkEncryptedChatResponseEnvelope,
-    SDK_APP_E2EE_ALG,
+    DispatchOutcome, EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderChatStream,
+    ProviderEmbeddingsRequest, ProviderError, ProviderRequestConfidentiality,
+    ProviderResponseManageRequest, ResponseManageOperation, Result, SdkAppE2eeConfig,
+    SdkAppE2eeSecretKey, SdkAppE2eeSession, SdkEncryptedChatEnvelope,
+    SdkEncryptedChatResponseEnvelope, SDK_APP_E2EE_ALG,
 };
 pub use reference_values_generator::{
-    generate_app_e2ee_reference_values, generate_tinfoil_live_reference_values,
-    AppE2eeReferenceEvidence, AppE2eeReferenceValuesInput, TinfoilLiveReferenceValuesInput,
+    generate_app_e2ee_reference_values, generate_chutes_live_reference_values,
+    generate_tinfoil_live_reference_values, AppE2eeReferenceEvidence, AppE2eeReferenceValuesInput,
+    ChutesLiveReferenceValuesInput, TinfoilLiveReferenceValuesInput,
 };
 pub use registry::{
     EncryptionRequirement, ModelAliasCase, ModelAliasMatrix, ModelAliasMatrixEnvelope,

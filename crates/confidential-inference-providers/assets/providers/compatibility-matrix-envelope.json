@@ -1,4 +1,5 @@
 {
+  "schema": "confidential-inference.provider-compatibility-matrix-envelope.v1",
   "payload": {
     "providers": {
       "chutes": {
@@ -48,7 +49,8 @@
         "route_execution_status": "executable_fixture",
         "streaming": "unsupported",
         "supported_openai_endpoints": [
-          "chat_completions"
+          "chat_completions",
+          "embeddings"
         ],
         "token_parameter_rewrite": "preserve_max_tokens"
       },
@@ -208,11 +210,10 @@
     },
     "schema": "confidential-inference.provider-compatibility-matrix.v1"
   },
-  "schema": "confidential-inference.provider-compatibility-matrix-envelope.v1",
   "signature": {
-    "alg": "ed25519",
-    "key_id": "confidential-inference-compatibility-fixture-ed25519-2026",
     "signer": "confidential-inference",
-    "value": "base64url:oCc5PscuGMTv4Sy-D6ocLW9H_M57iKThnX3d8lUlT0ROtVEIAY-B9AqmjBX4l3nDRi8t8MpfQHbw6m8nmnB2AQ"
+    "key_id": "confidential-inference-compatibility-fixture-ed25519-2026",
+    "alg": "ed25519",
+    "value": "base64url:x53w3rHiGt2AtwOzgh6lYLdIvUHFJVsMu-ME6v3iga1AxFj20LuWf42EbHyiNUMB9nzuwtwregWx08OMapCABA"
   }
 }

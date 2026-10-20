@@ -3,14 +3,48 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::ChaCha20Poly1305;
-use confidential_inference_openai::{ChatCompletionRequest, ChatCompletionResponse};
+use confidential_inference_openai::{
+    ChatCompletionRequest, ChatCompletionResponse, EmbeddingsResponse,
+};
+use futures_core::Stream;
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
+use std::pin::Pin;
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponseManageOperation {
+    Retrieve,
+    ListInputItems,
+    Cancel,
+    Delete,
+    InputTokens,
+    Compact,
+}
+
+impl ResponseManageOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retrieve => "retrieve",
+            Self::ListInputItems => "list_input_items",
+            Self::Cancel => "cancel",
+            Self::Delete => "delete",
+            Self::InputTokens => "input_tokens",
+            Self::Compact => "compact",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderResponseManageRequest {
+    pub operation: ResponseManageOperation,
+    pub response_id: String,
+    pub params: Value,
+}
 
 use crate::RouteDefinition;
 
@@ -21,6 +55,8 @@ const SDK_ENCRYPTED_CHAT_RESPONSE_SCHEMA: &str =
 pub const SDK_APP_E2EE_ALG: &str = "x25519-hkdf-sha256-chacha20poly1305";
 
 pub type Result<T> = std::result::Result<T, ProviderError>;
+
+pub type ProviderChatStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>;
 
 pub enum ProviderError {
     Unavailable(String),
@@ -52,9 +88,12 @@ impl ProviderError {
         matches!(self, ProviderError::KeyRotation { .. })
     }
 
-    /// Returns true when retrying the request against another policy-compatible
-    /// provider is appropriate. Authentication, compatibility, parsing, and
-    /// cryptographic adapter failures deliberately remain fail-closed.
+    /// Returns true when retrying evidence collection or verification against
+    /// another policy-compatible provider is appropriate. Authentication,
+    /// compatibility, parsing, and cryptographic adapter failures deliberately
+    /// remain fail-closed. Failures of a chat *execution* must use
+    /// [`ProviderError::chat_dispatch_outcome`] instead: a request that may
+    /// already have been processed must never be replayed elsewhere.
     pub fn is_retryable_outage(&self) -> bool {
         match self {
             ProviderError::Unavailable(_) | ProviderError::Http(_) => true,
@@ -65,6 +104,64 @@ impl ProviderError {
             | ProviderError::Compatibility(_)
             | ProviderError::KeyRotation { .. }
             | ProviderError::Json(_) => false,
+        }
+    }
+
+    /// Classifies a failure returned by [`ProviderAdapter::chat`] by whether the
+    /// provider may have processed the request. Ambiguous failures are
+    /// [`DispatchOutcome::Unknown`] so integrators never treat possibly
+    /// executed (and billable) work as free or replay it on another route.
+    pub fn chat_dispatch_outcome(&self) -> DispatchOutcome {
+        match self {
+            // Raised before any request bytes leave the adapter (for example
+            // no attested instance is available) or a key-rotation refusal.
+            ProviderError::Unavailable(_) | ProviderError::KeyRotation { .. } => {
+                DispatchOutcome::NotDispatched
+            }
+            ProviderError::HttpStatus { status, .. } => {
+                DispatchOutcome::Rejected { status: *status }
+            }
+            // Transport failures can occur after the request was sent;
+            // adapter/JSON failures include undecryptable or unparsable
+            // responses to work the provider performed.
+            ProviderError::Http(_)
+            | ProviderError::Adapter(_)
+            | ProviderError::Compatibility(_)
+            | ProviderError::Json(_) => DispatchOutcome::Unknown,
+        }
+    }
+
+    pub fn embeddings_dispatch_outcome(&self) -> DispatchOutcome {
+        self.chat_dispatch_outcome()
+    }
+}
+
+/// Whether a failed chat execution may have been processed by the provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DispatchOutcome {
+    /// The request provably did not reach the provider.
+    NotDispatched,
+    /// The provider answered with a definitive non-success HTTP status.
+    Rejected { status: u16 },
+    /// The provider may have processed the request; outcome is unknown.
+    Unknown,
+}
+
+impl DispatchOutcome {
+    /// Only failures that prove no work was done may move to another route:
+    /// never-dispatched requests and explicit "not processed" statuses.
+    pub fn allows_route_fallback(self) -> bool {
+        matches!(
+            self,
+            DispatchOutcome::NotDispatched | DispatchOutcome::Rejected { status: 429 | 503 }
+        )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DispatchOutcome::NotDispatched => "not_dispatched",
+            DispatchOutcome::Rejected { .. } => "rejected",
+            DispatchOutcome::Unknown => "unknown",
         }
     }
 }
@@ -149,6 +246,8 @@ pub struct ProviderChatRequest {
     #[serde(skip)]
     sdk_app_e2ee_context: Option<SdkAppE2eeClientContext>,
 }
+
+pub type ProviderEmbeddingsRequest = ProviderChatRequest;
 
 impl Debug for ProviderChatRequest {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
@@ -823,6 +922,36 @@ pub trait ProviderAdapter: Send + Sync {
         route: &RouteDefinition,
         request: ProviderChatRequest,
     ) -> Result<ChatCompletionResponse>;
+
+    async fn chat_stream(
+        &self,
+        _route: &RouteDefinition,
+        _request: ProviderChatRequest,
+    ) -> Result<ProviderChatStream> {
+        Err(ProviderError::Compatibility(
+            "provider adapter does not support chat streaming".into(),
+        ))
+    }
+
+    async fn embeddings(
+        &self,
+        _route: &RouteDefinition,
+        _request: ProviderEmbeddingsRequest,
+    ) -> Result<EmbeddingsResponse> {
+        Err(ProviderError::Compatibility(
+            "provider adapter does not support embeddings".into(),
+        ))
+    }
+
+    async fn response_manage(
+        &self,
+        _route: &RouteDefinition,
+        _request: ProviderResponseManageRequest,
+    ) -> Result<Value> {
+        Err(ProviderError::Compatibility(
+            "provider adapter does not support Responses lifecycle follow-ups".into(),
+        ))
+    }
 }
 
 fn redact_sensitive(message: &str) -> String {
@@ -993,6 +1122,79 @@ fn redacted_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::{EncryptionRequirement, RouteLifecycle, StreamingSupport};
+    use confidential_inference_attestation::{
+        AliasConfidence, BoundDataRequirement, ChannelBindingKind, FreshnessClass,
+        ResponseIntegrityRequirement, TrustTier,
+    };
+    use confidential_inference_openai::{ChatCompletionResponse, EmbeddingsResponse};
+
+    #[tokio::test]
+    async fn default_chat_stream_keeps_sdk_encrypted_routes_fail_closed() {
+        struct Unsupported;
+        #[async_trait]
+        impl ProviderAdapter for Unsupported {
+            fn provider_id(&self) -> &str {
+                "test"
+            }
+            fn routes(&self) -> Vec<RouteDefinition> {
+                Vec::new()
+            }
+            async fn fetch_evidence(
+                &self,
+                _: &RouteDefinition,
+                _: &EvidenceRequest,
+            ) -> Result<Vec<u8>> {
+                unreachable!()
+            }
+            async fn chat(
+                &self,
+                _: &RouteDefinition,
+                _: ProviderChatRequest,
+            ) -> Result<ChatCompletionResponse> {
+                unreachable!()
+            }
+            async fn embeddings(
+                &self,
+                _: &RouteDefinition,
+                _: ProviderEmbeddingsRequest,
+            ) -> Result<EmbeddingsResponse> {
+                unreachable!()
+            }
+        }
+        let error = Unsupported
+            .chat_stream(
+                &RouteDefinition {
+                    route_id: "test".into(),
+                    route_status: RouteLifecycle::Active,
+                    provider: "test".into(),
+                    provider_model: "model".into(),
+                    evidence_family: "test".into(),
+                    api_base_url: "https://example.invalid".into(),
+                    evidence_endpoint: "https://example.invalid".into(),
+                    adapter_version: "test".into(),
+                    freshness_class: FreshnessClass::PerRequest,
+                    channel_binding_kind: ChannelBindingKind::None,
+                    trust_tier: TrustTier::None,
+                    request_confidentiality_requirement: BoundDataRequirement::NotRequired,
+                    response_confidentiality_requirement: BoundDataRequirement::NotRequired,
+                    response_integrity_requirement: ResponseIntegrityRequirement::NotRequired,
+                    accepted_gpu_tees: Vec::new(),
+                    request_encryption: EncryptionRequirement::NotRequired,
+                    response_decryption: EncryptionRequirement::NotRequired,
+                    streaming: StreamingSupport::Unsupported,
+                    alias_confidence: AliasConfidence::Curated,
+                },
+                ProviderChatRequest::with_confidentiality(
+                    serde_json::json!({"ciphertext":"secret"}),
+                    ProviderRequestConfidentiality::SdkEncrypted,
+                ),
+            )
+            .await
+            .err()
+            .expect("default chat_stream must reject SDK-encrypted requests");
+        assert!(matches!(error, ProviderError::Compatibility(_)));
+    }
 
     #[test]
     fn provider_error_display_and_debug_redact_sensitive_values() {

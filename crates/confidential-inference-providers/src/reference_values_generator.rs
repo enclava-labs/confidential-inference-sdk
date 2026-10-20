@@ -41,6 +41,89 @@ pub enum AppE2eeReferenceEvidence {
     Chutes(ChutesE2eeEvidence),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChutesLiveReferenceValuesInput {
+    pub version: String,
+    pub issuer: String,
+    pub valid_from: String,
+    pub valid_until: String,
+    pub valid_until_epoch_ms: u64,
+    pub canonical_model: String,
+    pub route: RouteDefinition,
+    pub verified_measurements: Vec<String>,
+}
+
+pub fn generate_chutes_live_reference_values(
+    input: ChutesLiveReferenceValuesInput,
+) -> Result<ReferenceValuesPayload> {
+    if input.route.provider != "chutes" || input.route.evidence_family != "chutes_live_e2ee" {
+        return Err(ProviderError::Compatibility(
+            "Chutes live reference values require a chutes_live_e2ee route".into(),
+        ));
+    }
+    for (field, value) in [
+        ("canonical_model", input.canonical_model.as_str()),
+        ("version", input.version.as_str()),
+        ("issuer", input.issuer.as_str()),
+        ("valid_from", input.valid_from.as_str()),
+        ("valid_until", input.valid_until.as_str()),
+    ] {
+        required_for("Chutes live reference values", field, value)?;
+    }
+    let measurements = input
+        .verified_measurements
+        .into_iter()
+        .map(|measurement| measurement.trim().to_owned())
+        .filter(|measurement| !measurement.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if measurements.is_empty() {
+        return Err(ProviderError::Compatibility(
+            "Chutes live reference values require verified TDX measurements".into(),
+        ));
+    }
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        input.route.route_id.clone(),
+        RouteReference {
+            canonical_model: input.canonical_model,
+            provider_model: input.route.provider_model,
+            evidence_family: input.route.evidence_family,
+            channel_binding_kind: input.route.channel_binding_kind,
+            trust_tier: input.route.trust_tier,
+            accepted_cpu_tees: vec![confidential_inference_attestation::CpuTeeKind::Tdx],
+            e2ee_public_key_digest: NOT_APPLICABLE_KEY_DIGEST.into(),
+            response_signing_key_digest: None,
+            tls_spki_sha256: None,
+            workload_images: Vec::new(),
+            workload_image_digest: NOT_APPLICABLE_KEY_DIGEST.into(),
+            model_artifacts: Vec::new(),
+            valid_until: input.valid_until.clone(),
+            valid_until_epoch_ms: input.valid_until_epoch_ms,
+        },
+    );
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        input.route.provider,
+        ProviderReference {
+            accepted_measurements: measurements,
+            routes,
+        },
+    );
+    Ok(ReferenceValuesPayload {
+        schema: ReferenceValuesPayload::SCHEMA.into(),
+        version: input.version,
+        issuer: input.issuer,
+        valid_from: input.valid_from,
+        valid_until: input.valid_until,
+        valid_until_epoch_ms: input.valid_until_epoch_ms,
+        revocation_epoch: 0,
+        minimum_acceptable_version: "1.0.0".into(),
+        providers,
+    })
+}
+
 pub fn generate_app_e2ee_reference_values(
     input: AppE2eeReferenceValuesInput,
 ) -> Result<ReferenceValuesPayload> {
@@ -124,39 +207,54 @@ pub fn generate_tinfoil_live_reference_values(
         ));
     }
 
-    let attested_model = input
-        .verified_quote
-        .attested_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            ProviderError::Compatibility(
-                "verified Tinfoil quote did not expose an attested model".into(),
+    let (workload_image_digest, model_artifacts) = match format {
+        TinfoilAttestationFormat::SevSnpGuestV2 => {
+            if input.verified_quote.attested_model.is_some() {
+                return Err(ProviderError::Compatibility(
+                    "SEV-SNP router quotes do not attest a model".into(),
+                ));
+            }
+            (NOT_APPLICABLE_KEY_DIGEST.to_owned(), Vec::new())
+        }
+        TinfoilAttestationFormat::TdxGuestV2 => {
+            let attested_model = input
+                .verified_quote
+                .attested_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::Compatibility(
+                        "verified Tinfoil quote did not expose an attested model".into(),
+                    )
+                })?;
+            if attested_model != canonical_model {
+                return Err(ProviderError::Compatibility(format!(
+                    "verified Tinfoil quote model {attested_model} does not match canonical model {canonical_model}"
+                )));
+            }
+            let workload_image_digest = input
+                .verified_quote
+                .workload_image_digest
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::Compatibility(
+                        "verified Tinfoil quote did not expose workload image provenance".into(),
+                    )
+                })?;
+            if input.verified_quote.model_artifacts.is_empty() {
+                return Err(ProviderError::Compatibility(
+                    "verified Tinfoil quote did not expose model artifact provenance".into(),
+                ));
+            }
+            (
+                workload_image_digest.to_owned(),
+                input.verified_quote.model_artifacts.clone(),
             )
-        })?;
-    if attested_model != canonical_model {
-        return Err(ProviderError::Compatibility(format!(
-            "verified Tinfoil quote model {attested_model} does not match canonical model {canonical_model}"
-        )));
-    }
-
-    let workload_image_digest = input
-        .verified_quote
-        .workload_image_digest
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            ProviderError::Compatibility(
-                "verified Tinfoil quote did not expose workload image provenance".into(),
-            )
-        })?;
-    if input.verified_quote.model_artifacts.is_empty() {
-        return Err(ProviderError::Compatibility(
-            "verified Tinfoil quote did not expose model artifact provenance".into(),
-        ));
-    }
+        }
+    };
 
     let spki_sha256 = normalize_sha256_hex(&input.live_tls_spki_sha256, "live_tls_spki_sha256")?;
     let binding =
@@ -186,8 +284,8 @@ pub fn generate_tinfoil_live_reference_values(
             response_signing_key_digest: None,
             tls_spki_sha256: Some(format!("sha256:{spki_sha256}")),
             workload_images: Vec::new(),
-            workload_image_digest: workload_image_digest.to_owned(),
-            model_artifacts: input.verified_quote.model_artifacts.clone(),
+            workload_image_digest,
+            model_artifacts,
             valid_until: input.verified_quote.expires_at.clone(),
             valid_until_epoch_ms: input.verified_quote.expires_at_epoch_ms,
         },
@@ -558,6 +656,39 @@ mod tests {
     }
 
     #[test]
+    fn chutes_live_reference_values_accept_verified_measurement_fixture() {
+        let mut chutes_route = route();
+        chutes_route.route_id = "chutes:qwen3-32b-tee:live".into();
+        chutes_route.provider = "chutes".into();
+        chutes_route.provider_model = "Qwen/Qwen3-32B-TEE".into();
+        chutes_route.evidence_family = "chutes_live_e2ee".into();
+        chutes_route.channel_binding_kind = ChannelBindingKind::AttestedAppE2ee;
+        chutes_route.trust_tier = TrustTier::AppE2ee;
+        let payload = generate_chutes_live_reference_values(ChutesLiveReferenceValuesInput {
+            version: "2026-10-20-observed".into(),
+            issuer: "operator-pinned-observed".into(),
+            valid_from: "2098-12-31T00:00:00Z".into(),
+            valid_until: "2099-01-01T00:00:00Z".into(),
+            valid_until_epoch_ms: 4_070_908_800_000,
+            canonical_model: "qwen3-32b".into(),
+            route: chutes_route,
+            verified_measurements: vec![
+                "tdx:mr_td:fixture:rtmr0:a".into(),
+                "tdx:mr_td:fixture:rtmr0:a".into(),
+            ],
+        })
+        .unwrap();
+        let provider = payload.providers.get("chutes").unwrap();
+        assert_eq!(
+            provider.accepted_measurements,
+            ["tdx:mr_td:fixture:rtmr0:a"]
+        );
+        assert_eq!(
+            provider.routes["chutes:qwen3-32b-tee:live"].canonical_model,
+            "qwen3-32b"
+        );
+    }
+    #[test]
     fn tinfoil_live_reference_values_bind_verified_quote_to_route() {
         let payload = generate_tinfoil_live_reference_values(input()).unwrap();
 
@@ -579,6 +710,28 @@ mod tests {
         );
         assert_eq!(route.workload_image_digest, "sha256:workload");
         assert_eq!(route.model_artifacts.len(), 1);
+    }
+    #[test]
+    fn tinfoil_snp_reference_values_pin_router_without_model_claims() {
+        let mut input = input();
+        input.verified_quote.attestation_format =
+            confidential_inference_attestation::TINFOIL_SEV_SNP_GUEST_V2_FORMAT.into();
+        input.verified_quote.hardware.cpu = CpuTeeKind::SevSnp;
+        input.verified_quote.tee_measurement = "sev-snp:measurement:router-measurement".into();
+        input.verified_quote.attested_model = None;
+        input.verified_quote.workload_image_digest = None;
+        input.verified_quote.model_artifacts.clear();
+
+        let payload = generate_tinfoil_live_reference_values(input).unwrap();
+        let provider = payload.providers.get("tinfoil-live").unwrap();
+        assert_eq!(
+            provider.accepted_measurements,
+            vec!["sev-snp:measurement:router-measurement"]
+        );
+        let route = provider.routes.get(ROUTE_ID).unwrap();
+        assert_eq!(route.workload_image_digest, NOT_APPLICABLE_KEY_DIGEST);
+        assert!(route.workload_images.is_empty());
+        assert!(route.model_artifacts.is_empty());
     }
 
     #[test]

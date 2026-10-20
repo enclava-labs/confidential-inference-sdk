@@ -15,6 +15,8 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1"
 async-trait.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
 dcap-qvl = { version = "0.6.1", default-features = false, features = ["std", "ring", "default-x509", "report"] }
@@ -24,7 +26,7 @@ flate2.workspace = true
 getrandom.workspace = true
 hkdf = "0.13"
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
-reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "json", "query"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "json", "query", "stream"] }
 rustls = { version = "0.23.4", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true

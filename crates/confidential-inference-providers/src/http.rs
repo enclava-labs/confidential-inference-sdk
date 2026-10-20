@@ -3,7 +3,8 @@ use base64::Engine;
 use confidential_inference_attestation::{
     certificate_spki_sha256_hex, chutes_provider_nonce, TinfoilLiveCaptureEvidence,
 };
-use confidential_inference_openai::ChatCompletionResponse;
+use confidential_inference_openai::{ChatCompletionResponse, EmbeddingsResponse};
+use futures_util::StreamExt;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, Once};
@@ -12,8 +13,9 @@ use zeroize::Zeroizing;
 
 use crate::{
     chutes::normalize_chutes_e2ee_evidence_bytes, dstack::normalize_dstack_evidence_bytes,
-    EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderError,
-    ProviderRequestConfidentiality, Result, RouteDefinition,
+    EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderEmbeddingsRequest,
+    ProviderError, ProviderRequestConfidentiality, ProviderResponseManageRequest,
+    ResponseManageOperation, Result, RouteDefinition,
 };
 
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -146,6 +148,30 @@ impl OpenAiHttpProvider {
         capture_response(response, "chat completions").await
     }
 
+    async fn post_embeddings(
+        &self,
+        route: &RouteDefinition,
+        request: &ProviderChatRequest,
+    ) -> Result<HttpResponseCapture> {
+        ensure_route_provider(route, &self.provider_id)?;
+        if matches!(
+            request.confidentiality(),
+            ProviderRequestConfidentiality::FixtureEncrypted
+                | ProviderRequestConfidentiality::AdapterManagedEncrypted
+        ) {
+            return Err(ProviderError::Adapter(
+                "encrypted embeddings require a provider-specific live adapter".into(),
+            ));
+        }
+        let url = embeddings_url(&route.api_base_url)?;
+        let response = self
+            .authorize(self.client.post(url).json(request.body()))
+            .send()
+            .await
+            .map_err(|error| ProviderError::Http(error.to_string()))?;
+        capture_response(response, "embeddings").await
+    }
+
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.api_key {
             Some(api_key) => request.bearer_auth(api_key.as_str()),
@@ -179,6 +205,180 @@ impl ProviderAdapter for OpenAiHttpProvider {
     ) -> Result<ChatCompletionResponse> {
         let capture = self.post_chat(route, &request).await?;
         let body = request.decrypt_sdk_response_body(route, &capture.body)?;
+        serde_json::from_slice(&body).map_err(Into::into)
+    }
+
+    async fn chat_stream(
+        &self,
+        route: &RouteDefinition,
+        request: ProviderChatRequest,
+    ) -> Result<crate::ProviderChatStream> {
+        ensure_route_provider(route, &self.provider_id)?;
+        if request.confidentiality() != &ProviderRequestConfidentiality::Plaintext {
+            return Err(ProviderError::Adapter(
+                "streaming requires a plaintext provider channel".into(),
+            ));
+        }
+        let mut body = request.body.clone();
+        body["stream"] = serde_json::Value::Bool(true);
+        let response = self
+            .authorize(
+                self.client
+                    .post(chat_completions_url(&route.api_base_url)?)
+                    .json(&body),
+            )
+            .send()
+            .await
+            .map_err(|error| ProviderError::Http(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ProviderError::HttpStatus {
+                status: response.status().as_u16(),
+                message: "chat completions streaming request was rejected".into(),
+            });
+        }
+        let stream = futures_util::stream::unfold(
+            (response.bytes_stream(), Vec::<u8>::new()),
+            |(mut bytes, mut buffer)| async move {
+                loop {
+                    let delimiter = buffer
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|index| (index, 4))
+                        .or_else(|| {
+                            buffer
+                                .windows(2)
+                                .position(|window| window == b"\n\n")
+                                .map(|index| (index, 2))
+                        });
+                    if let Some((end, delimiter_len)) = delimiter {
+                        let frame: Vec<_> = buffer.drain(..end + delimiter_len).collect();
+                        for line in frame[..end].split(|byte| *byte == b'\n') {
+                            let line = line.strip_suffix(b"\r").unwrap_or(line);
+                            if let Some(data) = line.strip_prefix(b"data:") {
+                                let data = data.strip_prefix(b" ").unwrap_or(data);
+                                if data == b"[DONE]" {
+                                    return None;
+                                }
+                                if !data.is_empty() {
+                                    let result = serde_json::from_slice::<serde_json::Value>(data)
+                                        .map(|_| data.to_vec())
+                                        .map_err(ProviderError::from);
+                                    return Some((result, (bytes, buffer)));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    match bytes.next().await {
+                        Some(Ok(part))
+                            if buffer.len().saturating_add(part.len())
+                                <= MAX_PROVIDER_RESPONSE_BYTES =>
+                        {
+                            buffer.extend_from_slice(&part)
+                        }
+                        Some(Ok(_)) => {
+                            return Some((
+                                Err(ProviderError::Http(
+                                    "chat streaming SSE frame exceeds the provider response limit"
+                                        .into(),
+                                )),
+                                (bytes, buffer),
+                            ));
+                        }
+                        Some(Err(error)) => {
+                            return Some((
+                                Err(ProviderError::Http(error.to_string())),
+                                (bytes, buffer),
+                            ));
+                        }
+                        None => return None,
+                    }
+                }
+            },
+        );
+        Ok(Box::pin(stream))
+    }
+
+    async fn embeddings(
+        &self,
+        route: &RouteDefinition,
+        request: ProviderEmbeddingsRequest,
+    ) -> Result<EmbeddingsResponse> {
+        let capture = self.post_embeddings(route, &request).await?;
+        let body = request.decrypt_sdk_response_body(route, &capture.body)?;
+        serde_json::from_slice(&body).map_err(Into::into)
+    }
+    async fn response_manage(
+        &self,
+        route: &RouteDefinition,
+        request: ProviderResponseManageRequest,
+    ) -> Result<serde_json::Value> {
+        ensure_route_provider(route, &self.provider_id)?;
+        if route.request_encryption != crate::EncryptionRequirement::NotRequired
+            || route.response_decryption != crate::EncryptionRequirement::NotRequired
+        {
+            return Err(ProviderError::Compatibility(
+                "Responses lifecycle follow-ups require a plaintext provider route".into(),
+            ));
+        }
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/responses",
+            route.api_base_url.trim_end_matches('/')
+        ))
+        .map_err(|error| ProviderError::Compatibility(error.to_string()))?;
+        {
+            let mut segments = url.path_segments_mut().map_err(|_| {
+                ProviderError::Compatibility("route API URL cannot accept path segments".into())
+            })?;
+            match request.operation {
+                ResponseManageOperation::InputTokens => {
+                    segments.push("input_tokens");
+                }
+                ResponseManageOperation::Compact => {
+                    segments.push("compact");
+                }
+                ResponseManageOperation::Retrieve
+                | ResponseManageOperation::ListInputItems
+                | ResponseManageOperation::Cancel
+                | ResponseManageOperation::Delete => {
+                    segments.push(&request.response_id);
+                    match request.operation {
+                        ResponseManageOperation::ListInputItems => {
+                            segments.push("input_items");
+                        }
+                        ResponseManageOperation::Cancel => {
+                            segments.push("cancel");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let params = if request.params.is_object() {
+            request.params
+        } else {
+            return Err(ProviderError::Compatibility(
+                "Responses lifecycle params must be a JSON object".into(),
+            ));
+        };
+        let mut builder = match request.operation {
+            ResponseManageOperation::Retrieve | ResponseManageOperation::ListInputItems => {
+                self.client.get(url).query(&params.as_object().unwrap())
+            }
+            ResponseManageOperation::Delete => {
+                self.client.delete(url).query(&params.as_object().unwrap())
+            }
+            _ => self.client.post(url).json(&params),
+        };
+        builder = self.authorize(builder);
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| ProviderError::Http(error.to_string()))?;
+        let body = checked_response_bytes(response, request.operation.as_str()).await?;
+        if body.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
         serde_json::from_slice(&body).map_err(Into::into)
     }
 }
@@ -223,6 +423,14 @@ impl ProviderAdapter for ConfidentialHttpProvider {
 
     fn routes(&self) -> Vec<RouteDefinition> {
         self.inner.routes()
+    }
+
+    async fn embeddings(
+        &self,
+        route: &RouteDefinition,
+        request: ProviderEmbeddingsRequest,
+    ) -> Result<EmbeddingsResponse> {
+        self.inner.embeddings(route, request).await
     }
 
     async fn fetch_evidence(
@@ -397,6 +605,40 @@ impl ProviderAdapter for TinfoilHttpProvider {
         let body = request.decrypt_sdk_response_body(route, &capture.body)?;
         serde_json::from_slice(&body).map_err(Into::into)
     }
+    async fn embeddings(
+        &self,
+        route: &RouteDefinition,
+        request: ProviderEmbeddingsRequest,
+    ) -> Result<EmbeddingsResponse> {
+        ensure_tinfoil_route(route, self.provider_id())?;
+        let expected_tls = self
+            .tls_state
+            .lock()
+            .map_err(|_| ProviderError::Adapter("Tinfoil TLS state lock is poisoned".into()))?
+            .get(&route.route_id)
+            .cloned()
+            .ok_or_else(|| {
+                ProviderError::Compatibility(format!(
+                    "route {} has no captured Tinfoil TLS identity; verify evidence before embeddings",
+                    route.route_id
+                ))
+            })?;
+        let capture = self.inner.post_embeddings(route, &request).await?;
+        let observed_tls = capture.tls_peer.ok_or_else(|| {
+            ProviderError::Compatibility(format!(
+                "route {} embeddings response did not expose a live TLS certificate",
+                route.route_id
+            ))
+        })?;
+        if observed_tls.spki_sha256 != expected_tls.spki_sha256 {
+            return Err(ProviderError::key_rotation(
+                route.route_id.clone(),
+                "live TLS SPKI changed between evidence and embeddings",
+            ));
+        }
+        let body = request.decrypt_sdk_response_body(route, &capture.body)?;
+        serde_json::from_slice(&body).map_err(Into::into)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -466,6 +708,15 @@ fn chat_completions_url(api_base_url: &str) -> Result<String> {
         "{}/chat/completions",
         api_base_url.trim_end_matches('/')
     ))
+}
+
+fn embeddings_url(api_base_url: &str) -> Result<String> {
+    if api_base_url.trim().is_empty() {
+        return Err(ProviderError::Compatibility(
+            "route api_base_url is empty".into(),
+        ));
+    }
+    Ok(format!("{}/embeddings", api_base_url.trim_end_matches('/')))
 }
 
 async fn capture_response(
@@ -667,6 +918,89 @@ mod tests {
     );
 
     #[tokio::test]
+    async fn openai_http_provider_relays_sse_data_payloads() {
+        let frames = [
+            "{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}",
+            "{\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"b\"},\"finish_reason\":null}]}",
+            "{\"id\":\"c3\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"c\"},\"finish_reason\":\"stop\"}]}",
+        ];
+        let (base_url, request_capture) = spawn_streaming_http_response(
+            frames.iter().map(|frame| frame.to_string()).collect(),
+            false,
+        )
+        .await;
+        let route = http_route(&base_url);
+        let provider = OpenAiHttpProvider::new("tinfoil-http-test", vec![route.clone()]).unwrap();
+        let request = ProviderChatRequest::new(json!({"model":"llama-3.3-70b","stream":false}));
+        let mut chunks = provider.chat_stream(&route, request).await.unwrap();
+        use futures_util::StreamExt;
+        let first = chunks.next().await.unwrap().unwrap();
+        assert_eq!(first, frames[0].as_bytes());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(chunks.next().await.unwrap().unwrap(), frames[1].as_bytes());
+        assert_eq!(chunks.next().await.unwrap().unwrap(), frames[2].as_bytes());
+        assert!(request_capture.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn openai_http_provider_maps_midstream_abort_to_http_error() {
+        let (base_url, _server) = spawn_streaming_http_response(vec![
+            "{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}".into(),
+        ], true).await;
+        let route = http_route(&base_url);
+        let provider = OpenAiHttpProvider::new("tinfoil-http-test", vec![route.clone()]).unwrap();
+        let mut chunks = provider
+            .chat_stream(&route, ProviderChatRequest::new(json!({"model":"m"})))
+            .await
+            .unwrap();
+        use futures_util::StreamExt;
+        assert!(chunks.next().await.unwrap().is_ok());
+        assert!(matches!(
+            chunks.next().await,
+            Some(Err(ProviderError::Http(_)))
+        ));
+    }
+
+    async fn spawn_streaming_http_response(
+        frames: Vec<String>,
+        abort_after_first: bool,
+    ) -> (String, tokio::task::JoinHandle<std::io::Result<()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let read = stream.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await?;
+            for (index, frame) in frames.iter().enumerate() {
+                let payload = format!("data: {frame}\n\n");
+                stream
+                    .write_all(format!("{:x}\r\n", payload.len()).as_bytes())
+                    .await?;
+                stream.write_all(payload.as_bytes()).await?;
+                stream.write_all(b"\r\n").await?;
+                stream.flush().await?;
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                if abort_after_first && index == 0 {
+                    return Ok(());
+                }
+            }
+            Ok(())
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
     async fn openai_http_provider_posts_chat_completion_with_bearer_token() {
         let (base_url, request) = spawn_http_response(
             200,
@@ -677,8 +1011,8 @@ mod tests {
                 "model": "llama-3.3-70b",
                 "choices": [{
                     "index": 0,
-                    "message": {"role": "assistant", "content": "ok"},
-                    "finish_reason": "stop"
+                    "message": {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup"}}]},
+                    "finish_reason": "tool_calls"
                 }]
             })
             .to_string(),
@@ -696,7 +1030,9 @@ mod tests {
                 &route,
                 ProviderChatRequest::new(json!({
                     "model": "llama-3.3-70b",
-                    "messages": [{"role": "user", "content": "hello"}]
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "tools": [{"type": "function", "function": {"name": "lookup"}}],
+                    "tool_choice": "auto"
                 })),
             )
             .await
@@ -704,19 +1040,139 @@ mod tests {
 
         assert_eq!(response.model, "llama-3.3-70b");
         assert_eq!(
-            response.choices,
-            vec![ChatChoice {
-                index: 0,
-                message: ChatMessage::assistant("ok"),
-                finish_reason: "stop".into(),
-            }]
+            response.choices[0].message.extra["tool_calls"][0]["id"],
+            "call_1"
         );
         let request = request.await.unwrap().unwrap();
         assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
         assert!(request.contains("authorization: Bearer sk-test-secret"));
         assert!(request.contains("\"model\":\"llama-3.3-70b\""));
+        assert!(request
+            .contains("\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]"));
+        assert!(request.contains("\"tool_choice\":\"auto\""));
     }
 
+    #[tokio::test]
+    async fn openai_http_provider_posts_embeddings_request() {
+        let (base_url, request) = spawn_http_response(
+            200,
+            json!({
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.125, 0.5]}],
+                "model": "embed-model",
+                "usage": {"prompt_tokens": 2, "total_tokens": 2}
+            })
+            .to_string(),
+        )
+        .await;
+        let route = http_route(&base_url);
+        let provider = OpenAiHttpProvider::new("tinfoil-http-test", vec![route.clone()]).unwrap();
+        let response = provider
+            .embeddings(
+                &route,
+                ProviderEmbeddingsRequest::new(json!({
+                    "model": "embed-model",
+                    "input": [[11, 22]]
+                })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.data[0].embedding, vec![0.125_f64, 0.5]);
+        let request = request.await.unwrap().unwrap();
+        assert!(request.starts_with("POST /v1/embeddings HTTP/1.1"));
+        assert!(request.contains("\"input\":[[11,22]]"));
+    }
+
+    #[tokio::test]
+    async fn openai_http_provider_forwards_responses_lifecycle_paths() {
+        for (operation, method, suffix) in [
+            (
+                ResponseManageOperation::Retrieve,
+                "GET",
+                "/responses/resp%2F1",
+            ),
+            (
+                ResponseManageOperation::ListInputItems,
+                "GET",
+                "/responses/resp%2F1/input_items",
+            ),
+            (
+                ResponseManageOperation::Cancel,
+                "POST",
+                "/responses/resp%2F1/cancel",
+            ),
+            (
+                ResponseManageOperation::Delete,
+                "DELETE",
+                "/responses/resp%2F1",
+            ),
+            (
+                ResponseManageOperation::InputTokens,
+                "POST",
+                "/responses/input_tokens",
+            ),
+            (
+                ResponseManageOperation::Compact,
+                "POST",
+                "/responses/compact",
+            ),
+        ] {
+            let (base_url, captured) =
+                spawn_http_response(200, r#"{"id":"resp_1","vendor_extra":true}"#.into()).await;
+            let mut route = http_route(&base_url);
+            route.request_encryption = crate::EncryptionRequirement::NotRequired;
+            route.response_decryption = crate::EncryptionRequirement::NotRequired;
+            let provider = OpenAiHttpProvider::with_api_key(
+                "tinfoil-http-test",
+                vec![route.clone()],
+                Some("sk-response-test"),
+            )
+            .unwrap();
+            let response = provider
+                .response_manage(
+                    &route,
+                    ProviderResponseManageRequest {
+                        operation,
+                        response_id: "resp/1".into(),
+                        params: json!({"vendor_param":"kept"}),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(response["vendor_extra"], true);
+            let captured = captured.await.unwrap().unwrap();
+            assert!(
+                captured.starts_with(&format!("{method} /v1{suffix}")),
+                "{captured}"
+            );
+            assert!(captured.to_ascii_lowercase().contains("authorization:"));
+            if method == "GET" {
+                assert!(captured.contains("vendor_param=kept"), "{captured}");
+            } else if method == "POST" {
+                assert!(captured.contains("\"vendor_param\":\"kept\""), "{captured}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_http_provider_fails_closed_for_encrypted_responses_followups() {
+        let mut route = http_route("http://127.0.0.1:1");
+        route.request_encryption = crate::EncryptionRequirement::Required;
+        route.response_decryption = crate::EncryptionRequirement::Required;
+        let provider = OpenAiHttpProvider::new("tinfoil-http-test", vec![route.clone()]).unwrap();
+        let error = provider
+            .response_manage(
+                &route,
+                ProviderResponseManageRequest {
+                    operation: ResponseManageOperation::Retrieve,
+                    response_id: "resp_1".into(),
+                    params: json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::Compatibility(_)));
+    }
     #[test]
     fn http_provider_debug_redacts_configured_api_key() {
         let provider = OpenAiHttpProvider::with_client(
@@ -876,7 +1332,8 @@ mod tests {
             vec![ChatChoice {
                 index: 0,
                 message: ChatMessage::assistant("encrypted ok"),
-                finish_reason: "stop".into(),
+                finish_reason: Some("stop".into()),
+                extra: Default::default(),
             }]
         );
         let request = request.await.unwrap().unwrap();

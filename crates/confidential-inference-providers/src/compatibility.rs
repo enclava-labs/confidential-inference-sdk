@@ -2,7 +2,7 @@ use confidential_inference_attestation::{
     canonical_digest, verify_artifact_signature_with_keys, ArtifactSignature, FreshnessClass,
     TrustTier, TrustedSigningKey,
 };
-use confidential_inference_openai::ChatCompletionRequest;
+use confidential_inference_openai::{ChatCompletionRequest, EmbeddingsRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -309,20 +309,42 @@ impl ProviderCompatibility {
             )));
         }
         self.validate_streaming(request)?;
-
         let provider_request = match self.model_id_rewrite {
             ModelIdRewrite::UseRouteProviderModel => {
                 request.with_model(route.provider_model.clone())
             }
         };
         let mut body = serde_json::to_value(provider_request)?;
-        let Value::Object(ref mut fields) = body else {
+        let Value::Object(fields) = &mut body else {
             return Err(ProviderError::Compatibility(
                 "chat request did not serialize to a JSON object".into(),
             ));
         };
-
         self.apply_token_parameter_rewrite(fields);
+        self.confidential_provider_request(route, body)
+    }
+
+    pub fn adapt_embeddings_request(
+        &self,
+        route: &RouteDefinition,
+        request: &EmbeddingsRequest,
+    ) -> crate::Result<ProviderChatRequest> {
+        if !self.supports_endpoint(OpenAiEndpoint::Embeddings) {
+            return Err(ProviderError::Compatibility(format!(
+                "provider {} does not support embeddings",
+                self.provider
+            )));
+        }
+        let provider_request = request.with_model(route.provider_model.clone());
+        let body = serde_json::to_value(provider_request)?;
+        self.confidential_provider_request(route, body)
+    }
+
+    fn confidential_provider_request(
+        &self,
+        route: &RouteDefinition,
+        body: Value,
+    ) -> crate::Result<ProviderChatRequest> {
         match self.request_confidentiality_for_chat()? {
             ChatRequestConfidentiality::Plaintext => Ok(ProviderChatRequest::with_confidentiality(
                 body,
@@ -463,11 +485,11 @@ impl RouteExecutionStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenAiEndpoint {
+    Embeddings,
     ChatCompletions,
     Models,
     Confidentiality,
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelListingBehavior {
@@ -522,7 +544,7 @@ mod tests {
     use confidential_inference_openai::ChatMessage;
 
     const COMPATIBILITY_MATRIX_DIGEST: &str =
-        "sha256:5008d0d601c359aa0c1aa4effd6988e3e4830abdfc9166b6dc8fb296bc2ed4fa";
+        "sha256:6ca7ecb290af117a9b8ec3491e2ad1481857ba859a07cffc48c83bb98a589fed";
 
     #[test]
     fn bundled_compatibility_matrix_validates() {
@@ -602,7 +624,7 @@ mod tests {
             .providers
             .get_mut("demo")
             .unwrap()
-            .streaming = StreamingSupport::Supported;
+            .streaming = StreamingSupport::SupportedIfEncryptionSupportsStreaming;
 
         assert!(envelope
             .verify_signature_with_keys(
@@ -771,6 +793,91 @@ mod tests {
     }
 
     #[test]
+    fn request_adaptation_preserves_tools_image_parts_and_extras_through_encryption() {
+        let matrix = ProviderCompatibilityMatrix::bundled().unwrap();
+        let registry = ProviderRegistry::bundled_demo().unwrap();
+        let (_, route) = registry.find_route(Some("demo"), "gpt-oss-120b").unwrap();
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-oss-120b",
+            "messages": [
+                {"role": "developer", "content": "be brief"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                ]},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "result"}
+            ],
+            "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+            "tool_choice": "auto",
+            "response_format": {"type": "json_object"},
+            "seed": 7,
+            "stop": ["END"]
+        }))
+        .unwrap();
+
+        let body = matrix
+            .provider("demo")
+            .unwrap()
+            .adapt_chat_request(route, &request)
+            .unwrap();
+        let decrypted = body.fixture_decrypted_body(route).unwrap();
+
+        assert_eq!(decrypted["tools"][0]["function"]["name"], "lookup");
+        assert_eq!(decrypted["tool_choice"], "auto");
+        assert_eq!(decrypted["response_format"]["type"], "json_object");
+        assert_eq!(decrypted["seed"], 7);
+        assert_eq!(decrypted["stop"][0], "END");
+        assert_eq!(decrypted["messages"][0]["role"], "developer");
+        assert_eq!(
+            decrypted["messages"][1]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
+        assert!(decrypted["messages"][2]["content"].is_null());
+        assert_eq!(decrypted["messages"][2]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(decrypted["messages"][3]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn embeddings_adaptation_preserves_token_ids_extras_and_encrypts_confidential_input() {
+        let matrix = ProviderCompatibilityMatrix::bundled().unwrap();
+        let registry = ProviderRegistry::bundled_demo().unwrap();
+        let (_, route) = registry.find_route(Some("demo"), "gpt-oss-120b").unwrap();
+        let request: EmbeddingsRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-oss-120b",
+            "input": [[101, 202, 303]],
+            "dimensions": 3,
+            "vendor_option": "preserved"
+        }))
+        .unwrap();
+        let provider_request = matrix
+            .provider("demo")
+            .unwrap()
+            .adapt_embeddings_request(route, &request)
+            .unwrap();
+        assert_eq!(
+            provider_request.confidentiality(),
+            &ProviderRequestConfidentiality::FixtureEncrypted
+        );
+        assert!(!provider_request.body().to_string().contains("101"));
+        let decrypted = provider_request.fixture_decrypted_body(route).unwrap();
+        assert_eq!(decrypted["input"][0][0], 101);
+        assert_eq!(decrypted["vendor_option"], "preserved");
+        assert_eq!(decrypted["model"], route.provider_model);
+    }
+
+    #[test]
+    fn unknown_chat_role_is_rejected_not_coerced() {
+        let parsed: Result<ChatCompletionRequest, _> = serde_json::from_value(serde_json::json!({
+            "model": "gpt-oss-120b",
+            "messages": [{"role": "narrator", "content": "x"}]
+        }));
+        assert!(parsed.is_err());
+    }
+
+    #[test]
     fn redpill_fixture_maps_max_tokens_to_max_completion_tokens() {
         let matrix = ProviderCompatibilityMatrix::bundled().unwrap();
         let route = fixture_route(
@@ -862,20 +969,21 @@ mod tests {
     }
 
     #[test]
-    fn matrix_streaming_rules_fail_closed_before_request_adaptation() {
+    fn matrix_streaming_rules_fail_closed_for_unsupported_demo_profile() {
         let matrix = ProviderCompatibilityMatrix::bundled().unwrap();
         let registry = ProviderRegistry::bundled_demo().unwrap();
         let (_, route) = registry.find_route(Some("demo"), "gpt-oss-120b").unwrap();
         let mut request = chat_request();
         request.stream = Some(true);
 
-        assert!(matches!(
-            matrix
-                .provider("demo")
-                .unwrap()
-                .adapt_chat_request(route, &request),
-            Err(ProviderError::Compatibility(_))
-        ));
+        // The demo profile is streaming-unsupported; streaming requests must
+        // fail closed rather than weaken the route's verified channel.
+        let error = matrix
+            .provider("demo")
+            .unwrap()
+            .adapt_chat_request(route, &request)
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::Compatibility(_)));
     }
 
     fn chat_request() -> ChatCompletionRequest {
@@ -885,6 +993,7 @@ mod tests {
             stream: None,
             max_tokens: Some(64),
             temperature: Some(0.2),
+            extra: Default::default(),
         }
     }
 

@@ -47,7 +47,8 @@
       "route_execution_status": "executable_fixture",
       "streaming": "unsupported",
       "supported_openai_endpoints": [
-        "chat_completions"
+        "chat_completions",
+        "embeddings"
       ],
       "token_parameter_rewrite": "preserve_max_tokens"
     },

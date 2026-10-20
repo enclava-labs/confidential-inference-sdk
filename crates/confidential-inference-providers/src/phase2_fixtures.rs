@@ -57,12 +57,19 @@ impl ProviderAdapter for TinfoilFixtureProvider {
         let content = format!(
             "tinfoil fixture response for {}: {}",
             route.provider_model,
-            request.last_user_message().unwrap_or("")
+            request.last_user_message().unwrap_or_default()
         );
         let prompt_tokens = request
             .messages
             .iter()
-            .map(|message| message.content.split_whitespace().count() as u32)
+            .map(|message| {
+                message
+                    .content
+                    .text()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .count() as u32
+            })
             .sum::<u32>();
         let completion_tokens = content.split_whitespace().count() as u32;
 
@@ -74,13 +81,16 @@ impl ProviderAdapter for TinfoilFixtureProvider {
             choices: vec![ChatChoice {
                 index: 0,
                 message: ChatMessage::assistant(content),
-                finish_reason: "stop".into(),
+                finish_reason: Some("stop".into()),
+                extra: Default::default(),
             }],
             usage: Some(Usage {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
+                extra: Default::default(),
             }),
+            extra: Default::default(),
         })
     }
 }
