@@ -15,6 +15,6 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "koffi": "3.3.3"
+    "koffi": "3.3.5"
   }
 }
