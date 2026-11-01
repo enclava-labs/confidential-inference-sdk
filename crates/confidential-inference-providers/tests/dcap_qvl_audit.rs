@@ -71,7 +71,7 @@ fn dcap_qvl_audit_manifest_matches_workspace() {
         "cargo test -p confidential-inference-attestation dcap_tdx_mutation_sweep --locked",
         "cargo test --workspace --locked",
         "cargo deny check",
-        "cargo audit --ignore RUSTSEC-2023-0071",
+        "cargo audit",
     ] {
         assert!(
             audit

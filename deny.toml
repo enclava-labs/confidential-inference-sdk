@@ -2,7 +2,7 @@
 version = 2
 # RUSTSEC-2024-0449: serde_yaml is deprecated and its unsafe-libyaml backend is
 # unmaintained. We use it only for dynamic Value parsing of dstack compose
-# evidence. ponytail: swap for a safe-Rust YAML crate (saphyr) if/when the
+# evidence. shortcut: swap for a safe-Rust YAML crate (saphyr) if/when the
 # parser rewrite is justified; no vulnerability is being ignored here.
 ignore = ["RUSTSEC-2024-0449"]
 

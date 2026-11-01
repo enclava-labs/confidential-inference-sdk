@@ -93,9 +93,39 @@ class GenerateSbomTests(unittest.TestCase):
         )
 
         edge = first["dependency_edges"][0]
-        self.assertEqual(edge["from_id"], WORKSPACE_ID)
+        self.assertEqual(
+            edge["from_id"],
+            "path+file:///crates/confidential-inference-openai#0.1.0",
+        )
         self.assertEqual(edge["to_id"], SERDE_ID)
         self.assertEqual(edge["kind"], "normal")
+
+    def test_sbom_never_embeds_absolute_paths(self) -> None:
+        sbom = generate_sbom.build_sbom(fake_metadata(), LOCK_BYTES)
+
+        self.assertEqual(sbom["workspace_root"], ".")
+        self.assertEqual(
+            sbom["workspace_members"],
+            ["path+file:///crates/confidential-inference-openai#0.1.0"],
+        )
+        for package in sbom["packages"]:
+            self.assertFalse(package["id"].startswith("path+file:///repo"))
+            if package["manifest_path"] is not None:
+                self.assertFalse(Path(package["manifest_path"]).is_absolute())
+
+    def test_check_output_fails_when_output_is_missing_or_stale(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "sbom.json"
+
+            self.assertIsNotNone(generate_sbom.check_output(output, "{}\n"))
+
+            output.write_text("{}\n", encoding="utf-8")
+            self.assertIsNone(generate_sbom.check_output(output, "{}\n"))
+
+            output.write_text("{\"stale\": true}\n", encoding="utf-8")
+            self.assertIsNotNone(generate_sbom.check_output(output, "{}\n"))
 
     def test_registry_packages_without_lock_checksum_fail_closed(self) -> None:
         lock_without_checksum = b"""

@@ -229,9 +229,10 @@ class Stream {
   constructor(native, handle) {
     this._native = native;
     this._handle = handle;
-    // Count of worker-thread calls that still hold this native handle. The
-    // FFI returns a borrowed reference after releasing its handle registry,
-    // so freeing while a call is in flight would be use-after-free.
+    // Count of worker-thread calls still referencing this native handle. The
+    // FFI holds shared state via Arc, so calls stay memory-safe if the handle
+    // is freed mid-call — the counter exists for the free contract (BUSY on
+    // close while calls run), not for memory safety.
     this._inFlight = 0;
   }
 
@@ -300,8 +301,8 @@ class Stream {
     if (this._handle === null) {
       return;
     }
-    // Refuse to free while a worker-thread call still holds the handle: the
-    // FFI would drop the allocation under the running call (use-after-free).
+    // Refuse to free while a worker-thread call is in flight: the handle must
+    // stay valid until the caller retries after the call settles.
     if (this._inFlight > 0) {
       throw new ConfidentialInferenceError(CONFIDENTIAL_INFERENCE_FFI_BUSY, {
         code: 'stream_busy',
@@ -361,8 +362,8 @@ class Client {
     if (this._handle === null) {
       return;
     }
-    // Refuse to free while a worker-thread call still holds the handle: the
-    // FFI would drop the allocation under the running call (use-after-free).
+    // Refuse to free while a worker-thread call is in flight: the handle must
+    // stay valid until the caller retries after the call settles.
     if (this._inFlight > 0) {
       throw new ConfidentialInferenceError(CONFIDENTIAL_INFERENCE_FFI_BUSY, {
         code: 'client_busy',
@@ -526,12 +527,21 @@ class Client {
 }
 
 function resolveLibraryPath(explicit) {
-  const candidates = [];
-  if (explicit) {
-    candidates.push(path.resolve(String(explicit)));
-  }
-  if (process.env.CONFIDENTIAL_INFERENCE_FFI_LIBRARY) {
-    candidates.push(path.resolve(process.env.CONFIDENTIAL_INFERENCE_FFI_LIBRARY));
+  // Explicit selection wins and is exclusive: a missing file is an error,
+  // never a silent fallback to whatever happens to sit in target/.
+  const chosen = explicit
+    ? String(explicit)
+    : process.env.CONFIDENTIAL_INFERENCE_FFI_LIBRARY;
+  if (chosen) {
+    const resolved = path.resolve(chosen);
+    if (!fs.existsSync(resolved)) {
+      throw new ConfidentialInferenceError(CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT, {
+        code: 'ffi_library_not_found',
+        message: `explicit FFI library path does not exist: ${resolved}`,
+        candidates: [resolved],
+      });
+    }
+    return resolved;
   }
   const repoRoot = path.resolve(__dirname, '..', '..');
   const names =
@@ -540,19 +550,15 @@ function resolveLibraryPath(explicit) {
       : process.platform === 'darwin'
         ? ['libconfidential_inference_ffi.dylib']
         : ['libconfidential_inference_ffi.so'];
-  for (const root of [process.cwd(), repoRoot]) {
-    for (const profile of ['debug', 'release']) {
-      for (const name of names) {
-        candidates.push(path.join(root, 'target', profile, name));
-      }
+  // Workspace fallback under the repo root only — the process CWD is never
+  // searched; release is preferred over debug.
+  const candidates = [];
+  for (const profile of ['release', 'debug']) {
+    for (const name of names) {
+      candidates.push(path.join(repoRoot, 'target', profile, name));
     }
   }
-  const seen = new Set();
   for (const candidate of candidates) {
-    if (seen.has(candidate)) {
-      continue;
-    }
-    seen.add(candidate);
     if (fs.existsSync(candidate)) {
       return candidate;
     }
@@ -560,7 +566,7 @@ function resolveLibraryPath(explicit) {
   throw new ConfidentialInferenceError(CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT, {
     code: 'ffi_library_not_found',
     message: `could not find confidential-inference-ffi library; build it with cargo build -p confidential-inference-ffi or set CONFIDENTIAL_INFERENCE_FFI_LIBRARY`,
-    candidates: Array.from(seen),
+    candidates,
   });
 }
 

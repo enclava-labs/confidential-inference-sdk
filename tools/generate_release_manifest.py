@@ -189,6 +189,14 @@ def build_release_manifest_signature(
 def render_signature(signature: dict[str, Any]) -> str:
     return json.dumps(signature, sort_keys=True, indent=2, separators=(",", ": ")) + "\n"
 
+def check_output(output: Path, rendered: str) -> str | None:
+    """Return an error message when --check cannot confirm the output."""
+    if not output.exists():
+        return f"{output} does not exist; nothing to compare"
+    if output.read_text(encoding="utf-8") != rendered:
+        return f"{output} is out of date"
+    return None
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -247,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Fail if the output file already exists and would change.",
+        help="Fail if the output file does not already exist with identical content.",
     )
     args = parser.parse_args(argv)
 
@@ -266,9 +274,10 @@ def main(argv: list[str] | None = None) -> int:
         output = workspace_root / output
     rendered = render_manifest(manifest)
 
-    if args.check and output.exists() and output.read_text(encoding="utf-8") != rendered:
-        print(f"generate_release_manifest.py: {output} is out of date", file=sys.stderr)
-        return 1
+    if args.check:
+        if error := check_output(output, rendered):
+            print(f"generate_release_manifest.py: {error}", file=sys.stderr)
+            return 1
 
     signature_output = args.signature_output
     rendered_signature = None
@@ -304,16 +313,10 @@ def main(argv: list[str] | None = None) -> int:
         except ReleaseManifestError as error:
             print(f"generate_release_manifest.py: {error}", file=sys.stderr)
             return 1
-        if (
-            args.check
-            and signature_output.exists()
-            and signature_output.read_text(encoding="utf-8") != rendered_signature
-        ):
-            print(
-                f"generate_release_manifest.py: {signature_output} is out of date",
-                file=sys.stderr,
-            )
-            return 1
+        if args.check:
+            if error := check_output(signature_output, rendered_signature):
+                print(f"generate_release_manifest.py: {error}", file=sys.stderr)
+                return 1
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(rendered, encoding="utf-8")

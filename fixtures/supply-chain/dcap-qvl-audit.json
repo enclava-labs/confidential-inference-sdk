@@ -1,6 +1,6 @@
 {
   "schema": "confidential-inference.dcap-qvl-audit.v1",
-  "review_date": "2026-07-26",
+  "review_date": "2026-10-31",
   "scope": "Upstream dcap-qvl dependency, review policy, lockfile, and TDX/DCAP evidence used by the SDK.",
   "upstream_sync_policy": {
     "path": "docs/dcap-qvl-upstream-sync.md",
@@ -19,7 +19,7 @@
       "cargo test -p confidential-inference-attestation dcap_tdx_mutation_sweep --locked",
       "cargo test --workspace --locked",
       "cargo deny check",
-      "cargo audit --ignore RUSTSEC-2023-0071"
+      "cargo audit"
     ]
   },
   "crates": [
@@ -39,7 +39,7 @@
   "audited_files": [
     {
       "path": "docs/dcap-qvl-upstream-sync.md",
-      "sha256": "0adf2351dcca4601e4c1bbbc7ac70fd6865f496daa7c9190dc17953c90c2e49e",
+      "sha256": "4ce6dd693724432d8edfe050e6cc099bb75a9ac13db5604a14157309c30dc6ab",
       "reason": "Checked-in upstream review and production release policy."
     },
     {
@@ -64,7 +64,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "84077671181fdf36da6a604ce73c551a2518867fcc80a48107ead9c77c26a835",
+      "sha256": "e0b45c2707a7bb3187cafaf97ccae644d1fe7ca3ef9c79ce152ce49d280db84d",
       "reason": "Exact upstream dependency resolution used by release verification."
     }
   ],

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -31,8 +31,20 @@ pub trait SevSnpVcekResolver: Send + Sync {
 pub struct AmdKdsSevSnpVcekResolver {
     base_url: String,
     client: reqwest::Client,
-    cache: Arc<Mutex<HashMap<CacheKey, Vec<u8>>>>,
+    cache: Arc<Mutex<HashMap<CacheKey, VcekCacheEntry>>>,
 }
+
+#[derive(Clone)]
+struct VcekCacheEntry {
+    result: std::result::Result<Vec<u8>, String>,
+    stored_at: Instant,
+}
+
+/// Failed KDS lookups are cached briefly so a KDS outage does not turn every
+/// verification into a live request, and so transient failures are retried
+/// later instead of being remembered forever.
+const VCEK_FAILURE_TTL: Duration = Duration::from_secs(300);
+const VCEK_CACHE_MAX_ENTRIES: usize = 256;
 
 impl AmdKdsSevSnpVcekResolver {
     pub fn new() -> Result<Self> {
@@ -40,7 +52,7 @@ impl AmdKdsSevSnpVcekResolver {
     }
 
     pub fn with_base_url(base_url: impl Into<String>) -> Result<Self> {
-        let client = reqwest::Client::builder()
+        let client = crate::tls::reqwest_client_builder()
             .timeout(DEFAULT_TIMEOUT)
             .build()
             .map_err(|error| ProviderError::Http(error.to_string()))?;
@@ -54,7 +66,7 @@ impl AmdKdsSevSnpVcekResolver {
     #[cfg(test)]
     fn with_timeout(base_url: impl Into<String>, timeout: Duration) -> Result<Self> {
         let mut resolver = Self::with_base_url(base_url)?;
-        resolver.client = reqwest::Client::builder()
+        resolver.client = crate::tls::reqwest_client_builder()
             .timeout(timeout)
             .build()
             .map_err(|error| ProviderError::Http(error.to_string()))?;
@@ -109,21 +121,59 @@ impl AmdKdsSevSnpVcekResolver {
 impl SevSnpVcekResolver for AmdKdsSevSnpVcekResolver {
     async fn resolve_vcek(&self, product: &str, hwid: &[u8; 64], tcb: [u8; 4]) -> Result<Vec<u8>> {
         let key = (product.to_owned(), *hwid, tcb);
-        if let Some(cert) = self
+        if let Some(entry) = self
             .cache
             .lock()
             .map_err(|_| ProviderError::Http("VCEK cache unavailable".into()))?
             .get(&key)
             .cloned()
         {
-            return Ok(cert);
+            match &entry.result {
+                Ok(cert) => return Ok(cert.clone()),
+                Err(message) if entry.stored_at.elapsed() < VCEK_FAILURE_TTL => {
+                    return Err(ProviderError::Http(format!(
+                        "AMD KDS VCEK lookup failed recently: {message}"
+                    )));
+                }
+                Err(_) => {}
+            }
         }
-        let cert = self.fetch(product, hwid, tcb).await?;
-        self.cache
+        let result = self.fetch(product, hwid, tcb).await;
+        let mut cache = self
+            .cache
             .lock()
-            .map_err(|_| ProviderError::Http("VCEK cache unavailable".into()))?
-            .insert(key, cert.clone());
-        Ok(cert)
+            .map_err(|_| ProviderError::Http("VCEK cache unavailable".into()))?;
+        if !cache.contains_key(&key) && cache.len() >= VCEK_CACHE_MAX_ENTRIES {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.stored_at)
+                .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        match result {
+            Ok(cert) => {
+                cache.insert(
+                    key,
+                    VcekCacheEntry {
+                        result: Ok(cert.clone()),
+                        stored_at: Instant::now(),
+                    },
+                );
+                Ok(cert)
+            }
+            Err(error) => {
+                cache.insert(
+                    key,
+                    VcekCacheEntry {
+                        result: Err(error.to_string()),
+                        stored_at: Instant::now(),
+                    },
+                );
+                Err(error)
+            }
+        }
     }
 }
 
@@ -208,6 +258,20 @@ mod tests {
             resolver.resolve_vcek(product, &hwid, tcb).await.unwrap(),
             [1, 2, 3]
         );
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn caches_failed_lookups_briefly() {
+        // The server replies with an oversized body, so every fetch fails;
+        // the failure is remembered for VCEK_FAILURE_TTL instead of hitting
+        // KDS again on every verification.
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url = server(vec![0; MAX_VCEK_BYTES + 1], Duration::ZERO, count.clone()).await;
+        let resolver = AmdKdsSevSnpVcekResolver::with_base_url(url).unwrap();
+        let (product, hwid, tcb) = args();
+        assert!(resolver.resolve_vcek(product, &hwid, tcb).await.is_err());
+        assert!(resolver.resolve_vcek(product, &hwid, tcb).await.is_err());
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

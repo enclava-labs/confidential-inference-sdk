@@ -4,7 +4,47 @@ use crate::{
     SignatureMetadata, TrustTier, TrustedSigningKey,
 };
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
+
+/// Natural ordering for artifact version strings: ASCII digit runs compare
+/// numerically (leading zeros ignored), non-digit runs compare bytewise, and a
+/// run sequence that is a strict prefix of the other orders first. All
+/// registry/reference-values/pin version ordering uses this comparator.
+pub fn compare_artifact_versions(left: &str, right: &str) -> Ordering {
+    fn runs(value: &str) -> Vec<(&str, bool)> {
+        let bytes = value.as_bytes();
+        let mut runs = Vec::new();
+        let mut start = 0_usize;
+        while start < bytes.len() {
+            let digit = bytes[start].is_ascii_digit();
+            let mut end = start + 1;
+            while end < bytes.len() && bytes[end].is_ascii_digit() == digit {
+                end += 1;
+            }
+            runs.push((&value[start..end], digit));
+            start = end;
+        }
+        runs
+    }
+
+    let left_runs = runs(left);
+    let right_runs = runs(right);
+    for (left_run, right_run) in left_runs.iter().zip(right_runs.iter()) {
+        let ordering = match (left_run, right_run) {
+            ((left_digits, true), (right_digits, true)) => {
+                let left = left_digits.trim_start_matches('0');
+                let right = right_digits.trim_start_matches('0');
+                left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+            }
+            _ => left_run.0.cmp(right_run.0),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left_runs.len().cmp(&right_runs.len())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReferenceValuesEnvelope {
@@ -129,21 +169,26 @@ impl ReferenceValuesPayload {
             )));
         }
 
-        if candidate.version.as_str() < self.version.as_str() {
+        if compare_artifact_versions(&candidate.version, &self.version) == Ordering::Less {
             return Err(AttestationError::InvalidReferenceValuesUpdate(format!(
                 "candidate reference values version {} is older than current {}",
                 candidate.version, self.version
             )));
         }
 
-        if candidate.version.as_str() < self.minimum_acceptable_version.as_str() {
+        if compare_artifact_versions(&candidate.version, &self.minimum_acceptable_version)
+            == Ordering::Less
+        {
             return Err(AttestationError::InvalidReferenceValuesUpdate(format!(
                 "candidate reference values version {} is older than minimum acceptable {}",
                 candidate.version, self.minimum_acceptable_version
             )));
         }
 
-        if candidate.minimum_acceptable_version.as_str() < self.minimum_acceptable_version.as_str()
+        if compare_artifact_versions(
+            &candidate.minimum_acceptable_version,
+            &self.minimum_acceptable_version,
+        ) == Ordering::Less
         {
             return Err(AttestationError::WeakeningReferenceValuesUpdate(format!(
                 "minimum acceptable version moved backward from {} to {}",
@@ -350,7 +395,9 @@ impl ReferenceValuesPin {
         }
 
         if let Some(minimum_version) = &self.minimum_version {
-            if &reference_values.version < minimum_version {
+            if compare_artifact_versions(&reference_values.version, minimum_version)
+                == Ordering::Less
+            {
                 return Err(AttestationError::InvalidReferenceValuesUpdate(format!(
                     "reference values version {} is older than pinned minimum {minimum_version}",
                     reference_values.version
@@ -1052,6 +1099,42 @@ mod tests {
                 value: signature,
             },
         }
+    }
+
+    #[test]
+    fn compare_artifact_versions_uses_natural_ordering() {
+        use std::cmp::Ordering;
+
+        // Numeric runs compare by value, not bytewise.
+        assert_eq!(compare_artifact_versions("1.9.0", "1.10.0"), Ordering::Less);
+        assert_eq!(
+            compare_artifact_versions("1.10.0", "1.9.0"),
+            Ordering::Greater
+        );
+        // Date-style versions.
+        assert_eq!(
+            compare_artifact_versions("2026-07-05-x", "2026-10-20-y"),
+            Ordering::Less
+        );
+        // Strict run prefix orders first.
+        assert_eq!(compare_artifact_versions("1.2", "1.2.1"), Ordering::Less);
+        assert_eq!(compare_artifact_versions("1.2.1", "1.2"), Ordering::Greater);
+        // Leading zeros do not change numeric value.
+        assert_eq!(
+            compare_artifact_versions("1.009.0", "1.9.0"),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_artifact_versions("01.10.0", "1.9.0"),
+            Ordering::Greater
+        );
+        // Non-digit runs compare bytewise.
+        assert_eq!(
+            compare_artifact_versions("2026-10-20-x", "2026-10-20-y"),
+            Ordering::Less
+        );
+        // Equal strings are Equal.
+        assert_eq!(compare_artifact_versions("a1b2", "a1b2"), Ordering::Equal);
     }
 }
 

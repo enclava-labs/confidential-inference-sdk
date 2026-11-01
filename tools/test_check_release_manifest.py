@@ -35,7 +35,7 @@ assert CHECK_SPEC.loader is not None
 CHECK_SPEC.loader.exec_module(check_release_manifest)
 
 
-LIVE_PROVIDER_IDS = ("tinfoil", "venice", "redpill", "chutes", "near", "phala")
+LIVE_PROVIDER_IDS = ("tinfoil", "chutes")
 LIVE_COMPATIBILITY_PROVIDER_IDS = {
     "tinfoil": "tinfoil-fixture",
     "venice": "venice-fixture",
@@ -52,6 +52,12 @@ LIVE_AUTH_ENVS = {
     "near": "NEAR_API_KEY",
     "phala": "PHALA_API_KEY",
 }
+PRODUCTION_SIGNING_KEY = (
+    "confidential-inference-release",
+    "confidential-inference-release-ed25519",
+    bytes(reversed(range(32))),
+)
+OPERATOR_LIVE_PLAN_PATH = Path("fixtures/providers/live-conformance-plan.json")
 LIVE_MODEL_LIST_URLS = {
     "tinfoil": "https://inference.tinfoil.sh/v1/models",
     "venice": "https://api.venice.ai/api/v1/models",
@@ -263,16 +269,37 @@ def write_live_conformance_artifacts(
     root: Path,
     *,
     production_compatibility: bool = True,
+    signing_key: tuple[str, str, bytes] | None = None,
 ) -> dict[str, object]:
     alias_matrix = load_repo_json(check_release_manifest.MODEL_ALIAS_MATRIX_PATH)
-    alias_envelope = load_repo_json(
-        check_release_manifest.MODEL_ALIAS_MATRIX_ENVELOPE_PATH
-    )
+    if signing_key is None:
+        alias_envelope = load_repo_json(
+            check_release_manifest.MODEL_ALIAS_MATRIX_ENVELOPE_PATH
+        )
+    else:
+        signer, key_id, seed = signing_key
+        alias_envelope = signed_matrix_envelope(
+            "confidential-inference.model-alias-matrix-envelope.v1",
+            alias_matrix,
+            signer,
+            key_id,
+            seed,
+        )
     alias_signature = alias_envelope["signature"]
     compatibility_matrix = load_repo_json(check_release_manifest.COMPATIBILITY_MATRIX_PATH)
     if production_compatibility:
         compatibility_matrix = production_compatibility_matrix(compatibility_matrix)
-        compatibility_envelope = signed_compatibility_envelope(compatibility_matrix)
+        if signing_key is None:
+            compatibility_envelope = signed_compatibility_envelope(compatibility_matrix)
+        else:
+            signer, key_id, seed = signing_key
+            compatibility_envelope = signed_matrix_envelope(
+                "confidential-inference.provider-compatibility-matrix-envelope.v1",
+                compatibility_matrix,
+                signer,
+                key_id,
+                seed,
+            )
     else:
         compatibility_envelope = load_repo_json(
             check_release_manifest.COMPATIBILITY_MATRIX_ENVELOPE_PATH
@@ -352,25 +379,41 @@ def production_compatibility_matrix(matrix: dict[str, object]) -> dict[str, obje
     return matrix
 
 
-def signed_compatibility_envelope(matrix: dict[str, object]) -> dict[str, object]:
+def signed_matrix_envelope(
+    schema: str,
+    matrix: dict[str, object],
+    signer: str,
+    key_id: str,
+    seed: bytes,
+) -> dict[str, object]:
     payload = json.loads(
         json.dumps(matrix, sort_keys=True, separators=(",", ":"))
     )
     signature = generate_release_manifest.sign_ed25519(
-        COMPATIBILITY_FIXTURE_SEED,
+        seed,
         check_release_manifest.canonical_json(payload).encode("utf-8"),
     )
     return {
-        "schema": "confidential-inference.provider-compatibility-matrix-envelope.v1",
+        "schema": schema,
         "payload": payload,
         "signature": {
-            "signer": "confidential-inference",
-            "key_id": "confidential-inference-compatibility-fixture-ed25519-2026",
+            "signer": signer,
+            "key_id": key_id,
             "alg": "ed25519",
             "value": "base64url:"
             + generate_release_manifest.encode_unpadded_base64url(signature),
         },
     }
+
+
+def signed_compatibility_envelope(matrix: dict[str, object]) -> dict[str, object]:
+    return signed_matrix_envelope(
+        "confidential-inference.provider-compatibility-matrix-envelope.v1",
+        matrix,
+        "confidential-inference",
+        "confidential-inference-compatibility-fixture-ed25519-2026",
+        COMPATIBILITY_FIXTURE_SEED,
+    )
 
 
 def write_live_conformance_report(
@@ -384,11 +427,13 @@ def write_live_conformance_report(
     provider_ids: tuple[str, ...] = LIVE_PROVIDER_IDS,
     production_compatibility: bool = True,
     completed_at: str | None = None,
+    signing_key: tuple[str, str, bytes] | None = None,
 ) -> Path:
     write_live_conformance_plan(root)
     artifact_metadata = write_live_conformance_artifacts(
         root,
         production_compatibility=production_compatibility,
+        signing_key=signing_key,
     )
     alias_matrix = load_repo_json(check_release_manifest.MODEL_ALIAS_MATRIX_PATH)
     provider_models = alias_provider_models(alias_matrix)
@@ -585,7 +630,10 @@ class CheckReleaseManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_workspace(root)
-            live_report_path = write_live_conformance_report(root)
+            live_report_path = write_live_conformance_report(
+                root,
+                signing_key=PRODUCTION_SIGNING_KEY,
+            )
             dcap_review_path = write_dcap_production_review(root)
             evidence_artifacts = [
                 Path("target/live-conformance-prod.json"),
@@ -612,6 +660,7 @@ class CheckReleaseManifestTests(unittest.TestCase):
                 live_report_path,
                 require_production_release=True,
                 dcap_production_review_path=dcap_review_path,
+                live_conformance_plan_path=OPERATOR_LIVE_PLAN_PATH,
             )
 
             self.assertEqual(report["violations"], [])
@@ -624,7 +673,10 @@ class CheckReleaseManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_workspace(root)
-            live_report_path = write_live_conformance_report(root)
+            live_report_path = write_live_conformance_report(
+                root,
+                signing_key=PRODUCTION_SIGNING_KEY,
+            )
             dcap_review_path = write_dcap_production_review(root)
             manifest_path = write_manifest(root)
             signature_path, trusted_key = write_manifest_signature(
@@ -646,6 +698,7 @@ class CheckReleaseManifestTests(unittest.TestCase):
                 live_report_path,
                 require_production_release=True,
                 dcap_production_review_path=dcap_review_path,
+                live_conformance_plan_path=OPERATOR_LIVE_PLAN_PATH,
             )
 
             joined = "\n".join(report["violations"])
@@ -660,7 +713,14 @@ class CheckReleaseManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_workspace(root)
-            live_report_path = write_live_conformance_report(root)
+            live_report_path = write_live_conformance_report(
+                root,
+                signing_key=(
+                    "confidential-inference-release-ci",
+                    "release-ci-key",
+                    bytes(range(32)),
+                ),
+            )
             dcap_review_path = write_dcap_production_review(root)
             evidence_artifacts = [
                 Path("target/live-conformance-prod.json"),
@@ -686,6 +746,7 @@ class CheckReleaseManifestTests(unittest.TestCase):
                 live_report_path,
                 require_production_release=True,
                 dcap_production_review_path=dcap_review_path,
+                live_conformance_plan_path=OPERATOR_LIVE_PLAN_PATH,
             )
 
             joined = "\n".join(report["violations"])
@@ -700,7 +761,14 @@ class CheckReleaseManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_workspace(root)
-            live_report_path = write_live_conformance_report(root)
+            live_report_path = write_live_conformance_report(
+                root,
+                signing_key=(
+                    "confidential-inference-release",
+                    "confidential-inference-release-ed25519",
+                    bytes(range(32)),
+                ),
+            )
             dcap_review_path = write_dcap_production_review(root)
             evidence_artifacts = [
                 Path("target/live-conformance-prod.json"),
@@ -726,6 +794,7 @@ class CheckReleaseManifestTests(unittest.TestCase):
                 live_report_path,
                 require_production_release=True,
                 dcap_production_review_path=dcap_review_path,
+                live_conformance_plan_path=OPERATOR_LIVE_PLAN_PATH,
             )
 
             joined = "\n".join(report["violations"])
@@ -740,7 +809,14 @@ class CheckReleaseManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_workspace(root)
-            live_report_path = write_live_conformance_report(root)
+            live_report_path = write_live_conformance_report(
+                root,
+                signing_key=(
+                    "confidential-inference-release",
+                    "confidential-inference-release-ed25519",
+                    bytes(range(32)),
+                ),
+            )
             dcap_review_path = write_dcap_production_review(root)
             evidence_artifacts = [
                 Path("target/live-conformance-prod.json"),
@@ -773,6 +849,7 @@ class CheckReleaseManifestTests(unittest.TestCase):
                 live_report_path,
                 require_production_release=True,
                 dcap_production_review_path=dcap_review_path,
+                live_conformance_plan_path=OPERATOR_LIVE_PLAN_PATH,
             )
 
             joined = "\n".join(report["violations"])
@@ -890,10 +967,10 @@ class CheckReleaseManifestTests(unittest.TestCase):
 
             joined = "\n".join(report["violations"])
             self.assertIn(
-                "providers must match fixtures/providers/live-conformance-plan.json",
+                "providers must match",
                 joined,
             )
-            self.assertIn("venice", joined)
+            self.assertIn("chutes", joined)
             self.assertFalse(report["live_conformance_gate_verified"])
 
     def test_release_manifest_rejects_live_report_without_provider_enable_override(self) -> None:
@@ -986,6 +1063,88 @@ class CheckReleaseManifestTests(unittest.TestCase):
                 "\n".join(report["violations"]),
             )
             self.assertFalse(report["live_conformance_gate_verified"])
+
+    def test_production_release_rejects_fixture_signed_matrices(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_workspace(root)
+            # The report and matrix metadata are intact, but the envelopes are
+            # signed with the bundled fixture keys, which production mode must
+            # never fall back to.
+            live_report_path = write_live_conformance_report(root)
+            dcap_review_path = write_dcap_production_review(root)
+            evidence_artifacts = [
+                Path("target/live-conformance-prod.json"),
+                Path("target/dcap-qvl-production-review.json"),
+            ]
+            expected_artifacts = [Path("target/confidential-inference-sbom.json"), *evidence_artifacts]
+            manifest_path = write_manifest(root, evidence_artifacts)
+            signature_path, trusted_key = write_manifest_signature(
+                root,
+                manifest_path,
+                signer="confidential-inference-release",
+                key_id="confidential-inference-release-ed25519",
+                seed=bytes(reversed(range(32))),
+            )
+
+            report = check_release_manifest.validate_manifest(
+                root,
+                manifest_path,
+                expected_artifacts,
+                ["target/package/*.crate"],
+                Path("target/confidential-inference-sbom.json"),
+                signature_path,
+                [check_release_manifest.parse_trusted_release_key(trusted_key)],
+                live_report_path,
+                require_production_release=True,
+                dcap_production_review_path=dcap_review_path,
+                live_conformance_plan_path=OPERATOR_LIVE_PLAN_PATH,
+            )
+
+            joined = "\n".join(report["violations"])
+            self.assertIn("cannot be verified", joined)
+            self.assertFalse(report["live_conformance_gate_verified"])
+            self.assertFalse(report["production_release_verified"])
+
+    def test_production_release_requires_operator_supplied_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_workspace(root)
+            live_report_path = write_live_conformance_report(
+                root,
+                signing_key=PRODUCTION_SIGNING_KEY,
+            )
+            dcap_review_path = write_dcap_production_review(root)
+            evidence_artifacts = [
+                Path("target/live-conformance-prod.json"),
+                Path("target/dcap-qvl-production-review.json"),
+            ]
+            expected_artifacts = [Path("target/confidential-inference-sbom.json"), *evidence_artifacts]
+            manifest_path = write_manifest(root, evidence_artifacts)
+            signature_path, trusted_key = write_manifest_signature(
+                root,
+                manifest_path,
+                signer="confidential-inference-release",
+                key_id="confidential-inference-release-ed25519",
+                seed=bytes(reversed(range(32))),
+            )
+
+            report = check_release_manifest.validate_manifest(
+                root,
+                manifest_path,
+                expected_artifacts,
+                ["target/package/*.crate"],
+                Path("target/confidential-inference-sbom.json"),
+                signature_path,
+                [check_release_manifest.parse_trusted_release_key(trusted_key)],
+                live_report_path,
+                require_production_release=True,
+                dcap_production_review_path=dcap_review_path,
+            )
+
+            joined = "\n".join(report["violations"])
+            self.assertIn("operator-supplied live conformance plan", joined)
+            self.assertFalse(report["production_release_verified"])
 
     def test_release_manifest_rejects_live_report_stale_matrix_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1101,7 +1260,7 @@ class CheckReleaseManifestTests(unittest.TestCase):
             )
 
             self.assertIn(
-                "live conformance plan compatibility_matrix_path must be",
+                "compatibility_matrix.path must be fixtures/providers/other.json",
                 "\n".join(report["violations"]),
             )
             self.assertFalse(report["live_conformance_gate_verified"])

@@ -1,9 +1,9 @@
 use confidential_inference_attestation::{
-    bundled_fixture_signing_keys, canonical_digest, parse_utc_timestamp_millis,
-    verify_artifact_signature_with_keys, AliasConfidence, ArtifactSignature, AttestationError,
-    AttestedRoute, BoundDataRequirement, ChannelBindingKind, FreshnessClass, GpuTeeKind,
-    ResponseIntegrityRequirement, Result as AttestationResult, SignatureMetadata, TrustTier,
-    TrustedSigningKey,
+    bundled_fixture_signing_keys, canonical_digest, compare_artifact_versions,
+    parse_utc_timestamp_millis, verify_artifact_signature_with_keys, AliasConfidence,
+    ArtifactSignature, AttestationError, AttestedRoute, BoundDataRequirement, ChannelBindingKind,
+    FreshnessClass, GpuTeeKind, ResponseIntegrityRequirement, Result as AttestationResult,
+    SignatureMetadata, TrustTier, TrustedSigningKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -336,7 +336,8 @@ impl ProviderRegistry {
             )));
         }
 
-        if candidate.version < self.version {
+        if compare_artifact_versions(&candidate.version, &self.version) == std::cmp::Ordering::Less
+        {
             return Err(AttestationError::InvalidRegistryUpdate(format!(
                 "candidate registry version {} is older than current {}",
                 candidate.version, self.version
@@ -916,7 +917,9 @@ impl ProviderRegistryPin {
         }
 
         if let Some(minimum_version) = &self.minimum_version {
-            if &registry.version < minimum_version {
+            if compare_artifact_versions(&registry.version, minimum_version)
+                == std::cmp::Ordering::Less
+            {
                 return Err(AttestationError::InvalidRegistryUpdate(format!(
                     "registry version {} is older than pinned minimum {minimum_version}",
                     registry.version

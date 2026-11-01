@@ -23,6 +23,8 @@ function chatRequest(prompt = 'node binding path') {
   };
 }
 
+const DEMO_CONFIG = { demo_provider: true };
+
 test('status reports blocking and stream capabilities', () => {
   const status = ffiStatus();
   assert.equal(status.blocking_helpers_available, true);
@@ -42,7 +44,7 @@ test('chat returns a verified confidential response', async () => {
   const expected = JSON.parse(
     fs.readFileSync(path.join(ROOT, 'fixtures', 'verdict', 'demo-verified.json'), 'utf8')
   );
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     const response = await client.chat(chatRequest(), 5_000);
     assert.equal(response.provider, 'demo');
@@ -59,7 +61,7 @@ test('chat returns a verified confidential response', async () => {
 });
 
 test('embeddings returns a verified confidential embedding response', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     const response = await client.embeddings({
       model: 'gpt-oss-120b',
@@ -75,7 +77,7 @@ test('embeddings returns a verified confidential embedding response', async () =
 });
 
 test('embedding operation failures preserve dispatch classification', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     await client.embeddings({ model: 'missing-model', input: 'test' });
     assert.fail('expected an operation failure');
@@ -89,7 +91,7 @@ test('embedding operation failures preserve dispatch classification', async () =
 });
 
 test('verify returns a route verdict', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     const verdict = await client.verify('demo', 'gpt-oss-120b', 5_000);
     assert.equal(verdict.status, 'verified');
@@ -100,7 +102,7 @@ test('verify returns a route verdict', async () => {
 });
 
 test('response returns the Responses shim object', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     const response = await client.response({ model: 'gpt-oss-120b', input: 'responses path' }, 5_000);
     assert.equal(response.provider, 'demo');
@@ -110,7 +112,7 @@ test('response returns the Responses shim object', async () => {
   }
 });
 test('responseManage preserves structured operation errors', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     await assert.rejects(
       client.responseManage({
@@ -132,7 +134,7 @@ test('responseManage preserves structured operation errors', async () => {
 });
 
 test('model discovery and confidentiality catalog return JSON shapes', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     const models = await client.models();
     const catalog = await client.confidentiality();
@@ -144,7 +146,7 @@ test('model discovery and confidentiality catalog return JSON shapes', async () 
 });
 
 test('active policy and trust artifacts cross the ABI', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     const policy = await client.activePolicy();
     const artifacts = await client.activeTrustArtifacts();
@@ -157,7 +159,7 @@ test('active policy and trust artifacts cross the ABI', async () => {
 });
 
 test('stream fails closed for a non-streaming route', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     const events = [];
     for await (const event of client.stream(chatRequest('stream path'), { timeoutMs: 5_000 })) {
@@ -174,13 +176,13 @@ test('stream fails closed for a non-streaming route', async () => {
 });
 
 test('closed client rejects calls', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   client.close();
   await assert.rejects(() => client.models(), ConfidentialInferenceError);
 });
 
 test('closing a client with a live stream fails and preserves the handle', () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   const stream = client.startStream(chatRequest());
   // The pending stream keeps the native client live; freeing must fail
   // without discarding the handle (which would leak both objects).
@@ -195,7 +197,7 @@ test('closing a client with a live stream fails and preserves the handle', () =>
 });
 
 test('closing while a worker-thread call is in flight refuses and preserves the handle', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   // Dispatch synchronously: the in-flight counter is bumped before this line
   // returns, so the same-tick close() deterministically observes it.
   const pending = client.chat(chatRequest(), 5_000);
@@ -214,7 +216,7 @@ test('closing while a worker-thread call is in flight refuses and preserves the 
 });
 
 test('closing a stream while stream_next is in flight refuses and preserves the handle', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   const stream = client.startStream(chatRequest());
   const pending = stream._nextAsync(5_000);
   assert.throws(
@@ -231,7 +233,7 @@ test('closing a stream while stream_next is in flight refuses and preserves the 
 });
 
 test('failed inference surfaces the native error code across the worker boundary', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     await client.chat({ nope: true });
     assert.fail('expected a failure');
@@ -246,7 +248,7 @@ test('failed inference surfaces the native error code across the worker boundary
 });
 
 test('concurrent failures retain their call-specific error details', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     const [chat, verify] = await Promise.allSettled([
       client.chat({ nope: true }),
@@ -262,7 +264,7 @@ test('concurrent failures retain their call-specific error details', async () =>
 });
 
 test('concurrent inference calls all resolve under the koffi async pool', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     const jobs = [];
     for (let i = 0; i < 8; i += 1) {
@@ -279,7 +281,7 @@ test('concurrent inference calls all resolve under the koffi async pool', async 
 });
 
 test('inference methods do not block the event loop', async () => {
-  const client = new Client();
+  const client = new Client(DEMO_CONFIG);
   try {
     // The blocking C call runs on a Koffi worker thread, so the promise must
     // still be pending after an already-queued event-loop turn. A synchronous
@@ -295,5 +297,38 @@ test('inference methods do not block the event loop', async () => {
     assert.equal(response.verdict.status, 'verified');
   } finally {
     client.close();
+  }
+});
+
+test('default config fails closed without demo opt-in', () => {
+  assert.throws(
+    () => new Client(),
+    (error) => error instanceof ConfidentialInferenceError && error.error.code === 'trusted_signing_keys_required'
+  );
+  assert.throws(
+    () => new Client({}),
+    (error) => error instanceof ConfidentialInferenceError && error.error.code === 'trusted_signing_keys_required'
+  );
+});
+
+test('explicit library path is exclusive and must exist', () => {
+  const missing = path.join(ROOT, 'target', 'release', 'no_such_lib_ffi.so');
+  assert.throws(
+    () => new Client(DEMO_CONFIG, { libraryPath: missing }),
+    (error) => error instanceof ConfidentialInferenceError && error.error.code === 'ffi_library_not_found'
+  );
+  const old = process.env.CONFIDENTIAL_INFERENCE_FFI_LIBRARY;
+  try {
+    process.env.CONFIDENTIAL_INFERENCE_FFI_LIBRARY = missing;
+    assert.throws(
+      () => new Client(DEMO_CONFIG),
+      (error) => error instanceof ConfidentialInferenceError && error.error.code === 'ffi_library_not_found'
+    );
+  } finally {
+    if (old === undefined) {
+      delete process.env.CONFIDENTIAL_INFERENCE_FFI_LIBRARY;
+    } else {
+      process.env.CONFIDENTIAL_INFERENCE_FFI_LIBRARY = old;
+    }
   }
 });

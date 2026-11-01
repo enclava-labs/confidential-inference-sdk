@@ -18,6 +18,7 @@ use std::env;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::process;
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -87,10 +88,10 @@ impl From<ClientError> for FfiOperationError {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct ClientConfig {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     demo_provider: bool,
     #[serde(default)]
     allow_inline_api_keys: bool,
@@ -124,27 +125,7 @@ struct ApiKeyConfig {
     #[serde(default)]
     env: Option<String>,
     #[serde(default)]
-    inline: Option<String>,
-}
-
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self {
-            demo_provider: true,
-            allow_inline_api_keys: false,
-            api_keys: BTreeMap::new(),
-            routing: ProviderRoutingConfig::default(),
-            trusted_ed25519_signing_keys: Vec::new(),
-            registry: None,
-            reference_values: None,
-            compatibility_matrix: None,
-            policy: None,
-        }
-    }
-}
-
-fn default_true() -> bool {
-    true
+    inline: Option<Zeroizing<String>>,
 }
 
 fn resolve_trusted_signing_keys(
@@ -265,7 +246,6 @@ fn resolve_api_keys(
                     ),
                 });
             }
-            let inline = Zeroizing::new(inline);
             if inline.is_empty() {
                 return Err(ConfigError {
                     code: "credential_inline_empty_value",
@@ -339,6 +319,7 @@ struct ResponseManageEnvelope {
 }
 pub struct ConfidentialInferenceFfiClient {
     shared: Arc<ClientShared>,
+    owner_pid: u32,
 }
 
 struct ClientShared {
@@ -349,6 +330,7 @@ struct ClientShared {
 
 pub struct ConfidentialInferenceFfiStream {
     shared: Arc<ClientShared>,
+    owner_pid: u32,
     state: Arc<(Mutex<StreamState>, Condvar)>,
     join: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -569,6 +551,7 @@ pub unsafe extern "C" fn confidential_inference_sdk_new(
                 client,
                 live_operations: AtomicUsize::new(0),
             }),
+            owner_pid: process::id(),
         });
         let handle = Box::into_raw(handle);
         register_handle(live_client_handles(), handle);
@@ -577,15 +560,43 @@ pub unsafe extern "C" fn confidential_inference_sdk_new(
         CONFIDENTIAL_INFERENCE_FFI_OK
     })
 }
+/// Fork guard: a client created before fork() must never be used in the
+/// child — its Tokio runtime threads do not survive the fork.
+unsafe fn client_fork_error(client: *mut ConfidentialInferenceFfiClient) -> Option<c_int> {
+    if !client.is_null() && (*client).owner_pid != process::id() {
+        return Some(ffi_error(
+            CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+            "client_used_after_fork",
+            "client was created before fork(); create a new client in the child process",
+        ));
+    }
+    None
+}
+
+/// Fork guard for stream handles (same owner pid as the spawning client).
+unsafe fn stream_fork_error(stream: *mut ConfidentialInferenceFfiStream) -> Option<c_int> {
+    if !stream.is_null() && (*stream).owner_pid != process::id() {
+        return Some(ffi_error(
+            CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
+            "client_used_after_fork",
+            "stream was created before fork(); create a new client in the child process",
+        ));
+    }
+    None
+}
 
 #[no_mangle]
-/// Frees a client handle when no operations spawned from it are live.
+/// Frees a client handle. Blocking calls are not counted: they hold `Arc`
+/// clones of the client's shared state, so freeing stays memory-safe while
+/// they run — `CONFIDENTIAL_INFERENCE_FFI_BUSY` applies to live streams only.
 ///
 /// # Safety
 ///
 /// `client` must be null or a handle returned by `confidential_inference_sdk_new` that has
-/// not already been freed. If operations are live, this function returns
-/// `CONFIDENTIAL_INFERENCE_FFI_BUSY` and leaves ownership with the caller.
+/// not already been freed. If live streams reference the client, this function returns
+/// `CONFIDENTIAL_INFERENCE_FFI_BUSY` and leaves ownership with the caller. In a
+/// forked child process this releases the handle and leaks the runtime
+/// (dropping it would hang); create clients after fork.
 pub unsafe extern "C" fn confidential_inference_sdk_free(
     client: *mut ConfidentialInferenceFfiClient,
 ) -> c_int {
@@ -613,6 +624,16 @@ pub unsafe extern "C" fn confidential_inference_sdk_free(
         }
 
         let client_ref = &*client;
+        if client_ref.owner_pid != process::id() {
+            // Forked child: dropping the runtime here hangs (worker threads did
+            // not survive the fork). Release the handle and leak instead —
+            // the child's address space dies with it anyway.
+            handles.remove(&pointer_key(client));
+            drop(handles);
+            std::mem::forget(Box::from_raw(client));
+            clear_last_error();
+            return CONFIDENTIAL_INFERENCE_FFI_OK;
+        }
         let live_operations = client_ref.shared.live_operations.load(Ordering::SeqCst);
         if live_operations > 0 {
             return ffi_error(
@@ -654,6 +675,9 @@ pub unsafe extern "C" fn confidential_inference_chat_blocking(
     out_response_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary_with_error(out_response_json, || unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -712,6 +736,9 @@ pub unsafe extern "C" fn confidential_inference_response_manage_blocking(
     out_response_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary_with_error(out_response_json, || unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -768,6 +795,9 @@ pub unsafe extern "C" fn confidential_inference_response_blocking(
     out_response_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary_with_error(out_response_json, || unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -826,6 +856,9 @@ pub unsafe extern "C" fn confidential_inference_embeddings_blocking(
     out_response_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary_with_error(out_response_json, || unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -885,6 +918,9 @@ pub unsafe extern "C" fn confidential_inference_verify_blocking(
     out_verdict_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary_with_error(out_verdict_json, || unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -939,6 +975,9 @@ pub unsafe extern "C" fn confidential_inference_models_blocking(
     out_models_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary_with_error(out_models_json, || unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -982,6 +1021,9 @@ pub unsafe extern "C" fn confidential_inference_confidentiality_blocking(
     out_catalog_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary_with_error(out_catalog_json, || unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -1025,6 +1067,9 @@ pub unsafe extern "C" fn confidential_inference_active_policy_blocking(
     out_policy_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary_with_error(out_policy_json, || unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -1078,6 +1123,9 @@ pub unsafe extern "C" fn confidential_inference_active_trust_artifacts_blocking(
     out_artifacts_json: *mut *mut c_char,
 ) -> c_int {
     ffi_boundary_with_error(out_artifacts_json, || unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -1125,6 +1173,9 @@ pub unsafe extern "C" fn confidential_inference_chat_stream_start(
     out_stream: *mut *mut ConfidentialInferenceFfiStream,
 ) -> c_int {
     ffi_boundary(|| unsafe {
+        if let Some(code) = client_fork_error(client) {
+            return code;
+        }
         let Some(shared) = client_shared(client) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -1174,7 +1225,9 @@ pub unsafe extern "C" fn confidential_inference_chat_stream_start(
 ///
 /// `stream` must be a valid live stream handle. `out_event_json` must be a
 /// valid writable pointer. The returned string must be freed with
-/// `confidential_inference_string_free`.
+/// `confidential_inference_string_free`. A `timeout_ms` of zero is a
+/// non-blocking poll (returns `CONFIDENTIAL_INFERENCE_FFI_PENDING` when no
+/// event is ready); unlike the blocking exports it never waits indefinitely.
 pub unsafe extern "C" fn confidential_inference_stream_next(
     stream: *mut ConfidentialInferenceFfiStream,
     timeout_ms: u64,
@@ -1182,6 +1235,9 @@ pub unsafe extern "C" fn confidential_inference_stream_next(
 ) -> c_int {
     clear_last_error();
     let status = ffi_boundary(|| unsafe {
+        if let Some(code) = stream_fork_error(stream) {
+            return code;
+        }
         let Some(parts) = stream_parts(stream) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -1220,6 +1276,9 @@ pub unsafe extern "C" fn confidential_inference_stream_cancel(
     stream: *mut ConfidentialInferenceFfiStream,
 ) -> c_int {
     ffi_boundary(|| unsafe {
+        if let Some(code) = stream_fork_error(stream) {
+            return code;
+        }
         let Some(parts) = stream_parts(stream) else {
             return ffi_error(
                 CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT,
@@ -1256,6 +1315,9 @@ pub unsafe extern "C" fn confidential_inference_stream_free(
         if stream.is_null() {
             clear_last_error();
             return CONFIDENTIAL_INFERENCE_FFI_OK;
+        }
+        if let Some(code) = stream_fork_error(stream) {
+            return code;
         }
         // Hold the handle-registry lock across the liveness check and the
         // clone of the interior Arcs; after that the raw pointer is not
@@ -1545,6 +1607,7 @@ where
 
     Box::new(ConfidentialInferenceFfiStream {
         shared,
+        owner_pid: process::id(),
         state,
         join: Arc::new(Mutex::new(Some(join))),
     })
@@ -1832,12 +1895,21 @@ unsafe fn optional_json_config(config_json: *const c_char) -> Result<ClientConfi
     if config_json.is_null() {
         return Ok(ClientConfig::default());
     }
-    let value = c_string_to_string(config_json, "config_json")?;
+    let value = Zeroizing::new(c_string_to_string(config_json, "config_json")?);
     if value.trim().is_empty() {
         Ok(ClientConfig::default())
     } else {
-        serde_json::from_str(&value)
-            .map_err(|error| format!("failed to parse config JSON: {error}"))
+        // Report only the serde error category + position: the default
+        // Display message embeds the offending value, which can be an
+        // inline API key from the raw config JSON.
+        serde_json::from_str(&value).map_err(|error| {
+            format!(
+                "failed to parse config JSON: {:?} error at line {} column {}",
+                error.classify(),
+                error.line(),
+                error.column()
+            )
+        })
     }
 }
 
@@ -2037,7 +2109,8 @@ mod tests {
 
     fn new_demo_client() -> *mut ConfidentialInferenceFfiClient {
         let mut client = ptr::null_mut();
-        let code = unsafe { confidential_inference_sdk_new(ptr::null(), &mut client) };
+        let config = c_string(r#"{"demo_provider":true}"#);
+        let code = unsafe { confidential_inference_sdk_new(config.as_ptr(), &mut client) };
         assert_eq!(code, CONFIDENTIAL_INFERENCE_FFI_OK);
         assert!(!client.is_null());
         client
@@ -2454,7 +2527,10 @@ mod tests {
             assert_eq!(error["error"]["code"], "invalid_argument");
 
             assert_eq!(
-                confidential_inference_sdk_new(ptr::null(), &mut client),
+                confidential_inference_sdk_new(
+                    c_string(r#"{"demo_provider":true}"#).as_ptr(),
+                    &mut client
+                ),
                 CONFIDENTIAL_INFERENCE_FFI_OK
             );
             assert_eq!(
@@ -2651,7 +2727,7 @@ mod tests {
             let env_name = "CONFIDENTIAL_INFERENCE_FFI_TEST_API_KEY_ENV_REFERENCE";
             env::set_var(env_name, "sk-ffi-env-secret");
             let config = c_string(&format!(
-                r#"{{"api_keys":{{"demo":{{"env":"{env_name}"}}}}}}"#
+                r#"{{"demo_provider":true,"api_keys":{{"demo":{{"env":"{env_name}"}}}}}}"#
             ));
             let mut client = ptr::null_mut();
 
@@ -2676,7 +2752,7 @@ mod tests {
             let env_name = "CONFIDENTIAL_INFERENCE_FFI_TEST_MISSING_API_KEY_ENV_REFERENCE";
             env::remove_var(env_name);
             let config = c_string(&format!(
-                r#"{{"api_keys":{{"demo":{{"env":"{env_name}"}}}}}}"#
+                r#"{{"demo_provider":true,"api_keys":{{"demo":{{"env":"{env_name}"}}}}}}"#
             ));
             let mut client = ptr::null_mut();
 
@@ -2706,7 +2782,7 @@ mod tests {
         unsafe {
             let secret = "sk-ffi-inline-secret";
             let config = c_string(&format!(
-                r#"{{"api_keys":{{"demo":{{"inline":"{secret}"}}}}}}"#
+                r#"{{"demo_provider":true,"api_keys":{{"demo":{{"inline":"{secret}"}}}}}}"#
             ));
             let mut client = ptr::null_mut();
 
@@ -2732,7 +2808,7 @@ mod tests {
         unsafe {
             let secret = "sk-ffi-inline-secret-allowed";
             let config = c_string(&format!(
-                r#"{{"allow_inline_api_keys":true,"api_keys":{{"demo":{{"inline":"{secret}"}}}}}}"#
+                r#"{{"demo_provider":true,"allow_inline_api_keys":true,"api_keys":{{"demo":{{"inline":"{secret}"}}}}}}"#
             ));
             let mut client = ptr::null_mut();
 
@@ -2753,7 +2829,9 @@ mod tests {
     #[test]
     fn ffi_client_config_accepts_named_provider_order() {
         unsafe {
-            let config = c_string(r#"{"routing":{"provider_order":{"gpt-oss-120b":["demo"]}}}"#);
+            let config = c_string(
+                r#"{"demo_provider":true,"routing":{"provider_order":{"gpt-oss-120b":["demo"]}}}"#,
+            );
             let mut client = ptr::null_mut();
 
             assert_eq!(
@@ -2770,8 +2848,9 @@ mod tests {
     #[test]
     fn ffi_client_config_rejects_invalid_named_provider_order() {
         unsafe {
-            let config =
-                c_string(r#"{"routing":{"provider_order":{"gpt-oss-120b":["demo","demo"]}}}"#);
+            let config = c_string(
+                r#"{"demo_provider":true,"routing":{"provider_order":{"gpt-oss-120b":["demo","demo"]}}}"#,
+            );
             let mut client = ptr::null_mut();
 
             assert_eq!(
@@ -2798,7 +2877,7 @@ mod tests {
         unsafe {
             let secret = "sk-ffi-inline-secret-ambiguous";
             let config = c_string(&format!(
-                r#"{{"allow_inline_api_keys":true,"api_keys":{{"demo":{{"env":"CONFIDENTIAL_INFERENCE_FFI_UNUSED_ENV","inline":"{secret}"}}}}}}"#
+                r#"{{"demo_provider":true,"allow_inline_api_keys":true,"api_keys":{{"demo":{{"env":"CONFIDENTIAL_INFERENCE_FFI_UNUSED_ENV","inline":"{secret}"}}}}}}"#
             ));
             let mut client = ptr::null_mut();
 
@@ -2861,6 +2940,103 @@ mod tests {
                 assert_eq!(error["error"]["code"], "trusted_signing_keys_required");
                 assert!(client.is_null());
             }
+        }
+    }
+    #[test]
+    fn ffi_client_config_defaults_fail_closed_without_demo_opt_in() {
+        unsafe {
+            // demo_provider defaults to false: NULL, empty, and omitted
+            // configs must all hit the trusted-keys-required refusal.
+            for config_ptr in [
+                ptr::null(),
+                c_string("").as_ptr(),
+                c_string("   ").as_ptr(),
+                c_string("{}").as_ptr(),
+            ] {
+                let mut client = ptr::null_mut();
+                assert_eq!(
+                    confidential_inference_sdk_new(config_ptr, &mut client),
+                    CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT
+                );
+                let error = last_error_value();
+                assert_eq!(error["error"]["code"], "trusted_signing_keys_required");
+                assert!(client.is_null());
+            }
+        }
+    }
+
+    #[test]
+    fn ffi_client_config_parse_error_never_echoes_inline_secret() {
+        unsafe {
+            let secret = "sk-live-parse-secret";
+            // Wrong type for api_keys value: serde reports a category error
+            // whose Display embeds the raw value — must be scrubbed.
+            let config = c_string(&format!(
+                r#"{{"demo_provider":true,"api_keys":{{"tinfoil":"{secret}"}}}}"#
+            ));
+            let mut client = ptr::null_mut();
+
+            assert_eq!(
+                confidential_inference_sdk_new(config.as_ptr(), &mut client),
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT
+            );
+            let error_json = {
+                let mut error = ptr::null_mut();
+                assert_eq!(
+                    confidential_inference_last_error(&mut error),
+                    CONFIDENTIAL_INFERENCE_FFI_OK
+                );
+                take_string(error)
+            };
+            let error: Value = serde_json::from_str(&error_json).unwrap();
+            assert_eq!(error["error"]["code"], "invalid_config_json");
+            assert!(
+                !error_json.contains(secret),
+                "error echoed secret: {error_json}"
+            );
+            assert!(error["error"]["message"].as_str().unwrap().contains("line"));
+            assert!(client.is_null());
+        }
+    }
+
+    #[test]
+    fn ffi_client_used_after_fork_refuses_calls() {
+        unsafe {
+            let client = new_demo_client();
+            // Simulate the forked child: owner pid no longer matches.
+            let owner_pid = (*client).owner_pid;
+            (*client).owner_pid = owner_pid.wrapping_add(1);
+
+            let request = chat_request_json("forked child call");
+            let mut out = ptr::null_mut();
+            assert_eq!(
+                confidential_inference_chat_blocking(client, request.as_ptr(), 0, &mut out),
+                CONFIDENTIAL_INFERENCE_FFI_INVALID_ARGUMENT
+            );
+            let error: Value = serde_json::from_str(&take_string(out)).unwrap();
+            assert_eq!(error["error"]["code"], "client_used_after_fork");
+
+            (*client).owner_pid = owner_pid;
+            assert_eq!(
+                confidential_inference_sdk_free(client),
+                CONFIDENTIAL_INFERENCE_FFI_OK
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_client_free_in_forked_child_leaks_runtime_instead_of_hanging() {
+        unsafe {
+            let client = new_demo_client();
+            (*client).owner_pid = process::id().wrapping_add(1);
+
+            // The child releases the handle and leaks the runtime rather
+            // than dropping it (drop would hang on dead worker threads).
+            assert_eq!(
+                confidential_inference_sdk_free(client),
+                CONFIDENTIAL_INFERENCE_FFI_OK
+            );
+            assert!(client_shared(client).is_none());
         }
     }
 

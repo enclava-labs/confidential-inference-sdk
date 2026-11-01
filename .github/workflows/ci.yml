@@ -36,15 +36,14 @@ jobs:
       - name: DCAP QVL dependency audit fixture
         run: cargo test -p confidential-inference-providers --test dcap_qvl_audit --locked
 
-      - name: Fuzz target build when targets are checked in
+      - name: Fuzz target build
         run: |
-          if [ -d fuzz ]; then
-            rustup toolchain install nightly --profile minimal
-            cargo install --locked cargo-fuzz
-            cargo fuzz build
-          else
-            echo "No fuzz targets checked in; offline corpus tests are covered by cargo test --workspace."
-          fi
+          rustup toolchain install nightly --profile minimal
+          cargo install --locked cargo-fuzz --version 0.13.1
+          cargo +nightly fuzz build
+
+      - name: Deterministic demo
+        run: cargo run -p confidential-demo --locked
 
       - name: Normative fixture policy
         run: python3 tools/check_normative_fixtures.py
@@ -125,7 +124,7 @@ jobs:
         run: cargo build -p confidential-inference-ffi --locked
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           cache: npm
@@ -192,24 +191,35 @@ jobs:
         run: cargo deny check
 
       - name: Cargo audit
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        run: cargo audit
 
       - name: Supply-chain policy
         run: python3 tools/check_supply_chain_policy.py
 
       - name: Release packaging
-        run: python3 tools/check_release_packaging.py
+        run: python3 tools/check_release_packaging.py --require-clean
 
       - name: SBOM
+        run: python3 tools/generate_sbom.py --output target/confidential-inference-sbom.json
+
+      - name: SBOM determinism check
         run: python3 tools/generate_sbom.py --output target/confidential-inference-sbom.json --check
 
       - name: Release checksum manifest
+        run: python3 tools/generate_release_manifest.py --artifact-glob 'target/package/*.crate' --artifact target/confidential-inference-sbom.json --sbom target/confidential-inference-sbom.json --output target/confidential-inference-release-manifest.json
+
+      - name: Release checksum manifest determinism check
         run: python3 tools/generate_release_manifest.py --artifact-glob 'target/package/*.crate' --artifact target/confidential-inference-sbom.json --sbom target/confidential-inference-sbom.json --output target/confidential-inference-release-manifest.json --check
 
       - name: Release checksum manifest policy
         run: python3 tools/check_release_manifest.py --manifest target/confidential-inference-release-manifest.json --artifact-glob 'target/package/*.crate' --artifact target/confidential-inference-sbom.json --sbom target/confidential-inference-sbom.json
 
       - name: Release checksum manifest signature fixture
+        env:
+          CONFIDENTIAL_INFERENCE_RELEASE_CI_SIGNING_KEY_SEED_BASE64URL: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
+        run: python3 tools/generate_release_manifest.py --artifact-glob 'target/package/*.crate' --artifact target/confidential-inference-sbom.json --sbom target/confidential-inference-sbom.json --output target/confidential-inference-release-manifest.json --signature-output target/confidential-inference-release-manifest.ci.sig.json --signature-key-seed-env CONFIDENTIAL_INFERENCE_RELEASE_CI_SIGNING_KEY_SEED_BASE64URL --signature-signer confidential-inference-release-ci --signature-key-id release-ci-key
+
+      - name: Release checksum manifest signature fixture determinism check
         env:
           CONFIDENTIAL_INFERENCE_RELEASE_CI_SIGNING_KEY_SEED_BASE64URL: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
         run: python3 tools/generate_release_manifest.py --artifact-glob 'target/package/*.crate' --artifact target/confidential-inference-sbom.json --sbom target/confidential-inference-sbom.json --output target/confidential-inference-release-manifest.json --signature-output target/confidential-inference-release-manifest.ci.sig.json --signature-key-seed-env CONFIDENTIAL_INFERENCE_RELEASE_CI_SIGNING_KEY_SEED_BASE64URL --signature-signer confidential-inference-release-ci --signature-key-id release-ci-key --check

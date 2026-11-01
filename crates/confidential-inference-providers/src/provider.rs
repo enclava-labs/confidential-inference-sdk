@@ -245,6 +245,11 @@ pub struct ProviderChatRequest {
     pub confidentiality: ProviderRequestConfidentiality,
     #[serde(skip)]
     sdk_app_e2ee_context: Option<SdkAppE2eeClientContext>,
+    /// sha256 digest of the raw evidence bytes the dispatch verdict verified.
+    /// Adapters that keep fetch-time state use it to bind the request to that
+    /// exact evidence instead of whatever was fetched most recently.
+    #[serde(skip)]
+    verified_evidence_digest: Option<String>,
 }
 
 pub type ProviderEmbeddingsRequest = ProviderChatRequest;
@@ -253,7 +258,7 @@ impl Debug for ProviderChatRequest {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProviderChatRequest")
-            .field("body", &self.body)
+            .field("body", &"<redacted>")
             .field("confidentiality", &self.confidentiality)
             .field(
                 "sdk_app_e2ee_context",
@@ -264,6 +269,7 @@ impl Debug for ProviderChatRequest {
                         request_id: &context.request_id,
                     }),
             )
+            .field("verified_evidence_digest", &self.verified_evidence_digest)
             .finish()
     }
 }
@@ -294,6 +300,7 @@ impl ProviderChatRequest {
             body,
             confidentiality: ProviderRequestConfidentiality::Plaintext,
             sdk_app_e2ee_context: None,
+            verified_evidence_digest: None,
         }
     }
 
@@ -305,6 +312,7 @@ impl ProviderChatRequest {
             body,
             confidentiality,
             sdk_app_e2ee_context: None,
+            verified_evidence_digest: None,
         }
     }
 
@@ -370,6 +378,7 @@ impl ProviderChatRequest {
                 request_id,
                 response_key,
             }),
+            verified_evidence_digest: None,
         })
     }
 
@@ -379,6 +388,18 @@ impl ProviderChatRequest {
 
     pub fn confidentiality(&self) -> &ProviderRequestConfidentiality {
         &self.confidentiality
+    }
+
+    /// Binds this request to the sha256 digest of the raw evidence bytes the
+    /// dispatch verdict verified (`AttestationVerdict::raw_evidence_digest`).
+    pub fn with_verified_evidence_digest(mut self, digest: impl Into<String>) -> Self {
+        self.verified_evidence_digest = Some(digest.into());
+        self
+    }
+
+    /// The verified-evidence digest bound by [`Self::with_verified_evidence_digest`].
+    pub fn verified_evidence_digest(&self) -> Option<&str> {
+        self.verified_evidence_digest.as_deref()
     }
 
     pub fn into_body(self) -> Value {
@@ -472,6 +493,107 @@ impl ProviderChatRequest {
             .or_else(|| self.body.get("provider_model"))
             .and_then(Value::as_str)
     }
+}
+
+/// Bounded store for fetch-time adapter state, keyed by
+/// `(route_id, verified_evidence_digest)` so a request always uses the state
+/// captured with the exact evidence its verdict verified — not whatever a
+/// later fetch overwrote. Oldest entries are evicted once the store is full.
+#[derive(Debug)]
+pub(crate) struct EvidenceStateStore<T> {
+    entries: std::collections::BTreeMap<(String, String), (u64, T)>,
+    next_sequence: u64,
+}
+
+impl<T> EvidenceStateStore<T> {
+    const MAX_ENTRIES: usize = 256;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: std::collections::BTreeMap::new(),
+            next_sequence: 0,
+        }
+    }
+
+    pub(crate) fn insert(&mut self, route_id: &str, evidence_digest: &str, value: T) {
+        let key = (route_id.to_owned(), evidence_digest.to_owned());
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.entries.insert(key, (sequence, value));
+        while self.entries.len() > Self::MAX_ENTRIES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (sequence, _))| *sequence)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    pub(crate) fn get(&self, route_id: &str, evidence_digest: &str) -> Option<&T> {
+        self.entries
+            .get(&(route_id.to_owned(), evidence_digest.to_owned()))
+            .map(|(_, value)| value)
+    }
+
+    pub(crate) fn get_mut(&mut self, route_id: &str, evidence_digest: &str) -> Option<&mut T> {
+        self.entries
+            .get_mut(&(route_id.to_owned(), evidence_digest.to_owned()))
+            .map(|(_, value)| value)
+    }
+
+    /// Resolves the request's verified-evidence digest to stored state.
+    /// A missing digest means the SDK dispatched without a verified evidence
+    /// binding (fail closed, compatibility); an unknown digest means the
+    /// verified evidence is stale or unknown to this adapter (key rotation).
+    pub(crate) fn lookup_for_request(
+        &self,
+        route: &RouteDefinition,
+        request: &ProviderChatRequest,
+        state_name: &str,
+    ) -> Result<&T> {
+        let digest = verified_digest_for_request(route, request)?;
+        self.get(&route.route_id, digest).ok_or_else(|| {
+            ProviderError::key_rotation(
+                route.route_id.clone(),
+                format!(
+                    "no {state_name} captured for the verified evidence digest; refetch evidence"
+                ),
+            )
+        })
+    }
+
+    pub(crate) fn lookup_for_request_mut(
+        &mut self,
+        route: &RouteDefinition,
+        request: &ProviderChatRequest,
+        state_name: &str,
+    ) -> Result<&mut T> {
+        let digest = verified_digest_for_request(route, request)?.to_owned();
+        self.get_mut(&route.route_id, &digest).ok_or_else(|| {
+            ProviderError::key_rotation(
+                route.route_id.clone(),
+                format!(
+                    "no {state_name} captured for the verified evidence digest; refetch evidence"
+                ),
+            )
+        })
+    }
+}
+
+fn verified_digest_for_request<'a>(
+    route: &RouteDefinition,
+    request: &'a ProviderChatRequest,
+) -> Result<&'a str> {
+    request.verified_evidence_digest().ok_or_else(|| {
+        ProviderError::Compatibility(format!(
+            "route {} request carries no verified evidence digest; verify evidence before chat",
+            route.route_id
+        ))
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -39,12 +39,15 @@ fn credential(name: &str) -> String {
         .unwrap_or_else(|| panic!("{name} must be configured in the environment or .env"))
 }
 
+// Chutes rotates its TEE catalog; check https://llm.chutes.ai/v1/models when this stops resolving.
+const CHUTES_LIVE_MODEL: &str = "google/gemma-4-31B-turbo-TEE";
+
 fn chutes_route() -> RouteDefinition {
     RouteDefinition {
-        route_id: "chutes:qwen3-32b-tee:live".into(),
+        route_id: "chutes:gemma-4-31b-turbo-tee:live".into(),
         route_status: RouteLifecycle::Active,
         provider: "chutes".into(),
-        provider_model: "Qwen/Qwen3-32B-TEE".into(),
+        provider_model: CHUTES_LIVE_MODEL.into(),
         evidence_family: "chutes_live_e2ee".into(),
         api_base_url: "https://llm.chutes.ai/v1".into(),
         evidence_endpoint: "https://api.chutes.ai".into(),
@@ -133,7 +136,7 @@ async fn chutes_live_adapter_captures_bound_evidence() {
     let provider = ChutesHttpProvider::new("chutes", vec![route.clone()], api_key).unwrap();
 
     let raw = provider
-        .fetch_evidence(&route, &request("Qwen/Qwen3-32B-TEE"))
+        .fetch_evidence(&route, &request(CHUTES_LIVE_MODEL))
         .await
         .unwrap();
     let evidence: ChutesLiveEvidence = serde_json::from_slice(&raw).unwrap();

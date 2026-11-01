@@ -79,7 +79,7 @@ fn report_data_sha256_prefix(value: &str) -> Option<String> {
         return None;
     }
 
-    let prefix = &value[..64];
+    let prefix = value.get(..64)?;
     if prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Some(prefix.to_ascii_lowercase());
     }
@@ -189,6 +189,14 @@ mod tests {
         assert!(verify_tls_spki_report_data_binding(&"zz".repeat(32), TEST_SPKI_SHA256).is_none());
         assert!(verify_tls_spki_report_data_binding(&"00".repeat(32), "abc").is_none());
         assert!(verify_tls_spki_report_data_binding(&"00".repeat(32), &"zz".repeat(32)).is_none());
+    }
+
+    #[test]
+    fn tls_spki_report_data_binding_does_not_panic_on_multibyte_prefix() {
+        // A multi-byte char inside the first 64 bytes must not split a UTF-8
+        // boundary when prefixing report_data.
+        let report_data = format!("{}é{}", "00".repeat(31), "11".repeat(33));
+        assert!(verify_tls_spki_report_data_binding(&report_data, TEST_SPKI_SHA256).is_none());
     }
 
     #[test]

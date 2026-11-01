@@ -52,17 +52,24 @@ CI fixture signing key cannot satisfy that production gate.
 
 - Artifact trust is explicit: there is no implicit fixture-key trust. The
   bundled fixture keys apply to bundled artifacts only, and only after an
-  explicit `with_demo_provider()` opt-in. Remote, custom, cached, and fetched
-  artifacts verify against the operator key set alone.
-- The RedPill (`chutes_e2ee`) evidence path does not verify the TDX quote
-  signature, so the default policy rejects its CPU evidence (`cpu_tee` fails
-  closed). Setting the CPU requirement to `NotRequired` keeps the app-E2EE
-  checks usable; the trust tier stays capped below `HwVerifiedTls`.
+  explicit `with_demo_provider()` opt-in (bindings: `{"demo_provider": true}`,
+  which defaults to false). Remote, custom, cached, and fetched artifacts
+  verify against the operator key set alone.
+- The claims-only evidence families — RedPill (`chutes_e2ee`), dstack
+  (`dstack_app_e2ee`), and structured Tinfoil TLS evidence
+  (`confidential-inference.tinfoil-tls-evidence.v1`) — do not verify a TDX
+  quote signature, so the default policy rejects their CPU evidence
+  (`cpu_tee` fails closed). Setting the CPU requirement to `NotRequired` keeps
+  the app-E2EE checks usable; the trust tier stays capped below
+  `HwVerifiedTls`.
   Live Tinfoil SEV-SNP v2 verification is implemented for Genoa reports with
   pinned AMD ARK/ASK trust, VCEK resolution, report signature and policy
   checks. SNP verifies router identity and TLS binding, not a model claim;
   the operator pin marks model binding unsupported and opts into the
   provider-conditional policy.
+- The NEAR verifier is implemented, but its model-direct endpoint
+  (`gpt-oss-120b.completions.near.ai`) currently resets the TLS handshake;
+  see [ga-readiness.md](ga-readiness.md) GA-08.
 - The checked-in provider compatibility profiles include executable Chutes and
   NEAR transport profiles, but they are not substitutes for a signed live
   provider registry and signed deployment reference values.
@@ -77,15 +84,15 @@ CI fixture signing key cannot satisfy that production gate.
   silently weakening request or response guarantees.
 - The Responses API support is a text-only compatibility shim over the same
   verified execution path.
-- The Python and Node.js bindings are source bindings over the Rust shared
-  library. They are not published as standalone registry packages.
+- The Python, Node.js, and Go bindings are source bindings over the Rust
+  shared library. They are not published as standalone registry packages.
 - The minimum supported Rust version is `1.97` (the workspace `rust-version`);
   CI runs `cargo +1.97 check --workspace --locked --all-targets` for it.
 - macOS and Windows CI coverage builds `confidential-inference-ffi` and runs
-  the Node.js binding tests only; the full workspace suite runs on Ubuntu.
-- The `fuzz/` cargo-fuzz target (`dcap_quote_parse`) is compiled in CI so the
-  harness keeps building, but no production fuzz campaign has been run; one
-  remains required before release.
+  the Node.js and Go binding tests; the full workspace suite runs on Ubuntu.
+- The `fuzz/` cargo-fuzz targets (`dcap_quote_parse` plus one per crate
+  `fuzzing` hook) are compiled in CI so the harnesses keep building, but no
+  production fuzz campaign has been run; one remains required before release.
 - Public APIs and schemas may change before `1.0`.
 
 ## Release checks
@@ -101,10 +108,12 @@ python3 tools/check_normative_fixtures.py
 python3 tools/check_ffi_exports.py
 python3 -m unittest discover -s bindings/python/tests
 (cd bindings/node && npm ci && npm test)
+(cd bindings/go && go test -count=1 ./...)
+cargo +nightly fuzz build
 cargo deny check
-cargo audit --ignore RUSTSEC-2023-0071
+cargo audit
 python3 tools/check_supply_chain_policy.py
-python3 tools/check_release_packaging.py
+python3 tools/check_release_packaging.py --require-clean
 python3 -m unittest discover -s tools -p 'test_*.py'
 ```
 

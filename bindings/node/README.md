@@ -24,9 +24,11 @@ npm ci
 npm test
 ```
 
-The binding searches the workspace `target/debug` and `target/release`
-directories. Set `CONFIDENTIAL_INFERENCE_FFI_LIBRARY` to an explicit shared
-library path when embedding it elsewhere.
+The binding searches the workspace `target/release` and `target/debug`
+directories (release first; the working directory is never searched). Set
+`CONFIDENTIAL_INFERENCE_FFI_LIBRARY` — or pass `libraryPath` — to an explicit
+shared library path when embedding it elsewhere; an explicit path is
+exclusive and must exist.
 Each binding checks the library's reported ABI version when loading it and
 rejects incompatible versions before use.
 
@@ -83,14 +85,22 @@ Inference methods run the blocking FFI call on a Koffi worker thread, so they
 do not block the Node event loop. Rust owns every
 attestation/policy/registry/digest/signature decision; the binding only
 parses the JSON that crosses the ABI and applies minimal object/array shape
-checks on the way back. The process-wide Koffi pool accepts up to 32 concurrent
-native calls; apply backpressure before that limit for larger fan-outs.
+checks on the way back. Each async call occupies a libuv threadpool thread
+for its full duration: real concurrency is bounded by `UV_THREADPOOL_SIZE`
+(default 4), not by the 32-call Koffi queue cap. Set
+`UV_THREADPOOL_SIZE=<expected concurrent native calls>+4` at process start —
+it cannot be raised later — for larger fan-outs.
 
 ## Artifact trust
 
-`demo_provider: true` (the default) is the offline/demo mode: it installs the
-demo provider and trusts the bundled fixture signing keys for the bundled
-artifacts only.
+`demo_provider: true` is the offline/demo mode: it installs the demo provider
+and trusts the bundled fixture signing keys for the bundled artifacts only.
+It must be opted into explicitly — `demo_provider` defaults to `false`, so a
+missing, empty, or NULL config fails closed with
+`trusted_signing_keys_required`.
+
+Clients create a private Tokio runtime. Create them **after** `fork()`:
+handles used in a forked child fail with `client_used_after_fork`.
 
 Setting `demo_provider: false` requires a non-empty
 `trusted_ed25519_signing_keys` list, which becomes the exclusive trust root

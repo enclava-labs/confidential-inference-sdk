@@ -1,6 +1,6 @@
 [package]
 name = "confidential-inference-ffi"
-description = "Async operation-handle C ABI for the Confidential Inference SDK."
+description = "Blocking-call and stream-handle C ABI for the Confidential Inference SDK."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,4 +20,4 @@ confidential-inference-sdk = { version = "0.1.0", path = "../confidential-infere
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-zeroize.workspace = true
+zeroize = { workspace = true, features = ["alloc", "serde"] }

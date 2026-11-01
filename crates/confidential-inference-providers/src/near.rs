@@ -7,20 +7,18 @@ use confidential_inference_attestation::{
 use confidential_inference_openai::ChatCompletionResponse;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, Once};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
 use crate::http::{checked_response_bytes, https_or_test_loopback, require_tls_peer, LiveTlsPeer};
 use crate::nvidia::NvidiaNrasRemoteClient;
+use crate::provider::EvidenceStateStore;
+use crate::tls::{reqwest_client_builder, CONNECT_TIMEOUT, FETCH_REQUEST_TIMEOUT, READ_TIMEOUT};
 use crate::{
     EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderError,
     ProviderRequestConfidentiality, Result, RouteDefinition,
 };
-
-const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct NearApiKey(Zeroizing<String>);
@@ -48,7 +46,8 @@ pub struct NearHttpProvider {
     api_key: NearApiKey,
     client: reqwest::Client,
     nras_client: Option<NvidiaNrasRemoteClient>,
-    attested_tls: Arc<Mutex<BTreeMap<String, LiveTlsPeer>>>,
+    attested_tls: Arc<Mutex<EvidenceStateStore<LiveTlsPeer>>>,
+    pinned_clients: crate::tls::PinnedSpkiClientCache,
 }
 
 impl NearHttpProvider {
@@ -57,9 +56,9 @@ impl NearHttpProvider {
         routes: Vec<RouteDefinition>,
         api_key: impl Into<String>,
     ) -> Result<Self> {
-        install_default_rustls_provider();
-        let client = reqwest::Client::builder()
-            .timeout(DEFAULT_HTTP_TIMEOUT)
+        let client = reqwest_client_builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .tls_info(true)
             .build()
             .map_err(|error| ProviderError::Http(error.to_string()))?;
@@ -85,7 +84,8 @@ impl NearHttpProvider {
             api_key: NearApiKey::new(api_key),
             client,
             nras_client,
-            attested_tls: Arc::new(Mutex::new(BTreeMap::new())),
+            attested_tls: Arc::new(Mutex::new(EvidenceStateStore::new())),
+            pinned_clients: crate::tls::PinnedSpkiClientCache::new(),
         }
     }
 
@@ -152,11 +152,16 @@ impl ProviderAdapter for NearHttpProvider {
         })?;
         validate_nonce(nonce)?;
         let response = self
-            .authorize(self.client.get(&route.evidence_endpoint).query(&[
-                ("signing_algo", "ecdsa"),
-                ("nonce", nonce),
-                ("include_tls_fingerprint", "true"),
-            ]))
+            .authorize(
+                self.client
+                    .get(&route.evidence_endpoint)
+                    .query(&[
+                        ("signing_algo", "ecdsa"),
+                        ("nonce", nonce),
+                        ("include_tls_fingerprint", "true"),
+                    ])
+                    .timeout(FETCH_REQUEST_TIMEOUT),
+            )
             .send()
             .await
             .map_err(|error| ProviderError::Http(error.to_string()))?;
@@ -182,7 +187,7 @@ impl ProviderAdapter for NearHttpProvider {
         self.attested_tls
             .lock()
             .map_err(|_| ProviderError::Adapter("NEAR TLS state lock is poisoned".into()))?
-            .insert(route.route_id.clone(), tls_peer);
+            .insert(&route.route_id, &sha256_digest(&serialized), tls_peer);
         Ok(serialized)
     }
 
@@ -201,29 +206,27 @@ impl ProviderAdapter for NearHttpProvider {
             .attested_tls
             .lock()
             .map_err(|_| ProviderError::Adapter("NEAR TLS state lock is poisoned".into()))?
-            .get(&route.route_id)
-            .cloned()
-            .ok_or_else(|| {
-                ProviderError::Compatibility(format!(
-                    "route {} has no attested NEAR TLS identity; verify evidence before chat",
-                    route.route_id
-                ))
-            })?;
+            .lookup_for_request(route, &request, "NEAR TLS identity")?
+            .clone();
+        let client = self.pinned_clients.client(&expected_tls.spki_sha256)?;
         let url = format!(
             "{}/chat/completions",
             route.api_base_url.trim_end_matches('/')
         );
         let response = self
-            .authorize(self.client.post(url).json(request.body()))
+            .authorize(client.post(url).json(request.body()))
             .send()
             .await
-            .map_err(|error| ProviderError::Http(error.to_string()))?;
+            .map_err(|error| crate::http::map_send_error(&route.route_id, error))?;
+        // Defense in depth: the handshake pin already refused mismatches; a
+        // post-response mismatch means the request may have executed, so it
+        // is an adapter failure (dispatch Unknown), never key rotation.
         let observed_tls = require_tls_peer(&response, "NEAR chat")?;
         if observed_tls.spki_sha256 != expected_tls.spki_sha256 {
-            return Err(ProviderError::key_rotation(
-                route.route_id.clone(),
-                "NEAR TLS SPKI changed between attestation and chat",
-            ));
+            return Err(ProviderError::Adapter(format!(
+                "route {} NEAR TLS SPKI changed between attestation and chat despite the handshake pin",
+                route.route_id
+            )));
         }
         let body = checked_response_bytes(response, "NEAR chat completions").await?;
         serde_json::from_slice(&body).map_err(Into::into)
@@ -265,13 +268,6 @@ fn validate_nonce(nonce: &str) -> Result<()> {
             "NEAR evidence nonce must be exactly 32 bytes of hex".into(),
         ))
     }
-}
-
-fn install_default_rustls_provider() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
 }
 
 #[derive(Debug, Deserialize)]

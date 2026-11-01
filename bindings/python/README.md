@@ -25,10 +25,12 @@ cargo build -p confidential-inference-ffi --locked
 python3 -m unittest discover -s bindings/python/tests
 ```
 
-The binding searches the workspace `target/debug` and `target/release`
-directories. Set `CONFIDENTIAL_INFERENCE_FFI_LIBRARY` to an explicit shared
-library path when embedding it elsewhere. It checks the loaded library's
-reported ABI version at initialization and rejects incompatible versions.
+The binding searches the workspace `target/release` and `target/debug`
+directories (release first; the working directory is never searched). Set
+`CONFIDENTIAL_INFERENCE_FFI_LIBRARY` — or pass `library_path` — to an explicit
+shared library path when embedding it elsewhere; an explicit path is exclusive
+and must exist. It checks the loaded library's reported ABI version at
+initialization and rejects incompatible versions.
 
 
 ## Example
@@ -85,9 +87,16 @@ object/array shape checks on the way back.
 
 ## Artifact trust
 
-`demo_provider: True` (the default) is the offline/demo mode: it installs the
-demo provider and trusts the bundled fixture signing keys for the bundled
-artifacts only.
+`demo_provider: True` is the offline/demo mode: it installs the demo provider
+and trusts the bundled fixture signing keys for the bundled artifacts only.
+It must be opted into explicitly — `demo_provider` defaults to `False`, so a
+missing, empty, or NULL config fails closed with
+`trusted_signing_keys_required`.
+
+Clients create a private Tokio runtime. Create them **after** `fork()`:
+handles used in a forked child fail with `client_used_after_fork`, and
+freeing a pre-fork client in the child releases the handle but leaks the
+runtime rather than dropping it.
 
 Setting `demo_provider: False` requires a non-empty
 `trusted_ed25519_signing_keys` list, which becomes the exclusive trust root

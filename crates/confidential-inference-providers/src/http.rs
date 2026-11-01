@@ -5,12 +5,12 @@ use confidential_inference_attestation::{
 };
 use confidential_inference_openai::{ChatCompletionResponse, EmbeddingsResponse};
 use futures_util::StreamExt;
-use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, Once};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
+use crate::provider::EvidenceStateStore;
+use crate::tls::{reqwest_client_builder, CONNECT_TIMEOUT, FETCH_REQUEST_TIMEOUT, READ_TIMEOUT};
 use crate::{
     chutes::normalize_chutes_e2ee_evidence_bytes, dstack::normalize_dstack_evidence_bytes,
     EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderEmbeddingsRequest,
@@ -18,7 +18,6 @@ use crate::{
     ResponseManageOperation, Result, RouteDefinition,
 };
 
-const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -64,9 +63,11 @@ impl OpenAiHttpProvider {
         routes: Vec<RouteDefinition>,
         api_key: Option<impl Into<String>>,
     ) -> Result<Self> {
-        install_default_rustls_provider();
-        let client = reqwest::Client::builder()
-            .timeout(DEFAULT_HTTP_TIMEOUT)
+        // connect + idle-read timeouts only: long completions and streams
+        // must not be killed by a total request timeout.
+        let client = reqwest_client_builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .build()
             .map_err(|error| ProviderError::Http(error.to_string()))?;
 
@@ -110,7 +111,7 @@ impl OpenAiHttpProvider {
         if !query.is_empty() {
             request = request.query(query);
         }
-        let request = self.authorize(request);
+        let request = self.authorize(request).timeout(FETCH_REQUEST_TIMEOUT);
         let response = request
             .send()
             .await
@@ -122,6 +123,7 @@ impl OpenAiHttpProvider {
         &self,
         route: &RouteDefinition,
         request: &ProviderChatRequest,
+        client: &reqwest::Client,
     ) -> Result<HttpResponseCapture> {
         ensure_route_provider(route, &self.provider_id)?;
         match request.confidentiality() {
@@ -141,10 +143,10 @@ impl OpenAiHttpProvider {
         }
         let url = chat_completions_url(&route.api_base_url)?;
         let response = self
-            .authorize(self.client.post(url).json(request.body()))
+            .authorize(client.post(url).json(request.body()))
             .send()
             .await
-            .map_err(|error| ProviderError::Http(error.to_string()))?;
+            .map_err(|error| map_send_error(&route.route_id, error))?;
         capture_response(response, "chat completions").await
     }
 
@@ -152,6 +154,7 @@ impl OpenAiHttpProvider {
         &self,
         route: &RouteDefinition,
         request: &ProviderChatRequest,
+        client: &reqwest::Client,
     ) -> Result<HttpResponseCapture> {
         ensure_route_provider(route, &self.provider_id)?;
         if matches!(
@@ -165,10 +168,10 @@ impl OpenAiHttpProvider {
         }
         let url = embeddings_url(&route.api_base_url)?;
         let response = self
-            .authorize(self.client.post(url).json(request.body()))
+            .authorize(client.post(url).json(request.body()))
             .send()
             .await
-            .map_err(|error| ProviderError::Http(error.to_string()))?;
+            .map_err(|error| map_send_error(&route.route_id, error))?;
         capture_response(response, "embeddings").await
     }
 
@@ -203,7 +206,7 @@ impl ProviderAdapter for OpenAiHttpProvider {
         route: &RouteDefinition,
         request: ProviderChatRequest,
     ) -> Result<ChatCompletionResponse> {
-        let capture = self.post_chat(route, &request).await?;
+        let capture = self.post_chat(route, &request, &self.client).await?;
         let body = request.decrypt_sdk_response_body(route, &capture.body)?;
         serde_json::from_slice(&body).map_err(Into::into)
     }
@@ -240,34 +243,14 @@ impl ProviderAdapter for OpenAiHttpProvider {
             (response.bytes_stream(), Vec::<u8>::new()),
             |(mut bytes, mut buffer)| async move {
                 loop {
-                    let delimiter = buffer
-                        .windows(4)
-                        .position(|window| window == b"\r\n\r\n")
-                        .map(|index| (index, 4))
-                        .or_else(|| {
-                            buffer
-                                .windows(2)
-                                .position(|window| window == b"\n\n")
-                                .map(|index| (index, 2))
-                        });
-                    if let Some((end, delimiter_len)) = delimiter {
-                        let frame: Vec<_> = buffer.drain(..end + delimiter_len).collect();
-                        for line in frame[..end].split(|byte| *byte == b'\n') {
-                            let line = line.strip_suffix(b"\r").unwrap_or(line);
-                            if let Some(data) = line.strip_prefix(b"data:") {
-                                let data = data.strip_prefix(b" ").unwrap_or(data);
-                                if data == b"[DONE]" {
-                                    return None;
-                                }
-                                if !data.is_empty() {
-                                    let result = serde_json::from_slice::<serde_json::Value>(data)
-                                        .map(|_| data.to_vec())
-                                        .map_err(ProviderError::from);
-                                    return Some((result, (bytes, buffer)));
-                                }
-                            }
+                    match take_sse_frame(&mut buffer) {
+                        SseTake::Done => return None,
+                        SseTake::Data(data) => return Some((Ok(data), (bytes, buffer))),
+                        SseTake::Invalid(error) => {
+                            return Some((Err(error), (bytes, buffer)));
                         }
-                        continue;
+                        SseTake::Consumed => continue,
+                        SseTake::Incomplete => {}
                     }
                     match bytes.next().await {
                         Some(Ok(part))
@@ -304,7 +287,7 @@ impl ProviderAdapter for OpenAiHttpProvider {
         route: &RouteDefinition,
         request: ProviderEmbeddingsRequest,
     ) -> Result<EmbeddingsResponse> {
-        let capture = self.post_embeddings(route, &request).await?;
+        let capture = self.post_embeddings(route, &request, &self.client).await?;
         let body = request.decrypt_sdk_response_body(route, &capture.body)?;
         serde_json::from_slice(&body).map_err(Into::into)
     }
@@ -473,7 +456,8 @@ pub type PhalaHttpProvider = ConfidentialHttpProvider;
 #[derive(Clone, Debug)]
 pub struct TinfoilHttpProvider {
     inner: OpenAiHttpProvider,
-    tls_state: Arc<Mutex<BTreeMap<String, LiveTlsPeer>>>,
+    tls_state: Arc<Mutex<EvidenceStateStore<LiveTlsPeer>>>,
+    pinned_clients: crate::tls::PinnedSpkiClientCache,
 }
 
 impl TinfoilHttpProvider {
@@ -486,13 +470,13 @@ impl TinfoilHttpProvider {
         routes: Vec<RouteDefinition>,
         api_key: Option<impl Into<String>>,
     ) -> Result<Self> {
-        install_default_rustls_provider();
-        // TLS certificates are validated normally: the attestation path binds
-        // the leaf SPKI into the verified quote, but the bearer API key and
-        // plaintext chat bodies still must not be disclosed to an unauthenticated
-        // peer before that post-hoc binding check runs.
-        let client = reqwest::Client::builder()
-            .timeout(DEFAULT_HTTP_TIMEOUT)
+        // TLS certificates are validated normally. The attestation path binds
+        // the leaf SPKI into the verified quote; chat/embeddings additionally
+        // pin that SPKI at handshake time so no prompt can reach an
+        // unauthenticated peer before the binding is checked.
+        let client = reqwest_client_builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .tls_info(true)
             .build()
             .map_err(|error| ProviderError::Http(error.to_string()))?;
@@ -504,7 +488,8 @@ impl TinfoilHttpProvider {
                 api_key.map(Into::into),
                 client,
             ),
-            tls_state: Arc::new(Mutex::new(BTreeMap::new())),
+            tls_state: Arc::new(Mutex::new(EvidenceStateStore::new())),
+            pinned_clients: crate::tls::PinnedSpkiClientCache::new(),
         })
     }
 
@@ -516,7 +501,8 @@ impl TinfoilHttpProvider {
     ) -> Self {
         Self {
             inner: OpenAiHttpProvider::with_client(provider_id, routes, api_key, client),
-            tls_state: Arc::new(Mutex::new(BTreeMap::new())),
+            tls_state: Arc::new(Mutex::new(EvidenceStateStore::new())),
+            pinned_clients: crate::tls::PinnedSpkiClientCache::new(),
         }
     }
 }
@@ -539,17 +525,17 @@ impl ProviderAdapter for TinfoilHttpProvider {
         ensure_tinfoil_route(route, self.provider_id())?;
         let response = self
             .inner
-            .authorize(self.inner.client.get(&route.evidence_endpoint))
+            .authorize(
+                self.inner
+                    .client
+                    .get(&route.evidence_endpoint)
+                    .timeout(FETCH_REQUEST_TIMEOUT),
+            )
             .send()
             .await
             .map_err(|error| ProviderError::Http(error.to_string()))?;
         let tls_peer = require_tls_peer(&response, "Tinfoil evidence")?;
         let body = checked_response_bytes(response, "Tinfoil evidence").await?;
-
-        self.tls_state
-            .lock()
-            .map_err(|_| ProviderError::Adapter("Tinfoil TLS state lock is poisoned".into()))?
-            .insert(route.route_id.clone(), tls_peer.clone());
 
         let capture = TinfoilLiveCaptureEvidence {
             schema: TinfoilLiveCaptureEvidence::SCHEMA.into(),
@@ -560,13 +546,22 @@ impl ProviderAdapter for TinfoilHttpProvider {
             policy_digest: request.policy_digest.clone(),
             nonce: request.nonce.clone(),
             evidence_endpoint: route.evidence_endpoint.clone(),
-            live_tls_spki_sha256: tls_peer.spki_sha256,
+            live_tls_spki_sha256: tls_peer.spki_sha256.clone(),
             live_tls_leaf_certificate_der_base64: base64::engine::general_purpose::STANDARD
                 .encode(&tls_peer.leaf_certificate_der),
             raw_attestation_body_base64: base64::engine::general_purpose::STANDARD.encode(body),
         };
 
-        serde_json::to_vec(&capture).map_err(Into::into)
+        let serialized = serde_json::to_vec(&capture)?;
+        self.tls_state
+            .lock()
+            .map_err(|_| ProviderError::Adapter("Tinfoil TLS state lock is poisoned".into()))?
+            .insert(
+                &route.route_id,
+                &confidential_inference_attestation::sha256_digest(&serialized),
+                tls_peer,
+            );
+        Ok(serialized)
     }
 
     async fn chat(
@@ -579,16 +574,15 @@ impl ProviderAdapter for TinfoilHttpProvider {
             .tls_state
             .lock()
             .map_err(|_| ProviderError::Adapter("Tinfoil TLS state lock is poisoned".into()))?
-            .get(&route.route_id)
-            .cloned()
-            .ok_or_else(|| {
-                ProviderError::Compatibility(format!(
-                    "route {} has no captured Tinfoil TLS identity; verify evidence before chat",
-                    route.route_id
-                ))
-            })?;
+            .lookup_for_request(route, &request, "Tinfoil TLS identity")?
+            .clone();
+        let client = self.pinned_clients.client(&expected_tls.spki_sha256)?;
 
-        let capture = self.inner.post_chat(route, &request).await?;
+        let capture = self.inner.post_chat(route, &request, &client).await?;
+        // Defense in depth: the handshake pin already refused mismatches, but
+        // still compare the observed peer against the verified SPKI. A
+        // post-response mismatch means the request may have executed, so it
+        // is an adapter failure (dispatch Unknown), never key rotation.
         let observed_tls = capture.tls_peer.ok_or_else(|| {
             ProviderError::Compatibility(format!(
                 "route {} chat response did not expose a live TLS certificate",
@@ -596,10 +590,10 @@ impl ProviderAdapter for TinfoilHttpProvider {
             ))
         })?;
         if observed_tls.spki_sha256 != expected_tls.spki_sha256 {
-            return Err(ProviderError::key_rotation(
-                route.route_id.clone(),
-                "live TLS SPKI changed between evidence and chat",
-            ));
+            return Err(ProviderError::Adapter(format!(
+                "route {} live TLS SPKI changed between evidence and chat despite the handshake pin",
+                route.route_id
+            )));
         }
 
         let body = request.decrypt_sdk_response_body(route, &capture.body)?;
@@ -615,15 +609,10 @@ impl ProviderAdapter for TinfoilHttpProvider {
             .tls_state
             .lock()
             .map_err(|_| ProviderError::Adapter("Tinfoil TLS state lock is poisoned".into()))?
-            .get(&route.route_id)
-            .cloned()
-            .ok_or_else(|| {
-                ProviderError::Compatibility(format!(
-                    "route {} has no captured Tinfoil TLS identity; verify evidence before embeddings",
-                    route.route_id
-                ))
-            })?;
-        let capture = self.inner.post_embeddings(route, &request).await?;
+            .lookup_for_request(route, &request, "Tinfoil TLS identity")?
+            .clone();
+        let client = self.pinned_clients.client(&expected_tls.spki_sha256)?;
+        let capture = self.inner.post_embeddings(route, &request, &client).await?;
         let observed_tls = capture.tls_peer.ok_or_else(|| {
             ProviderError::Compatibility(format!(
                 "route {} embeddings response did not expose a live TLS certificate",
@@ -631,10 +620,10 @@ impl ProviderAdapter for TinfoilHttpProvider {
             ))
         })?;
         if observed_tls.spki_sha256 != expected_tls.spki_sha256 {
-            return Err(ProviderError::key_rotation(
-                route.route_id.clone(),
-                "live TLS SPKI changed between evidence and embeddings",
-            ));
+            return Err(ProviderError::Adapter(format!(
+                "route {} live TLS SPKI changed between evidence and embeddings despite the handshake pin",
+                route.route_id
+            )));
         }
         let body = request.decrypt_sdk_response_body(route, &capture.body)?;
         serde_json::from_slice(&body).map_err(Into::into)
@@ -728,6 +717,70 @@ async fn capture_response(
     Ok(HttpResponseCapture { body, tls_peer })
 }
 
+/// One step of the SSE frame splitter used by `chat_stream`.
+pub(crate) enum SseTake {
+    /// The buffer holds no complete frame; read more bytes.
+    Incomplete,
+    /// A complete frame was drained but carried no `data:` payload.
+    Consumed,
+    /// `data: [DONE]` was received; the stream is finished.
+    Done,
+    /// A JSON `data:` payload frame.
+    Data(Vec<u8>),
+    /// A `data:` payload that is not valid JSON.
+    Invalid(ProviderError),
+}
+
+/// Drains the first complete SSE frame from `buffer`. Mirrors the framing
+/// `chat_stream` used inline: `\r\n\r\n` or `\n\n` delimit frames, `data:`
+/// lines carry JSON payloads, and `data: [DONE]` terminates the stream.
+pub(crate) fn take_sse_frame(buffer: &mut Vec<u8>) -> SseTake {
+    let delimiter = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, 4))
+        .or_else(|| {
+            buffer
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|index| (index, 2))
+        });
+    let Some((end, delimiter_len)) = delimiter else {
+        return SseTake::Incomplete;
+    };
+    let frame: Vec<_> = buffer.drain(..end + delimiter_len).collect();
+    for line in frame[..end].split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if let Some(data) = line.strip_prefix(b"data:") {
+            let data = data.strip_prefix(b" ").unwrap_or(data);
+            if data == b"[DONE]" {
+                return SseTake::Done;
+            }
+            if !data.is_empty() {
+                return match serde_json::from_slice::<serde_json::Value>(data) {
+                    Ok(_) => SseTake::Data(data.to_vec()),
+                    Err(error) => SseTake::Invalid(ProviderError::from(error)),
+                };
+            }
+        }
+    }
+    SseTake::Consumed
+}
+
+/// Classifies a request-send failure: a pinned-SPKI handshake refusal proves
+/// no request bytes were sent (key rotation → NotDispatched); anything else
+/// is a transport failure (dispatch Unknown).
+pub(crate) fn map_send_error(route_id: &str, error: reqwest::Error) -> ProviderError {
+    if crate::tls::is_pinned_spki_mismatch(&error) {
+        ProviderError::key_rotation(
+            route_id.to_owned(),
+            "live TLS SPKI does not match the verified evidence pin",
+        )
+    } else {
+        ProviderError::Http(error.to_string())
+    }
+}
+
 pub(crate) async fn checked_response_bytes(
     response: reqwest::Response,
     operation: &str,
@@ -788,8 +841,9 @@ fn response_body_preview(body: &[u8]) -> String {
     preview.chars().take(512).collect()
 }
 
+#[cfg(test)]
 fn install_default_rustls_provider() {
-    static INSTALL: Once = Once::new();
+    static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
@@ -936,7 +990,7 @@ mod tests {
         use futures_util::StreamExt;
         let first = chunks.next().await.unwrap().unwrap();
         assert_eq!(first, frames[0].as_bytes());
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert_eq!(chunks.next().await.unwrap().unwrap(), frames[1].as_bytes());
         assert_eq!(chunks.next().await.unwrap().unwrap(), frames[2].as_bytes());
         assert!(request_capture.await.unwrap().is_ok());
@@ -990,7 +1044,7 @@ mod tests {
                 stream.write_all(payload.as_bytes()).await?;
                 stream.write_all(b"\r\n").await?;
                 stream.flush().await?;
-                tokio::time::sleep(Duration::from_millis(30)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
                 if abort_after_first && index == 0 {
                     return Ok(());
                 }
@@ -1434,6 +1488,7 @@ mod tests {
             capture.live_tls_spki_sha256,
             certificate_spki_sha256_hex(&first_cert).unwrap()
         );
+        let verified_digest = confidential_inference_attestation::sha256_digest(&raw);
 
         let error = provider
             .chat(
@@ -1441,14 +1496,120 @@ mod tests {
                 ProviderChatRequest::new(json!({
                     "model": "llama-3.3-70b",
                     "messages": [{"role": "user", "content": "hello"}]
-                })),
+                }))
+                .with_verified_evidence_digest(verified_digest),
             )
             .await
             .unwrap_err();
 
-        assert!(error.is_key_rotation());
+        // The pinned client refuses the rotated SPKI during the TLS
+        // handshake, before any request bytes reach the server: the error is
+        // key rotation and the server errors on its own TLS accept.
+        assert!(error.is_key_rotation(), "{error:?}");
         let error = error.to_string();
-        assert!(error.contains("live TLS SPKI changed between evidence and chat"));
+        assert!(error.contains("verified evidence pin"), "{error}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tinfoil_http_provider_rejects_unknown_or_missing_evidence_digest() {
+        let (base_url, server) = spawn_tinfoil_tls_identity_rotation().await;
+        let route = http_route(&base_url);
+        let provider = TinfoilHttpProvider::with_client(
+            "tinfoil-http-test",
+            vec![route.clone()],
+            Some("sk-tinfoil-test".to_owned()),
+            reqwest::Client::builder()
+                .tls_info(true)
+                .danger_accept_invalid_certs(true)
+                .build()
+                .unwrap(),
+        );
+        // No digest at all: compatibility failure, nothing is dispatched.
+        let error = provider
+            .chat(
+                &route,
+                ProviderChatRequest::new(json!({
+                    "model": "llama-3.3-70b",
+                    "messages": [{"role": "user", "content": "hi"}]
+                })),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::Compatibility(_)), "{error}");
+
+        // A digest the adapter never verified: key rotation, nothing sent.
+        let error = provider
+            .chat(
+                &route,
+                ProviderChatRequest::new(json!({
+                    "model": "llama-3.3-70b",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .with_verified_evidence_digest("sha256:".to_owned() + &"0".repeat(64)),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.is_key_rotation(), "{error}");
+        assert_eq!(
+            error.chat_dispatch_outcome(),
+            crate::DispatchOutcome::NotDispatched
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tinfoil_http_provider_keys_tls_state_by_verified_evidence() {
+        let (base_url, server) = spawn_tinfoil_fetch_fetch_chat().await;
+        let route = http_route(&base_url);
+        let provider = TinfoilHttpProvider::with_client(
+            "tinfoil-http-test",
+            vec![route.clone()],
+            Some("sk-tinfoil-test".to_owned()),
+            reqwest::Client::builder()
+                .tls_info(true)
+                .danger_accept_invalid_certs(true)
+                .build()
+                .unwrap(),
+        );
+        let evidence_request = EvidenceRequest {
+            requested_model: "llama-3.3-70b".into(),
+            policy_digest: "sha256:policy".into(),
+            nonce: None,
+        };
+
+        // First fetch captures the first certificate under digest A.
+        let first = provider
+            .fetch_evidence(&route, &evidence_request)
+            .await
+            .unwrap();
+        let first_capture: TinfoilLiveCaptureEvidence = serde_json::from_slice(&first).unwrap();
+        let first_cert = decode_test_base64(TINFOIL_TEST_CERT_DER_BASE64).unwrap();
+        assert_eq!(
+            first_capture.live_tls_spki_sha256,
+            certificate_spki_sha256_hex(&first_cert).unwrap()
+        );
+        // A second fetch for the same route captures a different certificate
+        // under digest B without displacing digest A's state.
+        let _second = provider
+            .fetch_evidence(&route, &evidence_request)
+            .await
+            .unwrap();
+
+        let response = provider
+            .chat(
+                &route,
+                ProviderChatRequest::new(json!({
+                    "model": "llama-3.3-70b",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .with_verified_evidence_digest(
+                    confidential_inference_attestation::sha256_digest(&first),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.model, "llama-3.3-70b");
         server.await.unwrap().unwrap();
     }
 
@@ -1693,6 +1854,78 @@ mod tests {
                     "choices": [{
                         "index": 0,
                         "message": {"role": "assistant", "content": "should not be accepted"},
+                        "finish_reason": "stop"
+                    }]
+                })
+                .to_string(),
+            )
+            .await
+        });
+
+        (format!("https://{address}"), handle)
+    }
+
+    /// Three-accept TLS server: evidence on cert A, evidence again on cert
+    /// B, then chat on cert A. Exercises that a request bound to the first
+    /// evidence digest still pins cert A after a different fetch ran.
+    async fn spawn_tinfoil_fetch_fetch_chat(
+    ) -> (String, tokio::task::JoinHandle<std::io::Result<()>>) {
+        install_default_rustls_provider();
+        let first_acceptor = TlsAcceptor::from(Arc::new(
+            test_tls_server_config(TINFOIL_TEST_CERT_DER_BASE64, TINFOIL_TEST_KEY_DER_BASE64)
+                .unwrap(),
+        ));
+        let second_acceptor = TlsAcceptor::from(Arc::new(
+            test_tls_server_config(TINFOIL_ALT_CERT_DER_BASE64, TINFOIL_ALT_KEY_DER_BASE64)
+                .unwrap(),
+        ));
+        let third_acceptor = TlsAcceptor::from(Arc::new(
+            test_tls_server_config(TINFOIL_TEST_CERT_DER_BASE64, TINFOIL_TEST_KEY_DER_BASE64)
+                .unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut stream = first_acceptor
+                .accept(stream)
+                .await
+                .map_err(std::io::Error::other)?;
+            write_test_http_response(
+                &mut stream,
+                "GET /.well-known/tinfoil-attestation ",
+                tinfoil_attestation_body()?,
+            )
+            .await?;
+
+            let (stream, _) = listener.accept().await?;
+            let mut stream = second_acceptor
+                .accept(stream)
+                .await
+                .map_err(std::io::Error::other)?;
+            write_test_http_response(
+                &mut stream,
+                "GET /.well-known/tinfoil-attestation ",
+                tinfoil_attestation_body()?,
+            )
+            .await?;
+
+            let (stream, _) = listener.accept().await?;
+            let mut stream = third_acceptor
+                .accept(stream)
+                .await
+                .map_err(std::io::Error::other)?;
+            write_test_http_response(
+                &mut stream,
+                "POST /v1/chat/completions ",
+                json!({
+                    "id": "chatcmpl-tinfoil-pinned",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "llama-3.3-70b",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "pinned ok"},
                         "finish_reason": "stop"
                     }]
                 })
