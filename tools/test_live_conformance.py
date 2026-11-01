@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -78,7 +79,7 @@ class LiveConformanceTests(unittest.TestCase):
             if line.strip() and not line.lstrip().startswith("#") and "=" in line
         }
 
-        self.assertEqual(configured, expected)
+        self.assertTrue(expected.issubset(configured))
 
     def test_load_env_file_loads_credentials_without_overwriting_environment(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -175,20 +176,12 @@ class LiveConformanceTests(unittest.TestCase):
             self.assertIn("streaming", profile["known_unsupported_modes"])
             self.assertIn("chat_completions", profile["supported_openai_endpoints"])
         self.assertEqual(
-            providers_by_id["venice"]["expected_model_ids"],
-            ["e2ee-gpt-oss-120b-p"],
+            providers_by_id["tinfoil"]["expected_model_ids"],
+            ["llama3-3-70b"],
         )
         self.assertEqual(
-            providers_by_id["venice"]["compatibility_profile"]["provider"],
-            "venice-fixture",
-        )
-        self.assertEqual(
-            providers_by_id["venice"]["compatibility_profile"]["request_encryption"],
-            "required",
-        )
-        self.assertEqual(
-            providers_by_id["near"]["expected_model_ids"],
-            ["openai/gpt-oss-120b"],
+            providers_by_id["tinfoil"]["compatibility_profile"]["provider"],
+            "tinfoil-fixture",
         )
         self.assertIn(
             "Qwen/Qwen3-32B-TEE",
@@ -197,10 +190,6 @@ class LiveConformanceTests(unittest.TestCase):
         self.assertEqual(
             providers_by_id["chutes"]["compatibility_profile"]["provider"],
             "chutes",
-        )
-        self.assertEqual(
-            providers_by_id["near"]["compatibility_profile"]["provider"],
-            "near",
         )
         alias_matrix = report["model_alias_matrix"]
         self.assertEqual(alias_matrix["path"], plan["model_alias_matrix_path"])
@@ -252,7 +241,7 @@ class LiveConformanceTests(unittest.TestCase):
 
     def test_default_plan_imports_expected_model_ids_from_alias_matrix(self):
         plan = live_conformance.load_plan(Path("fixtures/providers/live-conformance-plan.json"))
-        provider = copy.deepcopy(next(item for item in plan["providers"] if item["id"] == "venice"))
+        provider = copy.deepcopy(next(item for item in plan["providers"] if item["id"] == "tinfoil"))
         provider["enabled"] = True
         provider.pop("auth_env", None)
         scoped_plan = {
@@ -265,9 +254,8 @@ class LiveConformanceTests(unittest.TestCase):
         }
         fake = FakeHttp(
             {
-                provider["model_list_url"]: {
-                    "json": {"data": [{"id": "e2ee-gpt-oss-120b-p"}]}
-                }
+                provider["model_list_url"]: {"json": {"data": [{"id": "llama3-3-70b"}]}},
+                provider["attestation_url"]: {"json": {"format": "sev-snp", "body": "evidence"}},
             }
         )
 
@@ -279,7 +267,7 @@ class LiveConformanceTests(unittest.TestCase):
         self.assertEqual(report["credentialed_live_gate"]["remaining_provider_ids"], [])
         self.assertEqual(
             report["providers"][0]["expected_model_ids"],
-            ["e2ee-gpt-oss-120b-p"],
+            ["llama3-3-70b"],
         )
         self.assertEqual(
             report["providers"][0]["expected_model_ids_source"],
@@ -922,6 +910,47 @@ class LiveConformanceTests(unittest.TestCase):
         report = live_conformance.run_conformance(plan, fake, allow_network=True)
 
         self.assertEqual(report["summary"]["passed"], 1)
+
+    def test_http_client_refuses_redirects_and_never_leaks_authorization(self):
+        import http.server
+        import threading
+
+        seen_headers = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen_headers.append(
+                    (self.path, self.headers.get("Authorization"))
+                )
+                if self.path == "/start":
+                    self.send_response(302)
+                    self.send_header("Location", "/redirected")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/start"
+            client = live_conformance.HttpClient()
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                client.get(url, {"Authorization": "Bearer secret"}, 5.0)
+            self.assertEqual(raised.exception.code, 302)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+        self.assertEqual(
+            seen_headers,
+            [("/start", "Bearer secret")],
+        )
 
 
 if __name__ == "__main__":

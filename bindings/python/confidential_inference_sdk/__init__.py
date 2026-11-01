@@ -189,14 +189,15 @@ class _Native:
 
 @contextmanager
 def _native_call_guard(owner: Any) -> Any:
-    """Mark a native handle in use for the duration of a blocking FFI call.
+    """Track in-flight calls so ``close()`` follows the FFI free contract.
 
-    The FFI returns a borrowed reference after releasing its handle registry,
-    so freeing a handle while a call is still running (for example from an
-    ``asyncio.to_thread`` worker while the event loop calls ``close()``) would
-    be use-after-free. ``close()`` takes the same lock while freeing, so it
-    either observes in-flight calls and refuses, or completes the free before
-    the next call can register itself.
+    The FFI hands callers ``Arc``-held shared state, so a native call running
+    while the handle is freed is memory-safe in Rust — the guard exists for
+    the free contract, not memory safety: ``sdk_free``/``stream_free`` return
+    ``FFI_BUSY`` while referenced, and closing mid-call would leave the
+    caller holding a freed handle. ``close()`` takes the same lock while
+    freeing, so it either observes in-flight calls and refuses, or completes
+    the free before the next call can register itself.
     """
     with owner._call_lock:
         if not owner._handle:
@@ -229,9 +230,13 @@ async def _to_thread_and_drain(function: Callable[..., Any], *args: Any) -> Any:
 
 
 class Stream:
-    def __init__(self, native: _Native, handle: ctypes.c_void_p):
+    def __init__(self, native: _Native, handle: ctypes.c_void_p, owner: "Client"):
         self._native = native
         self._handle = handle
+        # Keep the owning Client alive: if GC collected it first, sdk_free
+        # would hit FFI_BUSY on this live stream and leak the native runtime
+        # (the swallowed error in Client.__del__ would hide it).
+        self._owner = owner
         # Worker-thread calls (asyncio.to_thread) can race a same-thread
         # close(); the lock plus counter make free-vs-in-flight safe.
         self._in_flight = 0
@@ -260,9 +265,9 @@ class Stream:
         with self._call_lock:
             if not self._handle:
                 return
-            # Refuse to free while a worker-thread call still holds the
-            # handle: the FFI would drop the allocation under the running
-            # call (use-after-free).
+            # Refuse to free while a worker-thread call is in flight: the
+            # handle must stay valid until the caller retries after the call
+            # settles (the FFI free contract is FFI_BUSY-then-retry).
             if self._in_flight > 0:
                 raise ConfidentialInferenceError(
                     CONFIDENTIAL_INFERENCE_FFI_BUSY,
@@ -344,9 +349,9 @@ class Client:
         with self._call_lock:
             if not self._handle:
                 return
-            # Refuse to free while a worker-thread call still holds the
-            # handle: the FFI would drop the allocation under the running
-            # call (use-after-free).
+            # Refuse to free while a worker-thread call is in flight: the
+            # handle must stay valid until the caller retries after the call
+            # settles (the FFI free contract is FFI_BUSY-then-retry).
             if self._in_flight > 0:
                 raise ConfidentialInferenceError(
                     CONFIDENTIAL_INFERENCE_FFI_BUSY,
@@ -436,7 +441,7 @@ class Client:
             self._handle, _json_bytes(request), ctypes.byref(out)
         )
         self._native.raise_for_status(status)
-        return Stream(self._native, out)
+        return Stream(self._native, out, self)
 
     async def chat_async(
         self, request: dict[str, Any], timeout_ms: int = 0
@@ -457,6 +462,19 @@ class Client:
         self, provider: str, model: str, timeout_ms: int = 0
     ) -> dict[str, Any]:
         return await _to_thread_and_drain(self.verify, provider, model, timeout_ms)
+    async def embeddings_async(
+        self, request: dict[str, Any], timeout_ms: int = 0
+    ) -> dict[str, Any]:
+        return await _to_thread_and_drain(self.embeddings, request, timeout_ms)
+
+    async def response_manage_async(
+        self, request: dict[str, Any], timeout_ms: int = 0
+    ) -> dict[str, Any]:
+        return await _to_thread_and_drain(self.response_manage, request, timeout_ms)
+
+    async def models_async(self) -> dict[str, Any]:
+        return await _to_thread_and_drain(self.models)
+
 
     async def stream_async(
         self,
@@ -523,22 +541,36 @@ def _library_name() -> str:
 def _resolve_library_path(
     explicit: str | os.PathLike[str] | None = None,
 ) -> Path:
-    candidates: list[Path] = []
-    if explicit is not None:
-        candidates.append(Path(explicit))
-    if "CONFIDENTIAL_INFERENCE_FFI_LIBRARY" in os.environ:
-        candidates.append(Path(os.environ["CONFIDENTIAL_INFERENCE_FFI_LIBRARY"]))
+    # Explicit selection wins and is exclusive: a missing file is an error,
+    # never a silent fallback to whatever happens to sit in target/.
+    chosen = (
+        Path(explicit)
+        if explicit is not None
+        else Path(os.environ["CONFIDENTIAL_INFERENCE_FFI_LIBRARY"])
+        if "CONFIDENTIAL_INFERENCE_FFI_LIBRARY" in os.environ
+        else None
+    )
+    if chosen is not None:
+        chosen = chosen.expanduser().resolve()
+        if not chosen.is_file():
+            raise ConfidentialInferenceError(
+                1,
+                {
+                    "code": "library_not_found",
+                    "message": f"explicit FFI library path does not exist: {chosen}",
+                },
+            )
+        # dlopen needs an absolute path so a CWD change cannot retarget it.
+        return chosen
 
     library_name = _library_name()
+    # bindings/python/confidential_inference_sdk/__init__.py -> repo root;
+    # release is preferred over debug. The process CWD is never searched.
     root = Path(__file__).resolve().parents[3]
-    candidates.extend(
-        [
-            root / "target" / "debug" / library_name,
-            root / "target" / "release" / library_name,
-            Path.cwd() / "target" / "debug" / library_name,
-            Path.cwd() / "target" / "release" / library_name,
-        ]
-    )
+    candidates = [
+        root / "target" / "release" / library_name,
+        root / "target" / "debug" / library_name,
+    ]
 
     for candidate in candidates:
         if candidate.exists():

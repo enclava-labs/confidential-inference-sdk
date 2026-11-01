@@ -778,18 +778,28 @@ impl AttestationVerdict {
     }
 
     fn validate_enforcement_summary(&self) -> Result<()> {
-        let has_failed_check = self
+        // Under EnforcementMode::Enforce a verdict is blocked when any check
+        // is Failed, or any required check is NotSupported or Unknown.
+        let would_block = self
             .checks
             .values()
-            .any(|check| *check == CheckResult::Failed);
-        if has_failed_check && !self.would_block_under_enforce {
+            .any(|check| *check == CheckResult::Failed)
+            || self.check_outcomes.iter().any(|(_, outcome)| {
+                outcome.required
+                    && matches!(
+                        outcome.state,
+                        CheckResult::NotSupported | CheckResult::Unknown
+                    )
+            });
+        if would_block && !self.would_block_under_enforce {
             return Err(AttestationError::MalformedVerdict(
-                "failed checks conflict with would_block_under_enforce=false".into(),
+                "failed or required-unproven checks conflict with would_block_under_enforce=false"
+                    .into(),
             ));
         }
-        if !has_failed_check && self.would_block_under_enforce {
+        if !would_block && self.would_block_under_enforce {
             return Err(AttestationError::MalformedVerdict(
-                "would_block_under_enforce=true but no check is failed".into(),
+                "would_block_under_enforce=true but no check is failed or required-unproven".into(),
             ));
         }
         if self.status == VerificationStatus::Disabled
@@ -1342,7 +1352,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("failed checks conflict with would_block_under_enforce=false"));
+            .contains("checks conflict with would_block_under_enforce=false"));
     }
 
     #[test]

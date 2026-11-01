@@ -9,8 +9,9 @@
 //
 // Resolution order matches the Python and Node bindings: an explicit
 // WithLibraryPath option, then the CONFIDENTIAL_INFERENCE_FFI_LIBRARY
-// environment variable, then target/debug and target/release under the
-// repository root and the process working directory.
+// environment variable (an explicit path is exclusive and must exist),
+// then target/release and target/debug under the repository root. The
+// process working directory is never searched.
 package confidentialinference
 
 import (
@@ -331,8 +332,9 @@ func NewConfiguredClient(config Config, opts ...Option) (*Client, error) {
 	return NewClient(raw, opts...)
 }
 
-// NewClient creates a client from a JSON configuration. Pass nil for the
-// default configuration, which installs the offline demo provider.
+// NewClient creates a client from a JSON configuration. A nil/empty config
+// fails closed: demo_provider defaults to false and requires trusted signing
+// keys — pass {"demo_provider":true} explicitly for the offline demo provider.
 func NewClient(config json.RawMessage, opts ...Option) (*Client, error) {
 	n, err := openNative(opts)
 	if err != nil {
@@ -361,9 +363,9 @@ func NewClient(config json.RawMessage, opts ...Option) (*Client, error) {
 	}
 	return client, nil
 }
-
 // acquire marks the client handle in use for the duration of a call so Close
-// cannot free it out from under the FFI.
+// follows the FFI free contract (sdk_free returns StatusBusy while streams or
+// in-flight calls reference the client; the handle stays valid for retry).
 func (c *Client) acquire() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -396,8 +398,8 @@ func (c *Client) Close() error {
 	if c.handle == nil {
 		return nil
 	}
-	// Refuse to free while a call still holds the handle: the FFI would drop
-	// the allocation under the running call (use-after-free).
+	// Refuse to free while a call is in flight: the handle must stay valid
+	// until the caller retries after the call settles (BUSY-then-retry).
 	if c.inFlight > 0 {
 		return &Error{Status: StatusBusy, Code: "client_busy", Message: "client has in-flight calls; wait for them before closing"}
 	}
@@ -407,7 +409,8 @@ func (c *Client) Close() error {
 	})
 	if status == StatusOK {
 		c.handle = nil
-		closeLibrary(c.native.handle)
+		// The shared library is intentionally never unloaded: Status() and
+		// other calls must stay safe after Close (same as Python/Node).
 		return nil
 	}
 	// FFI_BUSY means live streams still reference the client; keep the handle
@@ -435,7 +438,9 @@ func (c *Client) callJSON(request any, timeout time.Duration, fn func(unsafe.Poi
 	defer c.release()
 	return run2(func() (map[string]any, error) {
 		var out unsafe.Pointer
-		status := fn(c.handle, unsafe.Pointer(&req[0]), uint64(timeout.Milliseconds()), &out)
+		// Round up: 0 < timeout < 1ms must not collapse into "no timeout".
+		timeoutMs := uint64((timeout + time.Millisecond - 1) / time.Millisecond)
+		status := fn(c.handle, unsafe.Pointer(&req[0]), timeoutMs, &out)
 		runtime.KeepAlive(req)
 		if err := c.native.statusError(status, out); err != nil {
 			return nil, err
@@ -583,7 +588,8 @@ func (c *Client) StartStream(request any) (*Stream, error) {
 // Stream iterates the events of a chat stream until a terminal event
 // (closed, done, cancelled, or error) or an error. The stream is closed when
 // iteration ends, including early breaks. Non-terminal events arrive with
-// err == nil.
+// err == nil. pollTimeout below 100ms is clamped to 100ms so empty polls
+// never busy-spin.
 func (c *Client) Stream(request any, pollTimeout time.Duration) iter.Seq2[map[string]any, error] {
 	return func(yield func(map[string]any, error) bool) {
 		stream, err := c.StartStream(request)
@@ -591,11 +597,17 @@ func (c *Client) Stream(request any, pollTimeout time.Duration) iter.Seq2[map[st
 			yield(nil, err)
 			return
 		}
+		// Defer immediately: a panic in the loop body must not leak the
+		// native stream.
+		defer func() { _ = stream.Close() }()
+		// Clamp the poll: empty polls must never busy-spin the caller.
+		if pollTimeout < 100*time.Millisecond {
+			pollTimeout = 100 * time.Millisecond
+		}
 		for {
 			event, err := stream.Next(pollTimeout)
 			if err != nil {
 				yield(nil, err)
-				_ = stream.Close()
 				return
 			}
 			if event == nil {
@@ -603,7 +615,6 @@ func (c *Client) Stream(request any, pollTimeout time.Duration) iter.Seq2[map[st
 			}
 			terminal := isTerminalEvent(event)
 			if !yield(event, nil) {
-				_ = stream.Close()
 				return
 			}
 			if terminal {
@@ -652,7 +663,8 @@ func (s *Stream) Next(pollTimeout time.Duration) (map[string]any, error) {
 	}()
 	return run2(func() (map[string]any, error) {
 		var out unsafe.Pointer
-		status := s.native.streamNext(handle, uint64(pollTimeout.Milliseconds()), &out)
+		// Round up: 0 < pollTimeout < 1ms must not collapse into a poll.
+		status := s.native.streamNext(handle, uint64((pollTimeout+time.Millisecond-1)/time.Millisecond), &out)
 		if status == StatusPending {
 			return nil, nil
 		}
@@ -750,43 +762,42 @@ func libraryName() string {
 	}
 }
 
-// resolveLibraryPath mirrors the Python and Node bindings: explicit option,
-// then CONFIDENTIAL_INFERENCE_FFI_LIBRARY, then target/{debug,release} under
-// the repository root and the working directory.
+// resolveLibraryPath mirrors the Python and Node bindings: an explicit
+// WithLibraryPath or CONFIDENTIAL_INFERENCE_FFI_LIBRARY is exclusive and must
+// exist; otherwise target/{release,debug} under the repository root (release
+// first). The process working directory is never searched.
 func resolveLibraryPath(explicit string) (string, error) {
-	var candidates []string
-	if explicit != "" {
-		candidates = append(candidates, explicit)
+	chosen := explicit
+	if chosen == "" {
+		chosen = os.Getenv("CONFIDENTIAL_INFERENCE_FFI_LIBRARY")
 	}
-	if env := os.Getenv("CONFIDENTIAL_INFERENCE_FFI_LIBRARY"); env != "" {
-		candidates = append(candidates, env)
+	if chosen != "" {
+		abs, err := filepath.Abs(chosen)
+		if err != nil {
+			abs = chosen
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return "", &Error{
+				Status:  StatusInvalidArgument,
+				Code:    "library_not_found",
+				Message: fmt.Sprintf("explicit FFI library path does not exist: %s", abs),
+			}
+		}
+		return abs, nil
 	}
 	name := libraryName()
 	// Locate the repository root relative to this source file so the binding
-	// works before the module is fetched into the module cache.
+	// works before the module is fetched into the module cache. Module-cache
+	// consumers must set CONFIDENTIAL_INFERENCE_FFI_LIBRARY or WithLibraryPath.
 	_, source, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
-	for _, root := range []string{repoRoot, "."} {
-		candidates = append(candidates, filepath.Join(root, "target", "debug", name))
-		candidates = append(candidates, filepath.Join(root, "target", "release", name))
-	}
-	seen := make(map[string]bool)
-	for _, candidate := range candidates {
-		if seen[candidate] {
-			continue
-		}
-		seen[candidate] = true
+	var searched []string
+	for _, profile := range []string{"release", "debug"} {
+		candidate := filepath.Join(repoRoot, "target", profile, name)
+		searched = append(searched, candidate)
 		if _, err := os.Stat(candidate); err == nil {
-			abs, err := filepath.Abs(candidate)
-			if err == nil {
-				return abs, nil
-			}
 			return candidate, nil
 		}
-	}
-	searched := make([]string, 0, len(seen))
-	for candidate := range seen {
-		searched = append(searched, candidate)
 	}
 	return "", &Error{
 		Status:  StatusInvalidArgument,

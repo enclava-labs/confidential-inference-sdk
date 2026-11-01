@@ -5,9 +5,13 @@ bindings, and demo. Fixture signing keys and reference values are test material;
 they must never be used as production trust roots.
 
 The TDX quote and collateral under `evidence/dcap-qvl/` are upstream sample
-evidence used to exercise the real DCAP verifier. The remaining evidence files
-model provider and failure scenarios and do not establish trust in any live
-deployment.
+evidence used to exercise the real DCAP verifier. `evidence/sev-snp/` holds a
+public capture of Tinfoil's attestation endpoint
+(`https://inference.tinfoil.sh/.well-known/tinfoil-attestation`: TLS leaf
+certificate and SEV-SNP attestation body) plus the matching AMD-issued VCEK
+certificate; it contains no credentials and exercises the real SNP verifier
+offline. The remaining evidence files model provider and failure scenarios and
+do not establish trust in any live deployment.
 
 ## Layout
 

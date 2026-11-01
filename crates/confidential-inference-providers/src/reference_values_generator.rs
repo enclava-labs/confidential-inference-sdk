@@ -48,6 +48,8 @@ pub struct ChutesLiveReferenceValuesInput {
     pub valid_from: String,
     pub valid_until: String,
     pub valid_until_epoch_ms: u64,
+    pub revocation_epoch: u64,
+    pub minimum_acceptable_version: String,
     pub canonical_model: String,
     pub route: RouteDefinition,
     pub verified_measurements: Vec<String>,
@@ -118,8 +120,13 @@ pub fn generate_chutes_live_reference_values(
         valid_from: input.valid_from,
         valid_until: input.valid_until,
         valid_until_epoch_ms: input.valid_until_epoch_ms,
-        revocation_epoch: 0,
-        minimum_acceptable_version: "1.0.0".into(),
+        revocation_epoch: input.revocation_epoch,
+        minimum_acceptable_version: required_for(
+            "Chutes live reference values",
+            "minimum_acceptable_version",
+            &input.minimum_acceptable_version,
+        )?
+        .to_owned(),
         providers,
     })
 }
@@ -670,6 +677,8 @@ mod tests {
             valid_from: "2098-12-31T00:00:00Z".into(),
             valid_until: "2099-01-01T00:00:00Z".into(),
             valid_until_epoch_ms: 4_070_908_800_000,
+            revocation_epoch: 0,
+            minimum_acceptable_version: "2026-10-20-observed".into(),
             canonical_model: "qwen3-32b".into(),
             route: chutes_route,
             verified_measurements: vec![

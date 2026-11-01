@@ -59,8 +59,9 @@ pub fn verify_chutes_e2ee_report_data_binding(
 
     let expected = chutes_expected_report_data_prefix(nonce_hex, e2e_public_key)
         .expect("nonce and public key were prevalidated");
-    if report_data_hex.len() >= expected.len()
-        && report_data_hex[..expected.len()].eq_ignore_ascii_case(&expected)
+    if report_data_hex
+        .get(..expected.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&expected))
     {
         ChutesE2eeReportDataBinding::Verified
     } else {
@@ -200,6 +201,20 @@ mod tests {
                 &"33".repeat(32)
             ),
             ChutesLiveReportDataBinding::ReportDataMismatch
+        );
+    }
+
+    #[test]
+    fn chutes_e2ee_report_data_binding_does_not_panic_on_multibyte_prefix() {
+        // Byte-slicing at expected.len() could split a UTF-8 char; .get()
+        // returns None instead and the binding fails closed.
+        let nonce = "11".repeat(32);
+        let public_key = "test-public-key";
+        let report_data = format!("{}é{}", "aa".repeat(31), "00".repeat(33));
+
+        assert_eq!(
+            verify_chutes_e2ee_report_data_binding(&report_data, &nonce, public_key),
+            ChutesE2eeReportDataBinding::ReportDataMismatch
         );
     }
 }

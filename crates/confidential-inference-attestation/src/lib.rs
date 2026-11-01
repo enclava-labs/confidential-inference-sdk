@@ -21,6 +21,10 @@ mod tls;
 mod verdict;
 mod verifier;
 
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing;
+
 pub use canonical::{canonical_digest, canonical_json, sha256_digest, MAX_SAFE_JSON_INT};
 pub use e2ee::{
     chutes_expected_report_data_prefix, chutes_provider_nonce,
@@ -45,8 +49,8 @@ pub use policy::{
     StaleVerdictPolicy, VerificationPolicy,
 };
 pub use reference_values::{
-    ProviderReference, ReferenceSignature, ReferenceValuesEnvelope, ReferenceValuesPayload,
-    ReferenceValuesPin, RouteReference,
+    compare_artifact_versions, ProviderReference, ReferenceSignature, ReferenceValuesEnvelope,
+    ReferenceValuesPayload, ReferenceValuesPin, RouteReference,
 };
 pub use sev_snp::{
     verify_tinfoil_quote_with_vcek, verify_tinfoil_quote_with_vcek_at, SevSnpTinfoilQuoteVerifier,
@@ -85,8 +89,9 @@ pub use verdict::{
     VerificationStatus,
 };
 pub use verifier::{
-    chutes_live_tee_measurement, format_utc_timestamp_millis, parse_utc_timestamp_millis,
-    verify_chutes_e2ee_evidence, verify_chutes_e2ee_evidence_with_gpu_attestation_verifier,
+    chutes_live_tee_measurement, format_utc_timestamp_millis, near_live_tee_measurement,
+    parse_utc_timestamp_millis, verify_chutes_e2ee_evidence,
+    verify_chutes_e2ee_evidence_with_gpu_attestation_verifier,
     verify_chutes_live_evidence_with_attestation_verifiers, verify_dstack_evidence,
     verify_evidence, verify_evidence_with_attestation_verifiers,
     verify_evidence_with_gpu_attestation_verifier, verify_evidence_with_tinfoil_quote_verifier,

@@ -434,7 +434,7 @@ pub fn verify_near_live_evidence_with_attestation_verifiers(
         provider: capture.provider,
         route_id: capture.route_id,
         evidence_family: capture.evidence_family,
-        tee_measurement: format!("tdx:mr_config_id:{}", verified_quote.mr_config_id),
+        tee_measurement: near_live_tee_measurement(&verified_quote),
         hardware: EvidenceHardware {
             cpu: CpuTeeKind::Tdx,
             gpu: capture
@@ -684,14 +684,14 @@ fn verify_provider_live_evidence(
     push_unsupported_provenance_checks(&mut checks, &mut errors, &request.policy);
     push_per_request_freshness_check(&mut checks, &mut errors, &request.policy);
 
-    let failed_required = checks.values().any(|check| *check == CheckResult::Failed);
+    let would_block_under_enforce = enforcement_would_block(&checks, &request.policy);
     let request_allowed = match request.policy.enforcement {
         EnforcementMode::Disabled | EnforcementMode::Observe => true,
-        EnforcementMode::Enforce => !failed_required,
+        EnforcementMode::Enforce => !would_block_under_enforce,
     };
     let status = match request.policy.enforcement {
         EnforcementMode::Disabled => VerificationStatus::Disabled,
-        _ if failed_required => VerificationStatus::Failed,
+        _ if would_block_under_enforce => VerificationStatus::Failed,
         _ if hardware_verified && gpu_verified && channel_verified => VerificationStatus::Verified,
         _ => VerificationStatus::Partial,
     };
@@ -700,6 +700,7 @@ fn verify_provider_live_evidence(
     let validity = compute_validity_bounds(
         &evidence.issued_at,
         request.policy.verdict_ttl_millis.0,
+        None,
         [
             ValidityCandidate {
                 epoch_ms: evidence.expires_at_epoch_ms,
@@ -730,7 +731,7 @@ fn verify_provider_live_evidence(
         status,
         enforcement: request.policy.enforcement.clone(),
         request_allowed,
-        would_block_under_enforce: failed_required,
+        would_block_under_enforce,
         trust_tier: request.route.trust_tier.clone(),
         provider: request.route.provider.clone(),
         requested_model: request.route.requested_model.clone(),
@@ -1208,16 +1209,15 @@ pub fn verify_chutes_e2ee_evidence_with_gpu_attestation_verifier(
 
     push_per_request_freshness_check(&mut checks, &mut errors, &request.policy);
 
-    let failed_required = checks.values().any(|check| *check == CheckResult::Failed);
-    let would_block_under_enforce = failed_required;
+    let would_block_under_enforce = enforcement_would_block(&checks, &request.policy);
     let request_allowed = match request.policy.enforcement {
         EnforcementMode::Disabled | EnforcementMode::Observe => true,
-        EnforcementMode::Enforce => !failed_required,
+        EnforcementMode::Enforce => !would_block_under_enforce,
     };
 
     let status = match request.policy.enforcement {
         EnforcementMode::Disabled => VerificationStatus::Disabled,
-        _ if failed_required => VerificationStatus::Failed,
+        _ if would_block_under_enforce => VerificationStatus::Failed,
         _ if hardware_verified && gpu_verified && channel_verified => VerificationStatus::Verified,
         _ => VerificationStatus::Partial,
     };
@@ -1241,6 +1241,7 @@ pub fn verify_chutes_e2ee_evidence_with_gpu_attestation_verifier(
     let validity = compute_validity_bounds(
         &evidence.issued_at,
         request.policy.verdict_ttl_millis.0,
+        Some(request.policy.verdict_ttl_millis.0),
         [
             ValidityCandidate {
                 epoch_ms: evidence.expires_at_epoch_ms,
@@ -1461,40 +1462,50 @@ pub fn verify_dstack_evidence(request: VerificationRequest) -> Result<Attestatio
     let cpu_verified = match &request.policy.hardware.cpu {
         CpuTeeRequirement::NotRequired => {
             checks.insert("cpu_tee".into(), CheckResult::NotApplicable);
+            checks.insert(
+                "cpu_measurement_reference".into(),
+                CheckResult::NotApplicable,
+            );
             true
         }
-        CpuTeeRequirement::AnyCpuTee => {
-            let ok = cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
-                && provider_reference
-                    .accepted_measurements
-                    .iter()
-                    .any(|measurement| measurement == &evidence.tee_measurement);
+        CpuTeeRequirement::AnyCpuTee | CpuTeeRequirement::OneOf { .. } => {
+            // This evidence family compares provider-asserted claims against
+            // signed reference values but never verifies the TDX quote
+            // signature, so it can never satisfy a required CPU TEE.
+            checks.insert("cpu_tee".into(), CheckResult::Failed);
+            errors.push(VerdictError {
+                code: "cpu_tee".into(),
+                message: "dstack_app_e2ee evidence does not verify the TDX quote signature, so a required CPU TEE cannot be satisfied by this evidence family"
+                    .into(),
+            });
+            let reference_match = match &request.policy.hardware.cpu {
+                CpuTeeRequirement::AnyCpuTee => {
+                    cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
+                        && provider_reference
+                            .accepted_measurements
+                            .iter()
+                            .any(|measurement| measurement == &evidence.tee_measurement)
+                }
+                CpuTeeRequirement::OneOf { allowed } => {
+                    allowed
+                        .iter()
+                        .any(|candidate| candidate == &evidence.hardware.cpu)
+                        && cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
+                        && provider_reference
+                            .accepted_measurements
+                            .iter()
+                            .any(|measurement| measurement == &evidence.tee_measurement)
+                }
+                CpuTeeRequirement::NotRequired => unreachable!(),
+            };
             push_check(
                 &mut checks,
                 &mut errors,
-                "cpu_tee",
-                ok,
-                "CPU TEE or measurement is not accepted by reference values",
+                "cpu_measurement_reference",
+                reference_match,
+                "claimed CPU TEE kind or measurement is not accepted by policy/reference values",
             );
-            ok
-        }
-        CpuTeeRequirement::OneOf { allowed } => {
-            let ok = allowed
-                .iter()
-                .any(|candidate| candidate == &evidence.hardware.cpu)
-                && cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
-                && provider_reference
-                    .accepted_measurements
-                    .iter()
-                    .any(|measurement| measurement == &evidence.tee_measurement);
-            push_check(
-                &mut checks,
-                &mut errors,
-                "cpu_tee",
-                ok,
-                "CPU TEE kind or measurement is not accepted by policy/reference values",
-            );
-            ok
+            false
         }
     };
 
@@ -1696,23 +1707,24 @@ pub fn verify_dstack_evidence(request: VerificationRequest) -> Result<Attestatio
 
     push_per_request_freshness_check(&mut checks, &mut errors, &request.policy);
 
-    let failed_required = checks.values().any(|check| *check == CheckResult::Failed);
-    let would_block_under_enforce = failed_required;
+    let would_block_under_enforce = enforcement_would_block(&checks, &request.policy);
     let request_allowed = match request.policy.enforcement {
         EnforcementMode::Disabled | EnforcementMode::Observe => true,
-        EnforcementMode::Enforce => !failed_required,
+        EnforcementMode::Enforce => !would_block_under_enforce,
     };
 
     let status = match request.policy.enforcement {
         EnforcementMode::Disabled => VerificationStatus::Disabled,
-        _ if failed_required => VerificationStatus::Failed,
+        _ if would_block_under_enforce => VerificationStatus::Failed,
         _ if hardware_verified && channel_verified => VerificationStatus::Verified,
         _ => VerificationStatus::Partial,
     };
     // `request.route.trust_tier` is the registry's advertised capability. This
-    // evidence path proves the TEE, but it does not cryptographically bind
-    // request/response bytes to the advertised app-E2EE key. Report only the
-    // achieved tier so a hardware-only policy cannot overstate its verdict.
+    // evidence path only compares provider-asserted claims against signed
+    // reference values; it never verifies the TDX quote, so it cannot prove
+    // the TEE or cryptographically bind request/response bytes to the
+    // advertised app-E2EE key. Report only the achieved tier so a
+    // hardware-only policy cannot overstate its verdict.
     let achieved_trust_tier = if hardware_verified {
         TrustTier::TeeOnly
     } else {
@@ -1725,6 +1737,7 @@ pub fn verify_dstack_evidence(request: VerificationRequest) -> Result<Attestatio
     let validity = compute_validity_bounds(
         &evidence.issued_at,
         request.policy.verdict_ttl_millis.0,
+        Some(request.policy.verdict_ttl_millis.0),
         [
             ValidityCandidate {
                 epoch_ms: evidence.expires_at_epoch_ms,
@@ -1897,6 +1910,7 @@ struct VerifiedTinfoilTlsEvidence {
     expires_at: String,
     expires_at_epoch_ms: u64,
     evidence_digest: String,
+    cpu_quote_verified: bool,
 }
 
 impl VerifiedTinfoilTlsEvidence {
@@ -1917,6 +1931,7 @@ impl VerifiedTinfoilTlsEvidence {
             expires_at: evidence.expires_at,
             expires_at_epoch_ms: evidence.expires_at_epoch_ms,
             evidence_digest,
+            cpu_quote_verified: false,
         })
     }
 
@@ -1968,6 +1983,7 @@ impl VerifiedTinfoilTlsEvidence {
             expires_at: verified_quote.expires_at,
             expires_at_epoch_ms: verified_quote.expires_at_epoch_ms,
             evidence_digest,
+            cpu_quote_verified: true,
         })
     }
 }
@@ -2011,7 +2027,56 @@ fn verify_tinfoil_verified_evidence(
     let hardware_verified = match &request.policy.hardware.cpu {
         CpuTeeRequirement::NotRequired => {
             checks.insert("cpu_tee".into(), CheckResult::NotApplicable);
+            if !evidence.cpu_quote_verified {
+                checks.insert(
+                    "cpu_measurement_reference".into(),
+                    CheckResult::NotApplicable,
+                );
+            }
             true
+        }
+        CpuTeeRequirement::AnyCpuTee | CpuTeeRequirement::OneOf { .. }
+            if !evidence.cpu_quote_verified =>
+        {
+            // The structured tinfoil-tls-evidence schema compares
+            // provider-asserted claims against signed reference values but
+            // never verifies the quote signature, so it can never satisfy a
+            // required CPU TEE. The measurement match is reported separately
+            // as informational and cannot upgrade cpu_tee.
+            checks.insert("cpu_tee".into(), CheckResult::Failed);
+            errors.push(VerdictError {
+                code: "cpu_tee".into(),
+                message: "tinfoil-tls-evidence claims do not verify the quote signature, so a required CPU TEE cannot be satisfied by this evidence schema"
+                    .into(),
+            });
+            let reference_match = match &request.policy.hardware.cpu {
+                CpuTeeRequirement::AnyCpuTee => {
+                    cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
+                        && provider_reference
+                            .accepted_measurements
+                            .iter()
+                            .any(|measurement| measurement == &evidence.tee_measurement)
+                }
+                CpuTeeRequirement::OneOf { allowed } => {
+                    allowed
+                        .iter()
+                        .any(|candidate| candidate == &evidence.hardware.cpu)
+                        && cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
+                        && provider_reference
+                            .accepted_measurements
+                            .iter()
+                            .any(|measurement| measurement == &evidence.tee_measurement)
+                }
+                CpuTeeRequirement::NotRequired => unreachable!(),
+            };
+            push_check(
+                &mut checks,
+                &mut errors,
+                "cpu_measurement_reference",
+                reference_match,
+                "claimed CPU TEE kind or measurement is not accepted by policy/reference values",
+            );
+            false
         }
         CpuTeeRequirement::AnyCpuTee => {
             let ok = cpu_allowed(&evidence.hardware.cpu, &route_reference.accepted_cpu_tees)
@@ -2225,25 +2290,40 @@ fn verify_tinfoil_verified_evidence(
 
     push_per_request_freshness_check(&mut checks, &mut errors, &request.policy);
 
-    let failed_required = checks.values().any(|check| *check == CheckResult::Failed);
-    let would_block_under_enforce = failed_required;
+    let would_block_under_enforce = enforcement_would_block(&checks, &request.policy);
     let request_allowed = match request.policy.enforcement {
         EnforcementMode::Disabled | EnforcementMode::Observe => true,
-        EnforcementMode::Enforce => !failed_required,
+        EnforcementMode::Enforce => !would_block_under_enforce,
     };
 
     let status = match request.policy.enforcement {
         EnforcementMode::Disabled => VerificationStatus::Disabled,
-        _ if failed_required => VerificationStatus::Failed,
+        _ if would_block_under_enforce => VerificationStatus::Failed,
         _ if hardware_verified && tls_binding_verified => VerificationStatus::Verified,
         _ => VerificationStatus::Partial,
     };
+    // `request.route.trust_tier` is the registry's advertised capability.
+    // Report only the tier the checks actually achieved; on the claims-only
+    // structured schema cpu_tee can never satisfy a required CPU TEE, so a
+    // hardware-requiring policy can never overstate its verdict.
+    let achieved_trust_tier = if tls_binding_verified {
+        request.route.trust_tier.clone()
+    } else if hardware_verified {
+        TrustTier::TeeOnly
+    } else {
+        TrustTier::None
+    };
 
+    // Provider-asserted `issued_at` on claims-only evidence must not extend
+    // the verdict's lifetime beyond wall-clock now + policy TTL.
+    let wall_clock_ttl_bound =
+        (!evidence.cpu_quote_verified).then_some(request.policy.verdict_ttl_millis.0);
     let evidence_digest = evidence.evidence_digest.clone();
     let policy_digest = request.policy.digest()?;
     let validity = compute_validity_bounds(
         &evidence.issued_at,
         request.policy.verdict_ttl_millis.0,
+        wall_clock_ttl_bound,
         [
             ValidityCandidate {
                 epoch_ms: evidence.expires_at_epoch_ms,
@@ -2275,7 +2355,7 @@ fn verify_tinfoil_verified_evidence(
         enforcement: request.policy.enforcement.clone(),
         request_allowed,
         would_block_under_enforce,
-        trust_tier: request.route.trust_tier.clone(),
+        trust_tier: achieved_trust_tier,
         provider: request.route.provider.clone(),
         requested_model: request.route.requested_model.clone(),
         provider_model: request.route.provider_model.clone(),
@@ -2576,16 +2656,15 @@ pub fn verify_fixture_evidence(request: VerificationRequest) -> Result<Attestati
 
     push_per_request_freshness_check(&mut checks, &mut errors, &request.policy);
 
-    let failed_required = checks.values().any(|check| *check == CheckResult::Failed);
-    let would_block_under_enforce = failed_required;
+    let would_block_under_enforce = enforcement_would_block(&checks, &request.policy);
     let request_allowed = match request.policy.enforcement {
         EnforcementMode::Disabled | EnforcementMode::Observe => true,
-        EnforcementMode::Enforce => !failed_required,
+        EnforcementMode::Enforce => !would_block_under_enforce,
     };
 
     let status = match request.policy.enforcement {
         EnforcementMode::Disabled => VerificationStatus::Disabled,
-        _ if failed_required => VerificationStatus::Failed,
+        _ if would_block_under_enforce => VerificationStatus::Failed,
         _ if hardware_verified && channel_verified => VerificationStatus::Verified,
         _ => VerificationStatus::Partial,
     };
@@ -2596,6 +2675,7 @@ pub fn verify_fixture_evidence(request: VerificationRequest) -> Result<Attestati
     let validity = compute_validity_bounds(
         &evidence.issued_at,
         request.policy.verdict_ttl_millis.0,
+        None,
         [
             ValidityCandidate {
                 epoch_ms: evidence.expires_at_epoch_ms,
@@ -2719,6 +2799,10 @@ struct ValidityCandidate<'a> {
 fn compute_validity_bounds(
     issued_at: &str,
     policy_ttl_millis: u64,
+    // Claims-based evidence families let providers self-assert `issued_at`, so
+    // their verdicts are additionally bounded by wall-clock now + policy TTL
+    // (pass `Some(ttl)`); quote-verified and offline fixture families pass None.
+    wall_clock_ttl_bound: Option<u64>,
     candidates: [ValidityCandidate<'_>; 3],
 ) -> Result<ComputedValidityBounds> {
     let policy_ttl_epoch_ms =
@@ -2733,6 +2817,13 @@ fn compute_validity_bounds(
             expires_at = candidate.timestamp.to_owned();
         }
     }
+    if let Some(ttl_millis) = wall_clock_ttl_bound {
+        let wall_clock_epoch_ms = now_epoch_millis().saturating_add(ttl_millis);
+        if wall_clock_epoch_ms < expires_at_epoch_ms {
+            expires_at_epoch_ms = wall_clock_epoch_ms;
+            expires_at = format_utc_timestamp_millis(wall_clock_epoch_ms);
+        }
+    }
 
     Ok(ComputedValidityBounds {
         policy_ttl_until,
@@ -2741,7 +2832,32 @@ fn compute_validity_bounds(
     })
 }
 
+fn now_epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+pub fn near_live_tee_measurement(verified_quote: &VerifiedTdxQuote) -> String {
+    // RTMR3 is excluded: dstack runtime events vary per instance.
+    format!(
+        "tdx:mr_td:{}:rtmr0:{}:rtmr1:{}:rtmr2:{}:mr_config_id:{}",
+        verified_quote.mr_td,
+        verified_quote.rtmr0,
+        verified_quote.rtmr1,
+        verified_quote.rtmr2,
+        verified_quote.mr_config_id
+    )
+}
+
 pub fn parse_utc_timestamp_millis(timestamp: &str) -> Result<u64> {
+    if !timestamp.is_ascii() {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "timestamp {timestamp} is not canonical UTC RFC3339"
+        )));
+    }
     let (main, millis) = match timestamp.len() {
         20 if timestamp.ends_with('Z') => (&timestamp[..19], 0_u64),
         24 if timestamp.ends_with('Z') && timestamp.as_bytes()[19] == b'.' => {
@@ -2863,6 +2979,19 @@ fn civil_from_days(days: i64) -> (i64, u64, u64) {
     let year = year + if month <= 2 { 1 } else { 0 };
 
     (year, month as u64, day as u64)
+}
+
+/// Enforcement rule: under EnforcementMode::Enforce a verdict is blocked when
+/// any check is Failed, or when a required check is NotSupported or Unknown.
+fn enforcement_would_block(
+    checks: &BTreeMap<String, CheckResult>,
+    policy: &VerificationPolicy,
+) -> bool {
+    checks.iter().any(|(name, state)| {
+        *state == CheckResult::Failed
+            || (matches!(state, CheckResult::NotSupported | CheckResult::Unknown)
+                && check_is_required(name, state, policy))
+    })
 }
 
 fn push_check(
@@ -3913,10 +4042,13 @@ mod tests {
             crate::tls::TEST_SPKI_SHA256,
             "00".repeat(32)
         ));
-        let request = request_with_tinfoil_evidence(
+        let mut request = request_with_tinfoil_evidence(
             evidence,
             Some(format!("sha256:{}", crate::tls::TEST_SPKI_SHA256)),
         );
+        // The structured schema is claims-only: it cannot satisfy a required
+        // CPU TEE, so keep CPU out of the policy to test the TLS binding.
+        request.policy.hardware.cpu = CpuTeeRequirement::NotRequired;
 
         let verdict = verify_evidence(request).unwrap();
 
@@ -4350,7 +4482,13 @@ mod tests {
             .collect::<String>();
         let report_data = format!("{binding_digest}{nonce}");
         let mr_config_id = format!("01{}", "00".repeat(47));
-        let measurement = format!("tdx:mr_config_id:{mr_config_id}");
+        let measurement = format!(
+            "tdx:mr_td:{}:rtmr0:{}:rtmr1:{}:rtmr2:{}:mr_config_id:{mr_config_id}",
+            "11".repeat(48),
+            "22".repeat(48),
+            "33".repeat(48),
+            "44".repeat(48)
+        );
         let mut providers = BTreeMap::new();
         providers.insert(
             "near".into(),
@@ -4453,7 +4591,14 @@ mod tests {
         };
         let verifier = StaticTdxQuoteVerifier {
             quote: VerifiedTdxQuote {
-                tee_measurement: format!("tdx:mr_td:{}", "11".repeat(48)),
+                tee_measurement: format!(
+                    "tdx:mr_td:{}:rtmr0:{}:rtmr1:{}:rtmr2:{}:rtmr3:{}",
+                    "11".repeat(48),
+                    "22".repeat(48),
+                    "33".repeat(48),
+                    "44".repeat(48),
+                    "55".repeat(48)
+                ),
                 mr_td: "11".repeat(48),
                 mr_config_id,
                 rtmr0: "22".repeat(48),
@@ -4652,6 +4797,127 @@ mod tests {
             verdict.check("tcb_compose_hash"),
             Some(&CheckResult::Failed)
         );
+    }
+
+    #[test]
+    fn dstack_evidence_fails_closed_when_cpu_tee_is_required() {
+        // Claims-only evidence: no TDX quote is verified, so a required CPU
+        // TEE fails closed while the measurement match stays informational.
+        let request = request_with_dstack_evidence(dstack_evidence());
+
+        let verdict = verify_evidence(request).unwrap();
+
+        assert_eq!(verdict.status, VerificationStatus::Failed);
+        assert!(!verdict.request_allowed);
+        assert!(verdict.would_block_under_enforce);
+        assert_eq!(verdict.check("cpu_tee"), Some(&CheckResult::Failed));
+        assert_eq!(
+            verdict.check("cpu_measurement_reference"),
+            Some(&CheckResult::Verified)
+        );
+        assert_ne!(verdict.trust_tier, TrustTier::TeeOnly);
+        assert_ne!(verdict.trust_tier, TrustTier::HwVerifiedTls);
+        assert!(verdict.errors.iter().any(|error| {
+            error.code == "cpu_tee"
+                && error
+                    .message
+                    .contains("does not verify the TDX quote signature")
+        }));
+    }
+
+    #[test]
+    fn dstack_evidence_with_cpu_not_required_marks_cpu_not_applicable() {
+        let mut request = request_with_dstack_evidence(dstack_evidence());
+        request.policy.hardware.cpu = CpuTeeRequirement::NotRequired;
+
+        let verdict = verify_evidence(request).unwrap();
+
+        assert_eq!(verdict.check("cpu_tee"), Some(&CheckResult::NotApplicable));
+        assert_eq!(
+            verdict.check("cpu_measurement_reference"),
+            Some(&CheckResult::NotApplicable)
+        );
+    }
+
+    #[test]
+    fn required_check_that_is_not_supported_blocks_under_enforce() {
+        // The policy demands attested app-E2EE binding, which dstack evidence
+        // cannot prove; with nothing else failing this used to pass as
+        // `partial` and dispatch.
+        let mut request = request_with_dstack_evidence(dstack_evidence());
+        request.policy.hardware.cpu = CpuTeeRequirement::NotRequired;
+        request.policy.request_confidentiality_requirement =
+            crate::BoundDataRequirement::NotRequired;
+        request.policy.response_confidentiality_requirement =
+            crate::BoundDataRequirement::NotRequired;
+        request.policy.response_integrity_requirement =
+            crate::ResponseIntegrityRequirement::NotRequired;
+
+        let verdict = verify_evidence(request).unwrap();
+
+        assert_eq!(
+            verdict.check("e2ee_key_binding"),
+            Some(&CheckResult::NotSupported)
+        );
+        assert!(verdict.would_block_under_enforce);
+        assert!(!verdict.request_allowed);
+        assert_eq!(verdict.status, VerificationStatus::Failed);
+    }
+
+    #[test]
+    fn structured_tinfoil_evidence_fails_closed_when_cpu_tee_is_required() {
+        let evidence = tinfoil_evidence(format!(
+            "{}{}",
+            crate::tls::TEST_SPKI_SHA256,
+            "00".repeat(32)
+        ));
+        let request = request_with_tinfoil_evidence(
+            evidence,
+            Some(format!("sha256:{}", crate::tls::TEST_SPKI_SHA256)),
+        );
+
+        let verdict = verify_evidence(request).unwrap();
+
+        assert_eq!(verdict.status, VerificationStatus::Failed);
+        assert!(!verdict.request_allowed);
+        assert!(verdict.would_block_under_enforce);
+        assert_eq!(verdict.check("cpu_tee"), Some(&CheckResult::Failed));
+        assert_eq!(
+            verdict.check("cpu_measurement_reference"),
+            Some(&CheckResult::Verified)
+        );
+        assert!(verdict
+            .errors
+            .iter()
+            .any(|error| { error.code == "cpu_tee" && error.message.contains("quote signature") }));
+    }
+
+    #[test]
+    fn parse_utc_timestamp_millis_rejects_non_ascii_input() {
+        // A multibyte character would panic on byte-position separators
+        // without the ASCII guard.
+        let error = parse_utc_timestamp_millis("202é01-01T00:00:00Z").unwrap_err();
+        assert!(error.to_string().contains("canonical UTC RFC3339"));
+    }
+
+    #[test]
+    fn claims_only_expiry_is_bounded_by_wall_clock() {
+        // A provider-asserted far-future issued_at must not extend the verdict
+        // beyond wall-clock now + policy TTL.
+        let mut evidence = chutes_evidence();
+        evidence.issued_at = "2050-01-01T00:00:00Z".into();
+        let request = request_with_chutes_evidence(evidence, None);
+
+        let verdict = verify_evidence(request).unwrap();
+
+        let now_plus_ttl_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + VerificationPolicy::require_attested_e2ee()
+                .verdict_ttl_millis
+                .0;
+        assert!(verdict.expires_at_epoch_ms <= now_plus_ttl_ms);
     }
 
     #[test]

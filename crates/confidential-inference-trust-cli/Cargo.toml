@@ -25,3 +25,4 @@ getrandom.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true
+zeroize.workspace = true

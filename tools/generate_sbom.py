@@ -48,7 +48,17 @@ def _relative_path(path: str | None, workspace_root: Path) -> str | None:
     try:
         return candidate.resolve().relative_to(workspace_root.resolve()).as_posix()
     except ValueError:
-        return candidate.as_posix()
+        # Registry manifests live outside the workspace; any path to them is
+        # machine-specific, so the SBOM omits it (name/version/checksum identify them).
+        return None
+
+
+def _workspace_relative_package_id(package_id: str, workspace_root: Path) -> str:
+    """Strip the absolute workspace path out of `path+file:///` package ids."""
+    prefix = f"path+file://{workspace_root.as_posix()}/"
+    if package_id.startswith(prefix):
+        return "path+file:///" + package_id[len(prefix) :]
+    return package_id
 
 
 def _package_key(package: dict[str, Any]) -> tuple[str, str, str]:
@@ -71,31 +81,36 @@ def _package_record(
         raise SbomError(
             f"registry package {package['name']} {package['version']} is missing a Cargo.lock checksum"
         )
-
+    package_id = _workspace_relative_package_id(package["id"], workspace_root)
     return {
-        "id": package["id"],
+        "id": package_id,
         "name": package["name"],
         "version": package["version"],
         "license": package.get("license"),
         "source": source,
         "checksum": checksum,
-        "workspace_member": package["id"] in workspace_members,
+        "workspace_member": package_id in workspace_members,
         "manifest_path": _relative_path(package.get("manifest_path"), workspace_root),
     }
 
 
-def _dependency_edges(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+def _dependency_edges(
+    metadata: dict[str, Any],
+    workspace_root: Path,
+) -> list[dict[str, Any]]:
     edges: list[dict[str, Any]] = []
     resolve = metadata.get("resolve") or {}
     for node in resolve.get("nodes", []):
-        from_id = node["id"]
+        from_id = _workspace_relative_package_id(node["id"], workspace_root)
         for dep in node.get("deps", []):
             dep_kinds = dep.get("dep_kinds") or [{"kind": None, "target": None}]
             for dep_kind in dep_kinds:
                 edges.append(
                     {
                         "from_id": from_id,
-                        "to_id": dep["pkg"],
+                        "to_id": _workspace_relative_package_id(
+                            dep["pkg"], workspace_root
+                        ),
                         "dependency_name": dep["name"],
                         "kind": dep_kind.get("kind") or "normal",
                         "target": dep_kind.get("target"),
@@ -115,19 +130,22 @@ def _dependency_edges(metadata: dict[str, Any]) -> list[dict[str, Any]]:
 
 def build_sbom(metadata: dict[str, Any], lock_bytes: bytes) -> dict[str, Any]:
     workspace_root = Path(metadata["workspace_root"])
-    workspace_members = {str(member) for member in metadata.get("workspace_members", [])}
+    workspace_members = {
+        _workspace_relative_package_id(str(member), workspace_root)
+        for member in metadata.get("workspace_members", [])
+    }
     lock_checksums = parse_lock_checksums(lock_bytes)
     packages = [
         _package_record(package, workspace_root, workspace_members, lock_checksums)
         for package in metadata.get("packages", [])
     ]
     packages.sort(key=lambda package: (package["name"], package["version"], package["id"]))
-    dependency_edges = _dependency_edges(metadata)
+    dependency_edges = _dependency_edges(metadata, workspace_root)
 
     return {
         "schema": SCHEMA,
         "cargo_metadata_format_version": 1,
-        "workspace_root": workspace_root.as_posix(),
+        "workspace_root": ".",
         "workspace_members": sorted(workspace_members),
         "lockfile_digest": sha256_digest(lock_bytes),
         "package_count": len(packages),
@@ -135,6 +153,15 @@ def build_sbom(metadata: dict[str, Any], lock_bytes: bytes) -> dict[str, Any]:
         "packages": packages,
         "dependency_edges": dependency_edges,
     }
+
+
+def check_output(output: Path, rendered: str) -> str | None:
+    """Return an error message when --check cannot confirm the output."""
+    if not output.exists():
+        return f"{output} does not exist; nothing to compare"
+    if output.read_text(encoding="utf-8") != rendered:
+        return f"{output} is out of date"
+    return None
 
 
 def load_metadata(workspace_root: Path) -> dict[str, Any]:
@@ -165,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Fail if the output file already exists and would change.",
+        help="Fail if the output file does not already exist with identical content.",
     )
     args = parser.parse_args(argv)
 
@@ -184,9 +211,10 @@ def main(argv: list[str] | None = None) -> int:
         output = workspace_root / output
 
     rendered = json.dumps(sbom, sort_keys=True, indent=2, separators=(",", ": ")) + "\n"
-    if args.check and output.exists() and output.read_text(encoding="utf-8") != rendered:
-        print(f"generate_sbom.py: {output} is out of date", file=sys.stderr)
-        return 1
+    if args.check:
+        if error := check_output(output, rendered):
+            print(f"generate_sbom.py: {error}", file=sys.stderr)
+            return 1
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(rendered, encoding="utf-8")
     print(output)

@@ -6,7 +6,8 @@ import "syscall"
 // covers the same surface without extra dependencies.
 
 func openLibrary(path string) (uintptr, error) {
-	return syscall.LoadLibrary(path)
+	handle, err := syscall.LoadLibrary(path)
+	return uintptr(handle), err
 }
 
 func lookupSymbol(handle uintptr, name string) (uintptr, error) {

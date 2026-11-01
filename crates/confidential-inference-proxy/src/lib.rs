@@ -4,17 +4,19 @@
 //! security configuration contract and provides OpenAI-compatible route
 //! handlers without reimplementing SDK routing or attestation logic.
 
-use confidential_inference_openai::{
-    ChatCompletionRequest, ChatCompletionResponse, ResponseCreateRequest,
+use confidential_inference_openai::{ChatCompletionResponse, ResponseCreateRequest};
+use confidential_inference_sdk::{
+    ChatCompletionRequestPayload, ClientError, ConfidentialInference, ConfidentialResponse,
 };
-use confidential_inference_sdk::{ClientError, ConfidentialInference, ConfidentialResponse};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 2 * 1024 * 1024;
+const HTTP_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyConfig {
@@ -22,7 +24,6 @@ pub struct ProxyConfig {
     pub auth: ProxyAuth,
     pub transport: ProxyTransportSecurity,
     pub cors: ProxyCors,
-    pub allow_provider_credentials_from_unauthenticated_callers: bool,
 }
 
 impl Default for ProxyConfig {
@@ -32,7 +33,6 @@ impl Default for ProxyConfig {
             auth: ProxyAuth::LoopbackOnly,
             transport: ProxyTransportSecurity::PlainHttpLoopbackOnly,
             cors: ProxyCors::Disabled,
-            allow_provider_credentials_from_unauthenticated_callers: false,
         }
     }
 }
@@ -73,6 +73,10 @@ impl ConfidentialInferenceProxy {
             self.cors_origin_error(&request, cors_origin.is_some())
         {
             response
+        } else if let Some(response) = self.host_header_error(&request) {
+            response
+        } else if let Some(response) = content_type_error(&request) {
+            response
         } else if is_cors_preflight {
             self.handle_cors_preflight(&request)
         } else if let Some(response) = self.authorization_error(&request) {
@@ -107,7 +111,24 @@ impl ConfidentialInferenceProxy {
     }
 
     async fn handle_chat_completions(&self, body: Vec<u8>) -> ProxyHttpResponse {
-        let request = match serde_json::from_slice::<ChatCompletionRequest>(&body) {
+        let request_json = match String::from_utf8(body) {
+            Ok(json) => json,
+            Err(error) => {
+                return proxy_error_response(
+                    400,
+                    "invalid_request_json",
+                    &format!("OpenAI chat completion request body is not UTF-8: {error}"),
+                )
+            }
+        };
+        if request_requests_streaming(&request_json) {
+            return proxy_error_response(
+                400,
+                "streaming_not_supported",
+                "the proxy does not support streaming chat completions",
+            );
+        }
+        let request = match ChatCompletionRequestPayload::from_json_str(&request_json) {
             Ok(request) => request,
             Err(error) => {
                 return proxy_error_response(
@@ -118,8 +139,19 @@ impl ConfidentialInferenceProxy {
             }
         };
 
-        match send_chat_request(self.client.clone(), request).await {
-            Ok(response) => openai_chat_response(response),
+        match self.client.send_chat_completion_payload_json(request).await {
+            Ok(response_json) => {
+                match serde_json::from_str::<ConfidentialResponse<ChatCompletionResponse>>(
+                    &response_json,
+                ) {
+                    Ok(response) => openai_chat_response(response),
+                    Err(error) => proxy_error_response(
+                        500,
+                        "response_serialization_failed",
+                        &format!("failed to deserialize SDK chat response JSON: {error}"),
+                    ),
+                }
+            }
             Err(error) => client_error_response(&error),
         }
     }
@@ -175,10 +207,16 @@ impl ConfidentialInferenceProxy {
         request: &ProxyHttpRequest,
         cors_origin_allowed: bool,
     ) -> Option<ProxyHttpResponse> {
-        if matches!(self.startup_plan.cors, ProxyCors::Disabled)
-            || request.header("origin").is_none()
-        {
-            return None;
+        request.header("origin")?;
+
+        if matches!(self.startup_plan.cors, ProxyCors::Disabled) {
+            // CORS disabled means browser-issued requests must never reach the
+            // routes; a page can always send a no-preflight cross-origin POST.
+            return Some(proxy_error_response(
+                403,
+                "cors_origin_not_allowed",
+                "request Origin is not allowed by proxy CORS policy",
+            ));
         }
 
         if cors_origin_allowed {
@@ -188,6 +226,25 @@ impl ConfidentialInferenceProxy {
                 403,
                 "cors_origin_not_allowed",
                 "request Origin is not allowed by proxy CORS policy",
+            ))
+        }
+    }
+
+    /// Loopback-only auth relies on browsers being unable to target loopback
+    /// via DNS rebinding; require the Host header to name loopback so a
+    /// rebound attacker origin cannot drive requests through the browser.
+    fn host_header_error(&self, request: &ProxyHttpRequest) -> Option<ProxyHttpResponse> {
+        if !matches!(self.startup_plan.auth, ProxyAuth::LoopbackOnly) {
+            return None;
+        }
+        let host = request.header("host").unwrap_or_default();
+        if host_header_is_loopback(host) {
+            None
+        } else {
+            Some(proxy_error_response(
+                403,
+                "host_not_loopback",
+                "proxy requires a loopback Host header when authentication is LoopbackOnly",
             ))
         }
     }
@@ -287,7 +344,7 @@ impl ProxyHttpRequest {
         Self {
             method: ProxyHttpMethod::Get,
             path: path.into(),
-            headers: Vec::new(),
+            headers: vec![("host".into(), "localhost".into())],
             body: Vec::new(),
         }
     }
@@ -296,7 +353,10 @@ impl ProxyHttpRequest {
         Self {
             method: ProxyHttpMethod::Post,
             path: path.into(),
-            headers: Vec::new(),
+            headers: vec![
+                ("host".into(), "localhost".into()),
+                ("content-type".into(), "application/json".into()),
+            ],
             body: body.into(),
         }
     }
@@ -339,11 +399,6 @@ impl ProxyConfig {
         }
         if matches!(&self.auth, ProxyAuth::BearerToken { token, .. } if token.is_empty()) {
             return Err(ProxyConfigError::BearerTokenCannotBeEmpty);
-        }
-        if self.allow_provider_credentials_from_unauthenticated_callers
-            && !self.auth.requires_authentication()
-        {
-            return Err(ProxyConfigError::UnauthenticatedProviderCredentialForwarding);
         }
         if matches!(self.cors, ProxyCors::AllowAnyOrigin) {
             return Err(ProxyConfigError::WildcardCorsRejected);
@@ -421,11 +476,26 @@ impl ProxyServer {
             tokio::select! {
                 _ = &mut shutdown => return Ok(()),
                 accepted = self.listener.accept() => {
-                    let (stream, _peer) = accepted?;
-                    let proxy = self.proxy.clone();
-                    tokio::spawn(async move {
-                        let _ = handle_connection(proxy, stream).await;
-                    });
+                    match accepted {
+                        Ok((stream, _peer)) => {
+                            let proxy = self.proxy.clone();
+                            tokio::spawn(async move {
+                                let _ = handle_connection(proxy, stream).await;
+                            });
+                        }
+                        Err(error) => {
+                            eprintln!("confidential-inference-proxy: accept failed: {error}");
+                            // File-descriptor exhaustion is transient: back off
+                            // briefly rather than spin on failing accept calls.
+                            #[cfg(unix)]
+                            if matches!(
+                                error.raw_os_error(),
+                                Some(libc::EMFILE) | Some(libc::ENFILE)
+                            ) {
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -578,7 +648,6 @@ pub struct ProxyStartupPlan {
 pub enum ProxyConfigError {
     NonLoopbackRequiresAuth { bind_addr: SocketAddr },
     NonLoopbackRequiresTlsOrReverseProxy { bind_addr: SocketAddr },
-    UnauthenticatedProviderCredentialForwarding,
     BearerTokenCannotBeEmpty,
     WildcardCorsRejected,
     CorsRequiresExplicitOrigins,
@@ -595,10 +664,6 @@ impl std::fmt::Display for ProxyConfigError {
             Self::NonLoopbackRequiresTlsOrReverseProxy { bind_addr } => write!(
                 formatter,
                 "proxy bind address {bind_addr} is non-loopback and requires TLS, mTLS, or a secure reverse proxy"
-            ),
-            Self::UnauthenticatedProviderCredentialForwarding => write!(
-                formatter,
-                "proxy must not forward provider credentials for unauthenticated callers"
             ),
             Self::BearerTokenCannotBeEmpty => write!(
                 formatter,
@@ -618,25 +683,6 @@ impl std::fmt::Display for ProxyConfigError {
 }
 
 impl std::error::Error for ProxyConfigError {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProxySecurityDefaults {
-    pub loopback_only: bool,
-    pub cors_enabled: bool,
-    pub requires_auth_for_non_loopback: bool,
-    pub requires_tls_or_secure_reverse_proxy_for_non_loopback: bool,
-}
-
-impl Default for ProxySecurityDefaults {
-    fn default() -> Self {
-        Self {
-            loopback_only: true,
-            cors_enabled: false,
-            requires_auth_for_non_loopback: true,
-            requires_tls_or_secure_reverse_proxy_for_non_loopback: true,
-        }
-    }
-}
 
 fn startup_warnings(config: &ProxyConfig) -> Vec<String> {
     let mut warnings = Vec::new();
@@ -668,26 +714,6 @@ fn cors_requested_headers_allowed(headers: Option<&str>) -> bool {
             "" | "authorization" | "content-type"
         )
     })
-}
-
-async fn send_chat_request(
-    client: ConfidentialInference,
-    request: ChatCompletionRequest,
-) -> confidential_inference_sdk::Result<ConfidentialResponse<ChatCompletionResponse>> {
-    let mut builder = client
-        .chat_completions()
-        .model(request.model)
-        .messages(request.messages);
-    if let Some(stream) = request.stream {
-        builder = builder.stream(stream);
-    }
-    if let Some(max_tokens) = request.max_tokens {
-        builder = builder.max_tokens(max_tokens);
-    }
-    if let Some(temperature) = request.temperature {
-        builder = builder.temperature(temperature);
-    }
-    builder.send().await
 }
 
 fn openai_chat_response(
@@ -767,13 +793,16 @@ fn client_error_response(error: &ClientError) -> ProxyHttpResponse {
         | ClientError::MissingMessages
         | ClientError::ResponseCompatibility(_)
         | ClientError::StreamingNotSupported { .. }
+        | ClientError::StreamingPathRequired
+        | ClientError::MissingInput
         | ClientError::VerifiedRouteModelMismatch { .. }
         | ClientError::InvalidProviderRouting { .. } => (400, "invalid_request"),
         ClientError::PolicyDenied { .. } => (403, "policy_denied"),
         ClientError::VerifiedRouteExpired { .. } => (409, "verified_route_expired"),
         ClientError::InsecurePolicyRequiresOptIn { .. }
         | ClientError::MissingOperatorSigningKeys { .. }
-        | ClientError::BundledSourceRequiresTrust { .. } => (500, "client_configuration_failed"),
+        | ClientError::BundledSourceRequiresTrust { .. }
+        | ClientError::FixtureFallbackNotBundled { .. } => (500, "client_configuration_failed"),
         ClientError::ResponseJsonSerialization(_) => (500, "response_serialization_failed"),
         ClientError::RegistryCache(_) => (503, "registry_cache_failed"),
         ClientError::ReferenceValuesCache(_) => (503, "reference_values_cache_failed"),
@@ -1030,6 +1059,55 @@ fn normalized_path(path: &str) -> String {
         trimmed.into()
     }
 }
+fn host_header_is_loopback(host: &str) -> bool {
+    let host = host.trim();
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().map(|name| name.to_ascii_lowercase())
+    } else {
+        match host.rsplit_once(':') {
+            Some((name, port))
+                if !name.contains(':') && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                Some(name.to_ascii_lowercase())
+            }
+            Some(_) => None,
+            None => Some(host.to_ascii_lowercase()),
+        }
+    };
+    matches!(name.as_deref(), Some("localhost" | "127.0.0.1" | "::1"))
+}
+
+/// A browser page can send no-preflight POSTs only with CORS-safelisted
+/// content types; requiring application/json means cross-site forms cannot
+/// reach the inference routes at all.
+fn content_type_error(request: &ProxyHttpRequest) -> Option<ProxyHttpResponse> {
+    if !matches!(request.method, ProxyHttpMethod::Post) {
+        return None;
+    }
+    let content_type = request.header("content-type").unwrap_or_default();
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if media_type == "application/json" {
+        None
+    } else {
+        Some(proxy_error_response(
+            415,
+            "unsupported_media_type",
+            "POST requests must use content-type application/json",
+        ))
+    }
+}
+
+fn request_requests_streaming(request_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(request_json)
+        .ok()
+        .and_then(|value| value.get("stream")?.as_bool())
+        .unwrap_or(false)
+}
 
 fn attestation_path_parts(path: &str) -> Option<(&str, String)> {
     let mut parts = path
@@ -1052,7 +1130,22 @@ async fn handle_connection(
     proxy: ConfidentialInferenceProxy,
     mut stream: TcpStream,
 ) -> Result<(), ProxyServerError> {
-    let response = match read_http_request(&mut stream).await {
+    let request =
+        match tokio::time::timeout(HTTP_REQUEST_READ_TIMEOUT, read_http_request(&mut stream)).await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let response = proxy_error_response(
+                    408,
+                    "request_timeout",
+                    "HTTP request was not received within the proxy timeout",
+                );
+                return write_http_response(&mut stream, response)
+                    .await
+                    .map_err(ProxyServerError::from);
+            }
+        };
+    let response = match request {
         Ok(request) => proxy.handle(request).await,
         Err(ProxyServerError::BadRequest(message)) => {
             proxy_error_response(400, "bad_request", &message)
@@ -1215,10 +1308,13 @@ fn reason_phrase(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         409 => "Conflict",
+        415 => "Unsupported Media Type",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
-        _ => "OK",
+        503 => "Service Unavailable",
+        _ => "Unknown Status",
     }
 }
 
@@ -1232,11 +1328,31 @@ fn valid_header_name(name: &str) -> bool {
 fn sanitize_header_value(value: &str) -> String {
     value.replace(['\r', '\n'], " ")
 }
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing {
+    /// Feeds raw bytes through the HTTP request-line and header parsers.
+    pub fn http_request(data: &[u8]) {
+        let text = String::from_utf8_lossy(data);
+        let mut lines = text.split("\r\n");
+        if let Some(request_line) = lines.next() {
+            let _ = super::parse_request_line(request_line);
+        }
+        let headers: Result<Vec<_>, _> = lines
+            .filter(|line| !line.is_empty())
+            .map(super::parse_header_line)
+            .collect();
+        if let Ok(headers) = headers {
+            let _ = super::content_length(&headers);
+        }
+        let _ = super::header_end(data);
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use confidential_inference_openai::ChatMessage;
+    use confidential_inference_openai::{ChatCompletionRequest, ChatMessage};
     use confidential_inference_sdk::{VerdictRecord, VerdictStore};
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
@@ -1261,7 +1377,6 @@ mod tests {
             },
             transport: ProxyTransportSecurity::Tls,
             cors: ProxyCors::Disabled,
-            allow_provider_credentials_from_unauthenticated_callers: false,
         }
     }
 
@@ -1307,19 +1422,6 @@ mod tests {
         assert!(plan.startup_warnings.iter().any(|warning| {
             warning.contains("0.0.0.0:8787") && warning.contains("auth_enabled=true")
         }));
-    }
-
-    #[test]
-    fn unauthenticated_provider_credential_forwarding_is_rejected() {
-        let config = ProxyConfig {
-            allow_provider_credentials_from_unauthenticated_callers: true,
-            ..ProxyConfig::default()
-        };
-
-        assert!(matches!(
-            config.validate(),
-            Err(ProxyConfigError::UnauthenticatedProviderCredentialForwarding)
-        ));
     }
 
     #[test]
@@ -1619,7 +1721,7 @@ mod tests {
             response_header(&disallowed_origin, "access-control-allow-origin"),
             None
         );
-        assert_eq!(cors_disabled.status, 405);
+        assert_eq!(cors_disabled.status, 403);
         assert_eq!(
             response_header(&cors_disabled, "access-control-allow-origin"),
             None
@@ -1968,5 +2070,273 @@ mod tests {
             ConfidentialInferenceProxy::from_config(client, config),
             Err(ProxyConfigError::NonLoopbackRequiresAuth { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_origin_header_when_cors_is_disabled() {
+        let proxy = demo_proxy().await;
+
+        let with_origin = proxy
+            .handle(
+                ProxyHttpRequest::get("/v1/models").with_header("origin", "https://evil.example"),
+            )
+            .await;
+        let without_origin = proxy.handle(ProxyHttpRequest::get("/v1/models")).await;
+
+        assert_eq!(with_origin.status, 403);
+        assert!(with_origin.body.contains("cors_origin_not_allowed"));
+        assert!(!with_origin.body.contains("gpt-oss-120b"));
+        assert_eq!(without_origin.status, 200);
+    }
+
+    #[tokio::test]
+    async fn proxy_loopback_auth_rejects_non_loopback_or_missing_host() {
+        let proxy = demo_proxy().await;
+
+        let missing_host = proxy
+            .handle(ProxyHttpRequest {
+                method: ProxyHttpMethod::Get,
+                path: "/v1/models".into(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            })
+            .await;
+        let rebound = proxy
+            .handle(ProxyHttpRequest {
+                method: ProxyHttpMethod::Get,
+                path: "/v1/models".into(),
+                headers: vec![("host".into(), "attacker.example".into())],
+                body: Vec::new(),
+            })
+            .await;
+        for host in [
+            "localhost",
+            "localhost:8787",
+            "127.0.0.1",
+            "127.0.0.1:8787",
+            "[::1]",
+            "[::1]:8787",
+        ] {
+            let response = proxy
+                .handle(ProxyHttpRequest {
+                    method: ProxyHttpMethod::Get,
+                    path: "/v1/models".into(),
+                    headers: vec![("host".into(), host.into())],
+                    body: Vec::new(),
+                })
+                .await;
+            assert_eq!(response.status, 200, "host {host} must be accepted");
+        }
+
+        assert_eq!(missing_host.status, 403);
+        assert!(missing_host.body.contains("host_not_loopback"));
+        assert_eq!(rebound.status, 403);
+        assert!(rebound.body.contains("host_not_loopback"));
+        assert!(!rebound.body.contains("gpt-oss-120b"));
+    }
+
+    #[tokio::test]
+    async fn proxy_post_routes_require_application_json_content_type() {
+        let proxy = demo_proxy().await;
+        let body = serde_json::json!({
+            "model": "gpt-oss-120b",
+            "messages": [{"role": "user", "content": "media type guard"}]
+        })
+        .to_string();
+
+        let form_post = proxy
+            .handle(ProxyHttpRequest {
+                method: ProxyHttpMethod::Post,
+                path: "/v1/chat/completions".into(),
+                headers: vec![
+                    ("host".into(), "localhost".into()),
+                    (
+                        "content-type".into(),
+                        "application/x-www-form-urlencoded".into(),
+                    ),
+                ],
+                body: body.clone().into_bytes(),
+            })
+            .await;
+        let missing_content_type = proxy
+            .handle(ProxyHttpRequest {
+                method: ProxyHttpMethod::Post,
+                path: "/v1/chat/completions".into(),
+                headers: vec![("host".into(), "localhost".into())],
+                body: body.clone().into_bytes(),
+            })
+            .await;
+        let json_post = proxy
+            .handle(ProxyHttpRequest {
+                method: ProxyHttpMethod::Post,
+                path: "/v1/chat/completions".into(),
+                headers: vec![
+                    ("host".into(), "localhost".into()),
+                    (
+                        "content-type".into(),
+                        "application/json; charset=utf-8".into(),
+                    ),
+                ],
+                body: body.into_bytes(),
+            })
+            .await;
+
+        assert_eq!(form_post.status, 415);
+        assert!(form_post.body.contains("unsupported_media_type"));
+        assert_eq!(missing_content_type.status, 415);
+        assert_eq!(json_post.status, 200);
+    }
+
+    #[tokio::test]
+    async fn proxy_chat_forwards_unknown_request_fields_to_provider() {
+        use async_trait::async_trait;
+        use confidential_inference_openai::EmbeddingsResponse;
+        use confidential_inference_sdk::providers::{
+            DemoProvider, EvidenceRequest, ProviderAdapter, ProviderChatRequest,
+            ProviderEmbeddingsRequest, Result as ProviderResult, RouteDefinition,
+        };
+
+        struct RecordingDemoProvider {
+            inner: DemoProvider,
+            bodies: Arc<Mutex<Vec<serde_json::Value>>>,
+        }
+
+        #[async_trait]
+        impl ProviderAdapter for RecordingDemoProvider {
+            fn provider_id(&self) -> &str {
+                self.inner.provider_id()
+            }
+            fn routes(&self) -> Vec<RouteDefinition> {
+                self.inner.routes()
+            }
+            async fn fetch_evidence(
+                &self,
+                route: &RouteDefinition,
+                request: &EvidenceRequest,
+            ) -> ProviderResult<Vec<u8>> {
+                self.inner.fetch_evidence(route, request).await
+            }
+            async fn chat(
+                &self,
+                route: &RouteDefinition,
+                request: ProviderChatRequest,
+            ) -> ProviderResult<ChatCompletionResponse> {
+                self.bodies
+                    .lock()
+                    .unwrap()
+                    .push(request.fixture_decrypted_body(route)?);
+                self.inner.chat(route, request).await
+            }
+            async fn embeddings(
+                &self,
+                route: &RouteDefinition,
+                request: ProviderEmbeddingsRequest,
+            ) -> ProviderResult<EmbeddingsResponse> {
+                self.inner.embeddings(route, request).await
+            }
+        }
+
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let provider = RecordingDemoProvider {
+            inner: DemoProvider::valid(),
+            bodies: bodies.clone(),
+        };
+        let client = ConfidentialInference::builder()
+            .with_demo_provider()
+            .with_provider(provider)
+            .build()
+            .await
+            .unwrap();
+        let proxy =
+            ConfidentialInferenceProxy::from_config(client, ProxyConfig::default()).unwrap();
+        let body = serde_json::json!({
+            "model": "gpt-oss-120b",
+            "messages": [{"role": "user", "content": "forward extra fields"}],
+            "tools": [{"type": "function", "function": {"name": "lookup"}}],
+            "tool_choice": "auto",
+            "response_format": {"type": "json_object"},
+            "stop": ["\n"],
+            "top_p": 0.5
+        });
+
+        let response = proxy
+            .handle(ProxyHttpRequest::post_json(
+                "/v1/chat/completions",
+                serde_json::to_vec(&body).unwrap(),
+            ))
+            .await;
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        let sent = bodies
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("provider received a request");
+        assert_eq!(sent["tools"], body["tools"]);
+        assert_eq!(sent["tool_choice"], "auto");
+        assert_eq!(sent["response_format"], body["response_format"]);
+        assert_eq!(sent["stop"], body["stop"]);
+        assert_eq!(sent["top_p"], 0.5);
+    }
+
+    #[tokio::test]
+    async fn proxy_chat_rejects_streaming_requests() {
+        let proxy = demo_proxy().await;
+        let response = proxy
+            .handle(ProxyHttpRequest::post_json(
+                "/v1/chat/completions",
+                serde_json::json!({
+                    "model": "gpt-oss-120b",
+                    "messages": [{"role": "user", "content": "stream"}],
+                    "stream": true
+                })
+                .to_string(),
+            ))
+            .await;
+
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("streaming_not_supported"));
+    }
+
+    #[test]
+    fn reason_phrase_covers_every_status_the_proxy_emits() {
+        assert_eq!(reason_phrase(200), "OK");
+        assert_eq!(reason_phrase(204), "No Content");
+        assert_eq!(reason_phrase(400), "Bad Request");
+        assert_eq!(reason_phrase(401), "Unauthorized");
+        assert_eq!(reason_phrase(403), "Forbidden");
+        assert_eq!(reason_phrase(404), "Not Found");
+        assert_eq!(reason_phrase(405), "Method Not Allowed");
+        assert_eq!(reason_phrase(408), "Request Timeout");
+        assert_eq!(reason_phrase(409), "Conflict");
+        assert_eq!(reason_phrase(415), "Unsupported Media Type");
+        assert_eq!(reason_phrase(500), "Internal Server Error");
+        assert_eq!(reason_phrase(502), "Bad Gateway");
+        assert_eq!(reason_phrase(503), "Service Unavailable");
+        assert_ne!(reason_phrase(599), "OK");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn proxy_request_read_times_out_and_responds_408() {
+        let proxy = demo_proxy().await;
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client_stream = TcpStream::connect(address).await.unwrap();
+        client_stream
+            .write_all(b"POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\n")
+            .await
+            .unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let handler = tokio::spawn(async move { handle_connection(proxy, server_stream).await });
+
+        let mut response = Vec::new();
+        client_stream.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8(response).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 408 Request Timeout"));
+        assert!(response.contains("request_timeout"));
+        handler.await.unwrap().unwrap();
     }
 }

@@ -33,6 +33,7 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 const ISSUER: &str = "operator-pinned-observed";
 const PRIVATE_KEY_FILE: &str = "operator-ed25519.key";
@@ -162,9 +163,9 @@ fn optional_number(
 
 fn keygen(out: &Path) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(out)?;
-    let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed)?;
-    let pair = KeyPair::from_seed(Seed::new(seed));
+    let mut seed = Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut *seed)?;
+    let pair = KeyPair::from_seed(Seed::new(*seed));
     let key_id = format!(
         "operator-ed25519-{}",
         &URL_SAFE_NO_PAD.encode(pair.pk.as_ref())[..12]
@@ -176,11 +177,16 @@ fn keygen(out: &Path) -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[cfg(windows)]
+    eprintln!(
+        "warning: {} is not access-restricted on Windows; protect {} manually",
+        PRIVATE_KEY_FILE,
+        out.display()
+    );
     use std::io::Write;
     let mut private_file = options.open(out.join(PRIVATE_KEY_FILE))?;
-    private_file.write_all(&seed)?;
+    private_file.write_all(&*seed)?;
     private_file.sync_all()?;
-    seed.fill(0);
     let entry = PublicKeyEntry {
         signer: ISSUER.into(),
         key_id,
@@ -288,12 +294,12 @@ async fn verified_chutes_measurement(
 }
 
 fn load_signing_key(key_dir: &Path) -> Result<(KeyPair, PublicKeyEntry), Box<dyn Error>> {
-    let seed_bytes = fs::read(key_dir.join(PRIVATE_KEY_FILE))?;
-    let seed: [u8; 32] = seed_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| "operator private key must be a 32-byte Ed25519 seed")?;
-    let pair = KeyPair::from_seed(Seed::new(seed));
+    // Reads the seed straight into zeroing memory; KeyPair's SecretKey wipes
+    // itself on Drop (ed25519-compact), so no un-wiped secret copy remains.
+    use std::io::Read;
+    let mut seed = Zeroizing::new([0u8; 32]);
+    fs::File::open(key_dir.join(PRIVATE_KEY_FILE))?.read_exact(&mut *seed)?;
+    let pair = KeyPair::from_seed(Seed::new(*seed));
     let entry: PublicKeyEntry = serde_json::from_slice(&fs::read(key_dir.join(PUBLIC_KEY_FILE))?)?;
     if entry.public_key_base64url != URL_SAFE_NO_PAD.encode(pair.pk.as_ref()) {
         return Err("public key entry does not match the operator private key".into());
@@ -323,7 +329,11 @@ fn now_epoch_ms() -> Result<u64, Box<dyn Error>> {
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>> {
-    fs::write(path, serde_json::to_vec_pretty(value)?)?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp_path = PathBuf::from(tmp);
+    fs::write(&tmp_path, serde_json::to_vec_pretty(value)?)?;
+    fs::rename(&tmp_path, path)?;
     println!("wrote {}", path.display());
     Ok(())
 }
@@ -378,9 +388,11 @@ async fn pin_chutes(options: PinOptions) -> Result<(), Box<dyn Error>> {
     ProviderCompatibilityMatrix::bundled()?.validate_registry_routes(&registry)?;
 
     let reference_values = generate_chutes_live_reference_values(ChutesLiveReferenceValuesInput {
-        version,
+        version: version.clone(),
         issuer: ISSUER.into(),
         valid_from: now,
+        revocation_epoch: 0,
+        minimum_acceptable_version: version,
         valid_until: format_utc_timestamp_millis(valid_until_epoch_ms),
         valid_until_epoch_ms,
         canonical_model: options.canonical_model.clone(),
@@ -463,13 +475,14 @@ async fn pin_chutes(options: PinOptions) -> Result<(), Box<dyn Error>> {
             Err(other) => return Err(other.into()),
         };
         println!("smoke chat verdict: {:?}", result.verdict.status);
+        let choice = result
+            .response
+            .choices
+            .first()
+            .ok_or("smoke chat returned no choices")?;
         println!(
             "smoke chat response: {}",
-            result.response.choices[0]
-                .message
-                .content
-                .text()
-                .unwrap_or_default()
+            choice.message.content.text().unwrap_or_default()
         );
     }
     Ok(())
@@ -735,13 +748,14 @@ async fn pin_tinfoil(options: PinOptions) -> Result<(), Box<dyn Error>> {
             .send()
             .await?;
         println!("smoke chat verdict: {:?}", result.verdict.status);
+        let choice = result
+            .response
+            .choices
+            .first()
+            .ok_or("smoke chat returned no choices")?;
         println!(
             "smoke chat response: {}",
-            result.response.choices[0]
-                .message
-                .content
-                .text()
-                .unwrap_or_default()
+            choice.message.content.text().unwrap_or_default()
         );
     }
     Ok(())
@@ -800,5 +814,19 @@ mod tinfoil_pin_tests {
         let profile = matrix.provider("tinfoil").unwrap();
         assert!(profile.route_execution_status.allows_chat_execution());
         assert_eq!(profile.api_base_url, TINFOIL_API_BASE_URL);
+    }
+
+    #[test]
+    fn write_json_replaces_existing_artifact_atomically() {
+        let dir = std::env::temp_dir().join(format!("trust-cli-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("artifact.json");
+        write_json(&path, &serde_json::json!({"v": 1})).unwrap();
+        write_json(&path, &serde_json::json!({"v": 2})).unwrap();
+
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["v"], 2);
+        assert!(!dir.join("artifact.json.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

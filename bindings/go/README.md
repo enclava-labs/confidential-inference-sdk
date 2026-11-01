@@ -25,9 +25,15 @@ cd bindings/go
 go test
 ```
 
-The binding searches the workspace `target/debug` and `target/release`
-directories. Set `CONFIDENTIAL_INFERENCE_FFI_LIBRARY` to an explicit shared
-library path when embedding it elsewhere, or pass `WithLibraryPath`.
+The binding searches the workspace `target/release` and `target/debug`
+directories (release first; the working directory is never searched). Set
+`CONFIDENTIAL_INFERENCE_FFI_LIBRARY` to an explicit shared library path when
+embedding it elsewhere, or pass `WithLibraryPath`; an explicit path is
+exclusive and must exist.
+
+This module is tagged `bindings/go/vX.Y.Z`. Consumers fetching it from the
+Go module cache have no repository `target/` tree — they MUST set
+`CONFIDENTIAL_INFERENCE_FFI_LIBRARY` or use `WithLibraryPath`.
 
 The binding requires FFI ABI version 1 and rejects libraries reporting a different version.
 
@@ -39,14 +45,16 @@ Run this after building the FFI library:
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 
 	confidentialinference "github.com/enclava-labs/confidential-inference-sdk/bindings/go"
 )
 
 func main() {
-	// nil config installs the offline demo provider.
-	client, err := confidentialinference.NewClient(nil)
+	// Explicit demo opt-in: demo_provider defaults to false and a nil/empty
+	// config fails closed with trusted_signing_keys_required.
+	client, err := confidentialinference.NewClient(json.RawMessage(`{"demo_provider":true}`))
 	if err != nil {
 		panic(err)
 	}
@@ -108,12 +116,17 @@ code and `Code`/`Message` carry the Rust error envelope. FFI calls run on a
 locked OS thread so the thread-local `last_error` is read on the thread that
 produced it.
 
-`nil` config selects the offline/demo mode: it installs the demo provider and
-trusts the bundled fixture signing keys for the bundled artifacts only.
+`nil` config fails closed (`demo_provider` defaults to `false`): the offline
+demo mode requires an explicit `{"demo_provider":true}` opt-in. It installs
+the demo provider and trusts the bundled fixture signing keys for the
+bundled artifacts only.
+
+Clients create a private Tokio runtime. Create them **after** `fork()`:
+handles used in a forked child fail with `client_used_after_fork`.
 
 For production, use `NewConfiguredClient` with an exclusive operator public
 key and signed envelopes. The Go `Config` fields map directly to the FFI
-JSON names: `DemoProvider` (`*bool`, omitted for the demo default),
+JSON names: `DemoProvider` (`*bool`, omitted means `false` — demo is opt-in),
 `TrustedEd25519SigningKeys`, `APIKeys` (environment reference or inline
 `APIKeyConfig`), `AllowInlineAPIKeys`, `Registry`, `ReferenceValues`,
 `CompatibilityMatrix`, and `Routing`. Keep provider credentials in environment

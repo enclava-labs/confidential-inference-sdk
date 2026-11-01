@@ -26,8 +26,11 @@ flate2.workspace = true
 getrandom.workspace = true
 hkdf = "0.13"
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
-reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "json", "query", "stream"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "query", "stream"] }
 rustls = { version = "0.23.4", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
+asn1_der = "0.7.7"
+x509-cert.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -40,3 +43,6 @@ zeroize.workspace = true
 ed25519-compact = { version = "2.1.1", default-features = false, features = ["std"] }
 ring = "0.17"
 tokio-rustls = { version = "0.26", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

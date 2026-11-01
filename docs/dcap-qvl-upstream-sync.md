@@ -47,7 +47,7 @@ cargo test -p confidential-inference-attestation dcap_tdx_malformed_corpus --loc
 cargo test -p confidential-inference-attestation dcap_tdx_mutation_sweep --locked
 cargo test --workspace --locked
 cargo deny check
-cargo audit --ignore RUSTSEC-2023-0071
+cargo audit
 ```
 
 Tests are necessary but not sufficient for a production verifier claim. A

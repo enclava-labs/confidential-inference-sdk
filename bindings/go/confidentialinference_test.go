@@ -131,6 +131,10 @@ func embeddingsRequest(model string) map[string]any {
 	return map[string]any{"model": model, "input": "hello"}
 }
 
+// demoConfig explicitly opts into the offline demo provider (nil config now
+// fails closed — demo_provider defaults to false).
+var demoConfig = json.RawMessage(`{"demo_provider":true}`)
+
 func asError(t *testing.T, err error) *Error {
 	t.Helper()
 	var ffiErr *Error
@@ -163,7 +167,7 @@ func TestChatReturnsVerifiedResponse(t *testing.T) {
 		t.Fatalf("parse verdict fixture: %v", err)
 	}
 
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -195,7 +199,7 @@ func TestChatReturnsVerifiedResponse(t *testing.T) {
 	}
 }
 func TestEmbeddingsReturnsResponse(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -210,7 +214,7 @@ func TestEmbeddingsReturnsResponse(t *testing.T) {
 }
 
 func TestVerifyReturnsRouteVerdict(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -226,7 +230,7 @@ func TestVerifyReturnsRouteVerdict(t *testing.T) {
 }
 
 func TestResponseReturnsShimObject(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -244,7 +248,7 @@ func TestResponseReturnsShimObject(t *testing.T) {
 	}
 }
 func TestResponseManageReturnsStructuredUnsupportedOperationError(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -262,7 +266,7 @@ func TestResponseManageReturnsStructuredUnsupportedOperationError(t *testing.T) 
 }
 
 func TestModelDiscoveryAndConfidentialityCatalog(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -285,7 +289,7 @@ func TestModelDiscoveryAndConfidentialityCatalog(t *testing.T) {
 }
 
 func TestActivePolicyAndTrustArtifacts(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -310,7 +314,7 @@ func TestActivePolicyAndTrustArtifacts(t *testing.T) {
 }
 
 func TestStreamFailsClosedForNonStreamingRoute(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -333,7 +337,7 @@ func TestStreamFailsClosedForNonStreamingRoute(t *testing.T) {
 }
 
 func TestClosedClientRejectsCalls(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -348,7 +352,7 @@ func TestClosedClientRejectsCalls(t *testing.T) {
 }
 
 func TestClientCloseWithLiveStreamFailsAndPreservesHandle(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -378,7 +382,7 @@ func TestClientCloseWithLiveStreamFailsAndPreservesHandle(t *testing.T) {
 }
 
 func TestStreamCloseWhileNextInFlightRefusesAndPreservesHandle(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -434,7 +438,7 @@ func TestStreamCloseWhileNextInFlightRefusesAndPreservesHandle(t *testing.T) {
 }
 
 func TestClientCloseWhileCallInFlightRefusesAndPreservesHandle(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -487,7 +491,7 @@ func TestClientCloseWhileCallInFlightRefusesAndPreservesHandle(t *testing.T) {
 }
 
 func TestFailedInferenceSurfacesNativeErrorCode(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -509,7 +513,7 @@ func TestFailedInferenceSurfacesNativeErrorCode(t *testing.T) {
 // SDK operation failures must surface as errors, never as a successful result
 // map, and must say whether the provider may have processed the request.
 func TestOperationFailureIsErrorWithDispatchClassification(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -534,7 +538,7 @@ func TestOperationFailureIsErrorWithDispatchClassification(t *testing.T) {
 	}
 }
 func TestEmbeddingsOperationFailureClassified(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -553,7 +557,7 @@ func TestEmbeddingsOperationFailureClassified(t *testing.T) {
 }
 
 func TestConcurrentFailuresRetainCallSpecificErrors(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -593,7 +597,7 @@ func TestConcurrentFailuresRetainCallSpecificErrors(t *testing.T) {
 }
 
 func TestConcurrentInferenceCallsAllResolve(t *testing.T) {
-	client, err := NewClient(nil)
+	client, err := NewClient(demoConfig)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -614,5 +618,40 @@ func TestConcurrentInferenceCallsAllResolve(t *testing.T) {
 		if err := <-results; err != nil {
 			t.Fatalf("chat %d: %v", i, err)
 		}
+	}
+}
+
+func TestNilConfigFailsClosedWithoutDemoOptIn(t *testing.T) {
+	for _, config := range []json.RawMessage{nil, {}, json.RawMessage(`{}`)} {
+		_, err := NewClient(config)
+		if err == nil {
+			t.Fatalf("config %q created a client without demo opt-in", string(config))
+		}
+		if asError(t, err).Code != "trusted_signing_keys_required" {
+			t.Fatalf("config %q: unexpected error %v", string(config), err)
+		}
+	}
+}
+
+func TestExplicitLibraryPathIsExclusiveAndMustExist(t *testing.T) {
+	missing := filepath.Join(repoRoot(t), "target", "release", "no_such_lib_ffi.so")
+	if _, err := resolveLibraryPath(missing); err == nil {
+		t.Fatal("missing explicit path did not fail")
+	}
+	t.Setenv("CONFIDENTIAL_INFERENCE_FFI_LIBRARY", missing)
+	if _, err := resolveLibraryPath(""); err == nil {
+		t.Fatal("missing env path did not fail")
+	}
+	// An existing explicit path resolves to an absolute path.
+	tmp := filepath.Join(t.TempDir(), "libconfidential_inference_ffi.so")
+	if err := os.WriteFile(tmp, []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveLibraryPath(tmp)
+	if err != nil {
+		t.Fatalf("existing explicit path: %v", err)
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("explicit path not absolute: %s", got)
 	}
 }

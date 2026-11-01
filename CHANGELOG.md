@@ -10,6 +10,99 @@ These changes break the public API, the FFI client configuration, the verdict
 JSON check set, and existing test expectations. That is acceptable because
 `0.1.0` has never been tagged or published and there are no downstream users.
 
+#### Release-readiness review fixes
+
+Security and trust decisions:
+
+- `dstack_app_e2ee` evidence and the structured Tinfoil schema
+  (`confidential-inference.tinfoil-tls-evidence.v1`) are claims-only: no quote
+  signature is verified. Like RedPill `chutes_e2ee`, a required CPU TEE now
+  yields `cpu_tee: failed` (denied under enforce); the claimed measurement is
+  reported separately as `cpu_measurement_reference`.
+- `fixture_*` evidence families are honored only with `with_demo_provider()`;
+  outside demo mode such registry routes are dropped with a warning.
+- Under `enforce`, a required check that is `not_supported` or `unknown` now
+  blocks the request (previously only `failed` checks did).
+- Provider requests carry the digest of the evidence their verdict verified
+  (`ProviderChatRequest::with_verified_evidence_digest`). Tinfoil, NEAR and
+  Chutes adapters key fetched TLS/instance state by that digest, so a later or
+  concurrent fetch (including one that failed verification) can no longer
+  change the key a request is sent to.
+- Tinfoil and NEAR pin the attested leaf SPKI inside the TLS handshake: a
+  mismatch fails before any request bytes are sent (`key_rotation`, one
+  refresh and retry). A mismatch seen only after a response is now dispatch
+  `unknown` and is never retried or failed over. SDK HTTP clients no longer
+  follow redirects.
+- NEAR now pins `mr_td`, `rtmr0-2` and `mr_config_id`
+  (`near_live_tee_measurement`); `VerifiedTdxQuote.tee_measurement` includes
+  `rtmr0-3`. Tinfoil TDX reference values must be regenerated.
+- Artifact versions compare naturally (`compare_artifact_versions`:
+  `1.9.0 < 1.10.0`) for registry, reference-value and pin rollback checks.
+- `verify_privatemode_contrast_active_evidence` requires the expected manifest
+  sha256 and compares it.
+- NVIDIA NRAS tokens must carry `exp`; claims-only verdict lifetimes are
+  bounded by wall-clock time plus the policy TTL.
+- Malformed provider strings (multi-byte timestamps, report data, TLS hashes,
+  Contrast manifests) return errors instead of panicking.
+- FFI and all bindings: `demo_provider` defaults to `false`; NULL/empty
+  configs fail with `trusted_signing_keys_required`. Config parse errors no
+  longer echo values (inline API keys); inline keys and the raw config are
+  zeroized; a client used after `fork()` returns `client_used_after_fork`.
+- Python, Node and Go bindings load only the explicitly configured library
+  (path or `CONFIDENTIAL_INFERENCE_FFI_LIBRARY`) when one is given and never
+  search the current directory.
+- Proxy: with CORS disabled, requests carrying `Origin` get 403; loopback mode
+  requires a loopback `Host`; POST bodies must be `application/json`; request
+  reads time out after 30 s (408); accept errors no longer stop the server.
+- `ctutils` 0.4.7 (RUSTSEC-2026-0385). Registry source labels drop query
+  strings and fragments. `live_conformance.py` never forwards credentials on
+  redirects.
+
+Reliability and API:
+
+- Cancelling a verification no longer wedges its route (single-flight owner
+  and waiter drop guards).
+- Inference HTTP uses a 30 s connect and 600 s idle-read timeout instead of a
+  30 s total timeout, so long completions and streams finish; evidence fetches
+  keep a 30 s total timeout.
+- TDX collateral is cached per platform (FMSPC + PCK CA, at most 256 entries,
+  one file per platform), so nonce-bearing quotes stop refetching collateral.
+- Send paths verify once per request (was twice); the NRAS JWT verifier is
+  cached for one hour; failed AMD KDS VCEK lookups are cached for five minutes;
+  PCCS responses are size-capped.
+- No process-wide rustls `CryptoProvider` is installed; SDK clients use
+  `confidential_inference_providers::reqwest_client_builder()`.
+- Non-streaming paths reject `stream: true`: `streaming_not_supported` when the
+  route cannot stream, `streaming_path_required` otherwise. A malformed stream
+  item ends the stream with an error.
+- `ResponseCreateRequest` rejects unknown fields; embeddings reject empty input
+  (`missing_input`) and non-`float` `encoding_format` before attestation.
+- `verify_route(provider, "")` and `manage_response` pick an active,
+  executable route. `compatibility_matrix_envelope` installs an operator-signed
+  matrix; the bundled matrix is compiled-in SDK code. Demo fallback accepts
+  only the bundled envelope. `confidential_inference_sdk::providers`
+  re-exports the adapter API.
+- Proxy chat forwards request bodies losslessly (`tools`, `response_format`,
+  `stop`, ...) and returns 400 for `stream: true`. Removed the unused
+  `allow_provider_credentials_from_unauthenticated_callers` option and
+  `ProxySecurityDefaults`.
+- Trust CLI: artifacts are written atomically, signing seeds are zeroized, and
+  an empty smoke-chat response is an error. Generator inputs take
+  `revocation_epoch` and `minimum_acceptable_version`.
+- Bindings: Python `embeddings_async`/`response_manage_async`/`models_async`;
+  Python streams keep their client alive; Go streams no longer busy-spin, round
+  sub-millisecond timeouts up and always close; Go no longer unloads the
+  library on `Close`.
+- Exact version pins removed (`reqwest`, `zeroize`, `zeroize_derive`); LICENSE
+  ships in every crate and binding package.
+
+Release tooling: fuzz targets for SDK parsers (built with nightly in CI),
+`.gitattributes` for LF fixtures, packaging without `[patch]` overrides
+(`--require-clean` in CI), `--check` flags that cannot pass vacuously, SBOMs
+without absolute paths, and a production release gate that verifies
+operator-signed matrices and a live-conformance plan limited to Tinfoil and
+Chutes.
+
 #### Artifact trust is explicit
 
 - `default_trusted_signing_keys` is renamed to
