@@ -11,9 +11,14 @@ mod error;
 mod evidence;
 mod gpu;
 mod policy;
+mod ppq;
+mod redpill;
 mod reference_values;
 mod sev_snp;
 mod signature;
+mod sigstore;
+mod sigstore_rekor;
+mod sigstore_sct;
 mod tcb;
 mod tdx;
 mod tinfoil;
@@ -35,7 +40,8 @@ pub use error::{AttestationError, Result};
 pub use evidence::{
     parse_dstack_workload_images, ArtifactDigest, ChannelBindingEvidence, ChutesE2eeEvidence,
     ChutesLiveEvidence, DstackEvidence, EvidenceHardware, FixtureEvidence, NearLiveEvidence,
-    NvidiaGpuAttestationEvidence, TinfoilLiveCaptureEvidence, TinfoilTlsEvidence, WorkloadImage,
+    NvidiaGpuAttestationEvidence, PpqEhbpLiveEvidence, RedpillAciLiveEvidence,
+    TinfoilLiveCaptureEvidence, TinfoilTlsEvidence, WorkloadImage,
 };
 pub use gpu::{
     verify_nvidia_nras_jwt_with_jwks_json, FailClosedGpuAttestationVerifier,
@@ -47,6 +53,11 @@ pub use policy::{
     EnforcementMode, FreshnessPolicy, GpuTeeKind, GpuTeeRequirement, HardwareRequirement, Millis,
     ModelBindingRequirement, ProvenanceRequirement, ResponseIntegrityRequirement,
     StaleVerdictPolicy, VerificationPolicy,
+};
+pub use ppq::{parse_ppq_ehbp_evidence, verify_ppq_ehbp_quote, ParsedPpqEvidence};
+pub use redpill::{
+    redpill_aci_jcs_digest, redpill_aci_quote_bytes, redpill_aci_tee_measurement,
+    verify_redpill_aci_capture, verify_redpill_aci_signature, VerifiedRedpillAciCapture,
 };
 pub use reference_values::{
     compare_artifact_versions, ProviderReference, ReferenceSignature, ReferenceValuesEnvelope,
@@ -63,6 +74,7 @@ pub use signature::{
     DEMO_SIGNING_PUBLIC_KEY_BASE64URL, PHASE2_FIXTURE_SIGNING_KEY_ID,
     PHASE2_FIXTURE_SIGNING_PUBLIC_KEY_BASE64URL,
 };
+pub use sigstore::{verify_tinfoil_release_measurement, verify_tinfoil_sigstore_bundle};
 pub use tcb::{
     verify_dstack_tcb_compose_hash, DstackTcbInfo, TcbComposeHashBinding, TdxQuoteMeasurements,
 };
@@ -96,6 +108,7 @@ pub use verifier::{
     verify_evidence, verify_evidence_with_attestation_verifiers,
     verify_evidence_with_gpu_attestation_verifier, verify_evidence_with_tinfoil_quote_verifier,
     verify_fixture_evidence, verify_near_live_evidence_with_attestation_verifiers,
+    verify_ppq_ehbp_live_evidence_with_attestation_verifiers,
     verify_tinfoil_live_capture_with_quote_verifier, verify_tinfoil_tls_evidence,
     verify_tinfoil_tls_evidence_with_quote_verifier, VerificationRequest,
 };

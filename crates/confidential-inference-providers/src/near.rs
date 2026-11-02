@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 use crate::http::{checked_response_bytes, https_or_test_loopback, require_tls_peer, LiveTlsPeer};
 use crate::nvidia::NvidiaNrasRemoteClient;
 use crate::provider::EvidenceStateStore;
-use crate::tls::{reqwest_client_builder, CONNECT_TIMEOUT, FETCH_REQUEST_TIMEOUT, READ_TIMEOUT};
+use crate::tls::FETCH_REQUEST_TIMEOUT;
 use crate::{
     EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderError,
     ProviderRequestConfidentiality, Result, RouteDefinition,
@@ -56,37 +56,32 @@ impl NearHttpProvider {
         routes: Vec<RouteDefinition>,
         api_key: impl Into<String>,
     ) -> Result<Self> {
-        let client = reqwest_client_builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
-            .tls_info(true)
-            .build()
-            .map_err(|error| ProviderError::Http(error.to_string()))?;
-        Ok(Self::with_clients(
+        Self::with_transport(
             provider_id,
             routes,
             api_key.into(),
-            client,
+            Default::default(),
             Some(NvidiaNrasRemoteClient::with_default_http()?),
-        ))
+        )
     }
 
-    pub fn with_clients(
+    pub fn with_transport(
         provider_id: impl Into<String>,
         routes: Vec<RouteDefinition>,
         api_key: String,
-        client: reqwest::Client,
+        transport: crate::AttestedHttpTransport,
         nras_client: Option<NvidiaNrasRemoteClient>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let client = transport.evidence_client()?;
+        Ok(Self {
             provider_id: provider_id.into(),
             routes,
             api_key: NearApiKey::new(api_key),
             client,
             nras_client,
             attested_tls: Arc::new(Mutex::new(EvidenceStateStore::new())),
-            pinned_clients: crate::tls::PinnedSpkiClientCache::new(),
-        }
+            pinned_clients: crate::tls::PinnedSpkiClientCache::new(transport),
+        })
     }
 
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

@@ -12,8 +12,8 @@ provider route.
 | Policy enforcement | Fail-closed route selection and send-time revalidation |
 | Trust artifacts | Signed provider registries, compatibility profiles, and reference values |
 | Intel TDX/DCAP | Offline quote verification with caller-supplied collateral |
-| Provider evidence | dstack, Chutes/Redpill (app-E2EE only; the TDX quote signature is not verified on this family), Chutes live, NEAR live, Tinfoil, and Privatemode adapter and verifier paths |
-| Request protection | SDK-managed app-E2EE plus Chutes adapter-managed ML-KEM-768/ChaCha20-Poly1305 |
+| Provider evidence | dstack, Chutes/Redpill (app-E2EE only; the TDX quote signature is not verified on this family), Chutes live, NEAR live, Tinfoil, PPQ private (Tinfoil-enclave bundle), RedPill ACI (gateway + model-instance session), and Privatemode adapter and verifier paths |
+| Request protection | SDK-managed app-E2EE, Chutes adapter-managed ML-KEM-768/ChaCha20-Poly1305, PPQ adapter-managed EHBP (HPKE X25519/HKDF-SHA256/AES-256-GCM), and SPKI-pinned TEE-terminated TLS (Tinfoil, RedPill, NEAR) |
 | Response integrity | Verdict and receipt binding where the selected route supports it |
 | OpenAI API shapes | Chat Completions and a text-only Responses compatibility path |
 | Integrations | Rust, C ABI, Python, Node.js, and proxy surfaces |
@@ -68,20 +68,36 @@ CI fixture signing key cannot satisfy that production gate.
   the operator pin marks model binding unsupported and opts into the
   provider-conditional policy.
 - The NEAR verifier is implemented, but its model-direct endpoint
-  (`gpt-oss-120b.completions.near.ai`) currently resets the TLS handshake;
-  see [ga-readiness.md](ga-readiness.md) GA-08.
+  (`gpt-oss-120b.completions.near.ai`) still resets the TLS handshake, and the
+  `cloud-api.near.ai` gateway offers no per-instance binding (model signing
+  keys are shared across instances with different measurements); see
+  [ga-readiness.md](ga-readiness.md) GA-08.
 - The checked-in provider compatibility profiles include executable Chutes and
   NEAR transport profiles, but they are not substitutes for a signed live
   provider registry and signed deployment reference values.
-- Chutes and NEAR confidential streaming is not yet supported. Their live
-  adapters reject streaming instead of weakening the verified channel.
+- Streaming is live for operator-pinned Tinfoil routes only. Chutes, PPQ,
+  RedPill, and NEAR adapters reject streaming instead of weakening the
+  verified channel.
+- `pin tinfoil` and `pin ppq` check SNP measurements against Tinfoil's
+  Sigstore-signed release (TDX pins fail closed). `pin chutes` and
+  `pin redpill` pin observed measurements (trust on first use), and their
+  reference values expire after 7 days by default, so they need re-pinning.
+  PPQ and RedPill report model binding as unsupported. The PPQ bundle carries
+  no request nonce, so its freshness is bounded by the session evidence rather
+  than a per-request challenge. RedPill GPU evidence (NRAS) does not prove
+  CPU/GPU co-location, and the ACI gateway supersedes sessions every few
+  seconds: a request that loses three consecutive re-verified sessions fails
+  closed as `not_dispatched` (20/20 live chats succeeded, 3 on a second
+  attempt). `pin redpill` refuses composes that let the host provision root
+  SSH; RedPill's current gateway and model deployments do, so no RedPill pin
+  can be issued today (GA-22).
 - The live Chutes/NEAR conformance checks remain ignored local tests that load
   credentials from the process environment or the workspace `.env`; they are
   not run in CI.
 - Live provider routes require provider-issued trust artifacts and real evidence
   captures; the checked-in fixtures are not substitutes.
-- Confidential streaming is rejected for the current profiles rather than
-  silently weakening request or response guarantees.
+- Routes that require request or response encryption fail closed for
+  streaming rather than silently weakening request or response guarantees.
 - The Responses API support is a text-only compatibility shim over the same
   verified execution path.
 - The Python, Node.js, and Go bindings are source bindings over the Rust

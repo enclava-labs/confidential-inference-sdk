@@ -64,7 +64,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "e0b45c2707a7bb3187cafaf97ccae644d1fe7ca3ef9c79ce152ce49d280db84d",
+      "sha256": "9d68dc7b51e8f05c35068b2ea5b88d86b5fdd6896bfc1002fb055088a09bc826",
       "reason": "Exact upstream dependency resolution used by release verification."
     }
   ],

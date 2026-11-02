@@ -28,12 +28,13 @@ typedef struct ConfidentialInferenceFfiStream ConfidentialInferenceFfiStream;
 
 int confidential_inference_status(char **out_status_json);
 
+/* If the SDK was initialized before fork, the child must exec before using it.
+ * Inherited clients and streams are rejected and not freed in the child.
+ * Like other non-async-signal-safe libraries, no SDK call is safe between
+ * fork and exec in the child of a multithreaded process. */
 int confidential_inference_sdk_new(const char *config_json, ConfidentialInferenceFfiClient **out_client);
-/* sdk_free: CONFIDENTIAL_INFERENCE_FFI_BUSY only while live streams reference
- * the client (blocking calls are not counted — they hold Arc clones of the
- * shared state, so freeing stays memory-safe while they run). In a forked
- * child it releases the handle and leaks the runtime rather than dropping it;
- * create clients after fork. */
+/* sdk_free: CONFIDENTIAL_INFERENCE_FFI_BUSY while live streams reference
+ * the client (blocking calls hold Arc clones of the shared state). */
 int confidential_inference_sdk_free(ConfidentialInferenceFfiClient *client);
 
 int confidential_inference_chat_blocking(

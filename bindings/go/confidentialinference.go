@@ -300,6 +300,11 @@ type APIKeyConfig struct {
 	Inline string `json:"inline,omitempty"`
 }
 
+// VerdictStoreConfig selects the JSONL file to append verdict records to.
+type VerdictStoreConfig struct {
+	JSONLPath string `json:"jsonl_path"`
+}
+
 // Config mirrors the FFI ClientConfig schema. Envelopes and routing are raw
 // JSON to preserve the SDK's evolving signed-artifact schema.
 type Config struct {
@@ -311,6 +316,7 @@ type Config struct {
 	CompatibilityMatrix       json.RawMessage         `json:"compatibility_matrix,omitempty"`
 	Registry                  json.RawMessage         `json:"registry,omitempty"`
 	ReferenceValues           json.RawMessage         `json:"reference_values,omitempty"`
+	VerdictStore              *VerdictStoreConfig     `json:"verdict_store,omitempty"`
 	// Policy is the operator's VerificationPolicy JSON; enforce-mode only and
 	// rejected with the demo provider.
 	Policy json.RawMessage `json:"policy,omitempty"`

@@ -331,6 +331,75 @@ pub fn generate_tinfoil_live_reference_values(
     })
 }
 
+/// Combines individually validated live route inputs into one signed payload.
+pub fn generate_tinfoil_live_reference_values_for_routes(
+    inputs: Vec<TinfoilLiveReferenceValuesInput>,
+) -> Result<ReferenceValuesPayload> {
+    merge_live_reference_values(
+        inputs
+            .into_iter()
+            .map(generate_tinfoil_live_reference_values),
+    )
+}
+
+/// Combines individually validated Chutes route inputs into one signed payload.
+pub fn generate_chutes_live_reference_values_for_routes(
+    inputs: Vec<ChutesLiveReferenceValuesInput>,
+) -> Result<ReferenceValuesPayload> {
+    merge_live_reference_values(
+        inputs
+            .into_iter()
+            .map(generate_chutes_live_reference_values),
+    )
+}
+
+fn merge_live_reference_values(
+    mut payloads: impl Iterator<Item = Result<ReferenceValuesPayload>>,
+) -> Result<ReferenceValuesPayload> {
+    let mut result = payloads.next().ok_or_else(|| {
+        ProviderError::Compatibility("live reference values require at least one route".into())
+    })??;
+    for payload in payloads {
+        let payload = payload?;
+        if result.version != payload.version
+            || result.issuer != payload.issuer
+            || result.valid_from != payload.valid_from
+            || result.revocation_epoch != payload.revocation_epoch
+            || result.minimum_acceptable_version != payload.minimum_acceptable_version
+        {
+            return Err(ProviderError::Compatibility(
+                "live reference metadata does not match".into(),
+            ));
+        }
+        if payload.valid_until_epoch_ms < result.valid_until_epoch_ms {
+            result.valid_until_epoch_ms = payload.valid_until_epoch_ms;
+            result.valid_until = payload.valid_until;
+        }
+        for (name, provider) in payload.providers {
+            let target = result
+                .providers
+                .entry(name)
+                .or_insert_with(|| ProviderReference {
+                    accepted_measurements: Vec::new(),
+                    routes: BTreeMap::new(),
+                });
+            for (route_id, route) in provider.routes {
+                if target.routes.insert(route_id, route).is_some() {
+                    return Err(ProviderError::Compatibility(
+                        "duplicate live reference route".into(),
+                    ));
+                }
+            }
+            target
+                .accepted_measurements
+                .extend(provider.accepted_measurements);
+            target.accepted_measurements.sort();
+            target.accepted_measurements.dedup();
+        }
+    }
+    Ok(result)
+}
+
 fn require_app_e2ee_route(route: &RouteDefinition) -> Result<()> {
     if route.channel_binding_kind != ChannelBindingKind::AttestedAppE2ee {
         return Err(ProviderError::Compatibility(
@@ -697,6 +766,28 @@ mod tests {
             "qwen3-32b"
         );
     }
+    #[test]
+    fn tinfoil_multi_route_reference_values_validate_each_and_use_earliest_expiry() {
+        let first = input();
+        let mut second = input();
+        second.canonical_model = "second".into();
+        second.route.route_id = "tinfoil-live:second:second".into();
+        second.route.provider_model = "second".into();
+        second.verified_quote.attested_model = Some("second".into());
+        second.verified_quote.expires_at_epoch_ms -= 1000;
+        second.verified_quote.expires_at = "2098-12-31T23:59:59Z".into();
+        let payload =
+            generate_tinfoil_live_reference_values_for_routes(vec![first, second.clone()]).unwrap();
+        assert_eq!(payload.providers["tinfoil-live"].routes.len(), 2);
+        assert_eq!(
+            payload.valid_until_epoch_ms,
+            second.verified_quote.expires_at_epoch_ms
+        );
+        second.verified_quote.attested_model = Some("wrong".into());
+        assert!(generate_tinfoil_live_reference_values_for_routes(vec![input(), second]).is_err());
+        assert!(generate_tinfoil_live_reference_values_for_routes(vec![input(), input()]).is_err());
+    }
+
     #[test]
     fn tinfoil_live_reference_values_bind_verified_quote_to_route() {
         let payload = generate_tinfoil_live_reference_values(input()).unwrap();

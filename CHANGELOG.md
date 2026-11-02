@@ -10,6 +10,27 @@ These changes break the public API, the FFI client configuration, the verdict
 JSON check set, and existing test expectations. That is acceptable because
 `0.1.0` has never been tagged or published and there are no downstream users.
 
+#### Final PR review corrections
+
+- Native fork guards read handle fields under the lifetime registry lock.
+  Concurrent client/stream destruction retains in-flight state safely.
+  After SDK initialization, forked children must exec before SDK use; inherited
+  creation/use/free calls fail with `client_used_after_fork`.
+- Tinfoil, NEAR, and RedPill replace `with_client` with `with_transport` and
+  `AttestedHttpTransport`: reusable HTTP builder settings, TLS configuration,
+  and a certificate verifier apply to both evidence and pinned inference.
+  SPKI pinning, disabled redirects, and TLS metadata remain SDK-enforced.
+  Loopback TLS tests use trusted CA-signed leaves, not a verification bypass.
+- A concurrent failed AMD KDS lookup no longer replaces a successful VCEK cache
+  entry. Proxy accept retries back off on resource exhaustion and return
+  permanent errors instead of spinning.
+- Signing seeds must contain exactly 32 bytes. UTF-8 regression fixtures now
+  cross the guarded byte boundary.
+- Offline gates require Python, select the FFI library from the actual build
+  output, and run SBOM generation and validation. Release CLI examples use
+  the supported flags; Rust installation uses the existing `main` branch
+  until release tags are published.
+
 #### Release-readiness review fixes
 
 Security and trust decisions:
@@ -53,7 +74,7 @@ Security and trust decisions:
   search the current directory.
 - Proxy: with CORS disabled, requests carrying `Origin` get 403; loopback mode
   requires a loopback `Host`; POST bodies must be `application/json`; request
-  reads time out after 30 s (408); accept errors no longer stop the server.
+  reads time out after 30 s (408); transient accept errors are retried with backoff.
 - `ctutils` 0.4.7 (RUSTSEC-2026-0385). Registry source labels drop query
   strings and fragments. `live_conformance.py` never forwards credentials on
   redirects.
@@ -148,6 +169,62 @@ Chutes.
   that contain a required `not_supported` or `unknown` check.
 
 ### Added
+
+- Tinfoil streaming: `TinfoilHttpProvider::chat_stream` streams over the
+  client pinned to the verified leaf SPKI and re-checks the observed peer
+  before yielding a chunk; `pin tinfoil` signs streamable routes. Request
+  extras such as `stream_options.include_usage` reach the provider.
+- Streaming dispatch: provider failures before the first chunk keep their
+  real dispatch outcome (`rejected{status}`, `not_dispatched`, `unknown`)
+  instead of always `unknown`, and `streaming()` falls back to the next
+  streaming-capable candidate under the same rule as non-streaming sends
+  (`not_dispatched` or `rejected` 429/503). FFI stream `error` events carry
+  `dispatch` and `http_status`.
+- FFI, Go, and Node client configuration accept
+  `"verdict_store": {"jsonl_path": "<file>"}` (unknown subfields rejected),
+  backed by `JsonlVerdictStore`.
+- Trust CLI: `--model a,b --canonical-model x,y` pins several models into one
+  registry, reference-values envelope, matrix, and `operator-config.json`;
+  mixed Tinfoil attestation formats are rejected; smoke chat runs per model.
+- PPQ private live adapter (`PpqPrivateHttpProvider`, family `ppq_ehbp`) and
+  `pin ppq`: Tinfoil-enclave bundle with SEV-SNP (VCEK chained to the pinned
+  Genoa ARK) or TDX/DCAP quote verification, report data binding the enclave
+  TLS SPKI and HPKE key, attestation-document/HPKE certificate SANs, and EHBP
+  (HPKE X25519/HKDF-SHA256/AES-256-GCM) request/response encryption validated
+  against vectors from the Go reference. Non-streaming; the bundle carries no
+  request nonce and model binding is reported unsupported.
+- Sigstore-verified release pins: `pin tinfoil` and `pin ppq` verify Tinfoil's
+  release attestation offline against an embedded Sigstore public-good
+  trusted root (sha256 `6494e21e…6bc0b66`): Fulcio chain valid at the Rekor
+  integrated time, GitHub Actions issuer and repository identity pinned to
+  `tinfoilsh/confidential-model-router`, SCT, DSSE signature and subject
+  digest, Rekor SET, inclusion proof, and checkpoint. Every verified capture's
+  SNP measurement must equal the signed release measurement or nothing is
+  written; artifacts record `sigstore-verified-release`, repository, and
+  digest. TDX pins fail closed; there is no trust-on-first-use fallback for
+  these two providers. The trust CLI gains `reqwest` (workspace version).
+- RedPill ACI adapter (`RedpillHttpProvider`, family
+  `redpill_aci_verified_tls`) and `pin redpill`: DCAP-verified gateway quote
+  bound to a nonce-carrying ACI statement and the gateway TLS SPKI, a
+  content-addressed (RFC 8785 JCS) model-instance session with its own DCAP
+  quote and NVIDIA NRAS evidence for the route's model, dispatch over the
+  pinned gateway SPKI with `provider.aci_session_ids` forced to the verified
+  session, and signed receipts whose every upstream event must name that
+  session. Gateway and model measurements pin `mr_td`, RTMR0-2,
+  `mr_config_id`, and the compose-hash, app-id, and KMS key-provider from a
+  dstack event-log replay that must equal the DCAP-verified RTMR3 (raw RTMR3
+  varies per instance and is not pinned). `pin redpill` also requires
+  sha256(app_compose) to equal the replayed compose-hash and refuses composes
+  that let the host provision root SSH access (`DSTACK_ROOT_PUBLIC_KEY`,
+  `DSTACK_AUTHORIZED_KEYS`, `DSTACK_ROOT_PASSWORD`, `authorized_keys` from env
+  or `/dstack/user_config`); RedPill's current gateway and model composes do,
+  so they cannot be pinned. The newest listed session is used (30 s skew
+  allowed on its establishment time); a session's verification is reused only
+  while its id and evidence digest are still listed and before both the
+  session and its NRAS token expire. `412 session_not_accepted` (no inference
+  ran) is a key rotation with up to 3 fully re-verified attempts; other
+  providers keep one retry. Non-streaming; model binding reported
+  unsupported. Adds the `serde_json_canonicalizer` dependency.
 
 - Live Tinfoil SEV-SNP verification now validates Genoa VCEK/ASK/ARK trust,
   report signatures, TCB and guest policy, and TLS SPKI report-data binding.

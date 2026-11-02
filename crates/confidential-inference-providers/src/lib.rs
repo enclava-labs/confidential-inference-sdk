@@ -5,13 +5,16 @@ mod contrast;
 mod dcap_tdx;
 mod demo;
 mod dstack;
+mod ehbp;
 mod http;
 mod near;
 mod nvidia;
 mod phase2_fixtures;
+mod ppq;
 mod provider;
 #[cfg(test)]
 mod provider_evidence_corpus;
+mod redpill;
 mod reference_values_generator;
 mod registry;
 mod sev_snp;
@@ -51,6 +54,7 @@ pub use nvidia::{
     NVIDIA_NRAS_ATTEST_GPU_V4_URL, NVIDIA_NRAS_CLAIMS_VERSION, NVIDIA_NRAS_JWKS_URL,
 };
 pub use phase2_fixtures::{TinfoilFixtureProvider, VeniceFixtureProvider};
+pub use ppq::PpqPrivateHttpProvider;
 pub use provider::{
     DispatchOutcome, EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderChatStream,
     ProviderEmbeddingsRequest, ProviderError, ProviderRequestConfidentiality,
@@ -58,10 +62,12 @@ pub use provider::{
     SdkAppE2eeSecretKey, SdkAppE2eeSession, SdkEncryptedChatEnvelope,
     SdkEncryptedChatResponseEnvelope, SDK_APP_E2EE_ALG,
 };
+pub use redpill::RedpillHttpProvider;
 pub use reference_values_generator::{
     generate_app_e2ee_reference_values, generate_chutes_live_reference_values,
-    generate_tinfoil_live_reference_values, AppE2eeReferenceEvidence, AppE2eeReferenceValuesInput,
-    ChutesLiveReferenceValuesInput, TinfoilLiveReferenceValuesInput,
+    generate_chutes_live_reference_values_for_routes, generate_tinfoil_live_reference_values,
+    generate_tinfoil_live_reference_values_for_routes, AppE2eeReferenceEvidence,
+    AppE2eeReferenceValuesInput, ChutesLiveReferenceValuesInput, TinfoilLiveReferenceValuesInput,
 };
 pub use registry::{
     EncryptionRequirement, ModelAliasCase, ModelAliasMatrix, ModelAliasMatrixEnvelope,
@@ -70,7 +76,7 @@ pub use registry::{
     RegistryModel, RouteDefinition, RouteLifecycle, SourceSyncRun, StreamingSupport,
 };
 
-pub use tls::reqwest_client_builder;
+pub use tls::{reqwest_client_builder, AttestedHttpTransport};
 
 /// Fuzz targets driving crate-internal parsers over arbitrary bytes.
 /// Result values are deliberately discarded; crashes and panics are the

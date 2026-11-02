@@ -4,6 +4,7 @@ export type ClientConfig = JsonObject & {
   registry?: JsonObject;
   reference_values?: JsonObject;
   compatibility_matrix?: JsonObject;
+  verdict_store?: { jsonl_path: string };
 };
 
 export type ClientOptions = {

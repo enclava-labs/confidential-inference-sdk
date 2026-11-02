@@ -181,6 +181,43 @@ impl OpenAiHttpProvider {
             None => request,
         }
     }
+
+    /// Opens a chat-completions stream on `client` and returns the live
+    /// response plus its observed TLS peer (when the client exposes
+    /// `tls_info`). The body is not consumed, so TLS identity can be checked
+    /// before any chunk is yielded.
+    async fn open_chat_stream(
+        &self,
+        route: &RouteDefinition,
+        request: &ProviderChatRequest,
+        client: &reqwest::Client,
+    ) -> Result<(reqwest::Response, Option<LiveTlsPeer>)> {
+        ensure_route_provider(route, &self.provider_id)?;
+        if request.confidentiality() != &ProviderRequestConfidentiality::Plaintext {
+            return Err(ProviderError::Adapter(
+                "streaming requires a plaintext provider channel".into(),
+            ));
+        }
+        let mut body = request.body.clone();
+        body["stream"] = serde_json::Value::Bool(true);
+        let response = self
+            .authorize(
+                client
+                    .post(chat_completions_url(&route.api_base_url)?)
+                    .json(&body),
+            )
+            .send()
+            .await
+            .map_err(|error| map_send_error(&route.route_id, error))?;
+        let tls_peer = response_tls_peer(&response)?;
+        if !response.status().is_success() {
+            return Err(ProviderError::HttpStatus {
+                status: response.status().as_u16(),
+                message: "chat completions streaming request was rejected".into(),
+            });
+        }
+        Ok((response, tls_peer))
+    }
 }
 
 #[async_trait]
@@ -216,70 +253,8 @@ impl ProviderAdapter for OpenAiHttpProvider {
         route: &RouteDefinition,
         request: ProviderChatRequest,
     ) -> Result<crate::ProviderChatStream> {
-        ensure_route_provider(route, &self.provider_id)?;
-        if request.confidentiality() != &ProviderRequestConfidentiality::Plaintext {
-            return Err(ProviderError::Adapter(
-                "streaming requires a plaintext provider channel".into(),
-            ));
-        }
-        let mut body = request.body.clone();
-        body["stream"] = serde_json::Value::Bool(true);
-        let response = self
-            .authorize(
-                self.client
-                    .post(chat_completions_url(&route.api_base_url)?)
-                    .json(&body),
-            )
-            .send()
-            .await
-            .map_err(|error| ProviderError::Http(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(ProviderError::HttpStatus {
-                status: response.status().as_u16(),
-                message: "chat completions streaming request was rejected".into(),
-            });
-        }
-        let stream = futures_util::stream::unfold(
-            (response.bytes_stream(), Vec::<u8>::new()),
-            |(mut bytes, mut buffer)| async move {
-                loop {
-                    match take_sse_frame(&mut buffer) {
-                        SseTake::Done => return None,
-                        SseTake::Data(data) => return Some((Ok(data), (bytes, buffer))),
-                        SseTake::Invalid(error) => {
-                            return Some((Err(error), (bytes, buffer)));
-                        }
-                        SseTake::Consumed => continue,
-                        SseTake::Incomplete => {}
-                    }
-                    match bytes.next().await {
-                        Some(Ok(part))
-                            if buffer.len().saturating_add(part.len())
-                                <= MAX_PROVIDER_RESPONSE_BYTES =>
-                        {
-                            buffer.extend_from_slice(&part)
-                        }
-                        Some(Ok(_)) => {
-                            return Some((
-                                Err(ProviderError::Http(
-                                    "chat streaming SSE frame exceeds the provider response limit"
-                                        .into(),
-                                )),
-                                (bytes, buffer),
-                            ));
-                        }
-                        Some(Err(error)) => {
-                            return Some((
-                                Err(ProviderError::Http(error.to_string())),
-                                (bytes, buffer),
-                            ));
-                        }
-                        None => return None,
-                    }
-                }
-            },
-        );
-        Ok(Box::pin(stream))
+        let (response, _tls_peer) = self.open_chat_stream(route, &request, &self.client).await?;
+        Ok(sse_body_stream(response))
     }
 
     async fn embeddings(
@@ -470,40 +445,26 @@ impl TinfoilHttpProvider {
         routes: Vec<RouteDefinition>,
         api_key: Option<impl Into<String>>,
     ) -> Result<Self> {
-        // TLS certificates are validated normally. The attestation path binds
-        // the leaf SPKI into the verified quote; chat/embeddings additionally
-        // pin that SPKI at handshake time so no prompt can reach an
-        // unauthenticated peer before the binding is checked.
-        let client = reqwest_client_builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
-            .tls_info(true)
-            .build()
-            .map_err(|error| ProviderError::Http(error.to_string()))?;
-
-        Ok(Self {
-            inner: OpenAiHttpProvider::with_client(
-                provider_id,
-                routes,
-                api_key.map(Into::into),
-                client,
-            ),
-            tls_state: Arc::new(Mutex::new(EvidenceStateStore::new())),
-            pinned_clients: crate::tls::PinnedSpkiClientCache::new(),
-        })
+        Self::with_transport(
+            provider_id,
+            routes,
+            api_key.map(Into::into),
+            Default::default(),
+        )
     }
 
-    pub fn with_client(
+    pub fn with_transport(
         provider_id: impl Into<String>,
         routes: Vec<RouteDefinition>,
         api_key: Option<String>,
-        client: reqwest::Client,
-    ) -> Self {
-        Self {
+        transport: crate::AttestedHttpTransport,
+    ) -> Result<Self> {
+        let client = transport.evidence_client()?;
+        Ok(Self {
             inner: OpenAiHttpProvider::with_client(provider_id, routes, api_key, client),
             tls_state: Arc::new(Mutex::new(EvidenceStateStore::new())),
-            pinned_clients: crate::tls::PinnedSpkiClientCache::new(),
-        }
+            pinned_clients: crate::tls::PinnedSpkiClientCache::new(transport),
+        })
     }
 }
 
@@ -628,6 +589,42 @@ impl ProviderAdapter for TinfoilHttpProvider {
         let body = request.decrypt_sdk_response_body(route, &capture.body)?;
         serde_json::from_slice(&body).map_err(Into::into)
     }
+
+    /// Streams over the SPKI-pinned client. The TLS identity bound into the
+    /// verified evidence is pinned at handshake time; the observed peer is
+    /// compared again before any chunk is yielded.
+    async fn chat_stream(
+        &self,
+        route: &RouteDefinition,
+        request: ProviderChatRequest,
+    ) -> Result<crate::ProviderChatStream> {
+        ensure_tinfoil_route(route, self.provider_id())?;
+        let expected_tls = self
+            .tls_state
+            .lock()
+            .map_err(|_| ProviderError::Adapter("Tinfoil TLS state lock is poisoned".into()))?
+            .lookup_for_request(route, &request, "Tinfoil TLS identity")?
+            .clone();
+        let client = self.pinned_clients.client(&expected_tls.spki_sha256)?;
+
+        let (response, observed_tls) = self
+            .inner
+            .open_chat_stream(route, &request, &client)
+            .await?;
+        let observed_tls = observed_tls.ok_or_else(|| {
+            ProviderError::Compatibility(format!(
+                "route {} chat stream response did not expose a live TLS certificate",
+                route.route_id
+            ))
+        })?;
+        if observed_tls.spki_sha256 != expected_tls.spki_sha256 {
+            return Err(ProviderError::Adapter(format!(
+                "route {} live TLS SPKI changed between evidence and chat stream despite the handshake pin",
+                route.route_id
+            )));
+        }
+        Ok(sse_body_stream(response))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -715,6 +712,53 @@ async fn capture_response(
     let tls_peer = response_tls_peer(&response)?;
     let body = checked_response_bytes(response, operation).await?;
     Ok(HttpResponseCapture { body, tls_peer })
+}
+
+/// Splits a streaming response body into SSE `data:` payloads for
+/// `chat_stream`. `\r\n\r\n` or `\n\n` delimit frames, `data: [DONE]`
+/// terminates, and each yielded item is one JSON `data:` payload.
+fn sse_body_stream(response: reqwest::Response) -> crate::ProviderChatStream {
+    let stream = futures_util::stream::unfold(
+        (response.bytes_stream(), Vec::<u8>::new()),
+        |(mut bytes, mut buffer)| async move {
+            loop {
+                match take_sse_frame(&mut buffer) {
+                    SseTake::Done => return None,
+                    SseTake::Data(data) => return Some((Ok(data), (bytes, buffer))),
+                    SseTake::Invalid(error) => {
+                        return Some((Err(error), (bytes, buffer)));
+                    }
+                    SseTake::Consumed => continue,
+                    SseTake::Incomplete => {}
+                }
+                match bytes.next().await {
+                    Some(Ok(part))
+                        if buffer.len().saturating_add(part.len())
+                            <= MAX_PROVIDER_RESPONSE_BYTES =>
+                    {
+                        buffer.extend_from_slice(&part[..])
+                    }
+                    Some(Ok(_)) => {
+                        return Some((
+                            Err(ProviderError::Http(
+                                "chat streaming SSE frame exceeds the provider response limit"
+                                    .into(),
+                            )),
+                            (bytes, buffer),
+                        ));
+                    }
+                    Some(Err(error)) => {
+                        return Some((
+                            Err(ProviderError::Http(error.to_string())),
+                            (bytes, buffer),
+                        ));
+                    }
+                    None => return None,
+                }
+            }
+        },
+    );
+    Box::pin(stream)
 }
 
 /// One step of the SSE frame splitter used by `chat_stream`.
@@ -970,6 +1014,37 @@ mod tests {
         "QyB9GB4dKXjmy+26cOsABYkqDRzM3+8Dlv94G4NrRoEETL0x6hTaXo+JVI50WJ",
         "yzX2lRxy4DXVI28v+Ot5m6XEbczrZFa8bOP8iKi7P4Q2KOvg+g",
     );
+    const TINFOIL_TEST_LEAF: &str = include_str!("tinfoil-test-leaf.b64");
+    const TINFOIL_ALT_LEAF: &str = include_str!("tinfoil-alt-leaf.b64");
+
+    fn test_transport() -> crate::AttestedHttpTransport {
+        test_transport_with_builder(reqwest::Client::builder)
+    }
+
+    fn test_transport_with_builder(
+        builder: impl Fn() -> reqwest::ClientBuilder + Send + Sync + 'static,
+    ) -> crate::AttestedHttpTransport {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in [TINFOIL_TEST_CERT_DER_BASE64, TINFOIL_ALT_CERT_DER_BASE64] {
+            roots
+                .add(CertificateDer::from(decode_test_base64(cert).unwrap()))
+                .unwrap();
+        }
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            provider.clone(),
+        )
+        .build()
+        .unwrap();
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier.clone())
+            .with_no_client_auth();
+        crate::AttestedHttpTransport::new(builder, config, verifier)
+    }
 
     #[tokio::test]
     async fn openai_http_provider_relays_sse_data_payloads() {
@@ -1399,12 +1474,13 @@ mod tests {
     #[tokio::test]
     async fn tinfoil_http_provider_rejects_non_https_routes() {
         let route = http_route("http://127.0.0.1:9");
-        let provider = TinfoilHttpProvider::with_client(
+        let provider = TinfoilHttpProvider::with_transport(
             "tinfoil-http-test",
             vec![route.clone()],
             None,
-            reqwest::Client::new(),
-        );
+            Default::default(),
+        )
+        .unwrap();
 
         let error = provider
             .fetch_evidence(
@@ -1462,16 +1538,13 @@ mod tests {
         // The test server presents a self-signed loopback certificate. The
         // production constructor validates certificates normally; the test
         // opts this client into the local test CA only.
-        let provider = TinfoilHttpProvider::with_client(
+        let provider = TinfoilHttpProvider::with_transport(
             "tinfoil-http-test",
             vec![route.clone()],
             Some("sk-tinfoil-test".to_owned()),
-            reqwest::Client::builder()
-                .tls_info(true)
-                .danger_accept_invalid_certs(true)
-                .build()
-                .unwrap(),
-        );
+            test_transport(),
+        )
+        .unwrap();
         let evidence_request = EvidenceRequest {
             requested_model: "llama-3.3-70b".into(),
             policy_digest: "sha256:policy".into(),
@@ -1508,23 +1581,23 @@ mod tests {
         assert!(error.is_key_rotation(), "{error:?}");
         let error = error.to_string();
         assert!(error.contains("verified evidence pin"), "{error}");
-        server.abort();
+        assert!(
+            server.await.unwrap().is_err(),
+            "server must reject the handshake before reading a request"
+        );
     }
 
     #[tokio::test]
     async fn tinfoil_http_provider_rejects_unknown_or_missing_evidence_digest() {
         let (base_url, server) = spawn_tinfoil_tls_identity_rotation().await;
         let route = http_route(&base_url);
-        let provider = TinfoilHttpProvider::with_client(
+        let provider = TinfoilHttpProvider::with_transport(
             "tinfoil-http-test",
             vec![route.clone()],
             Some("sk-tinfoil-test".to_owned()),
-            reqwest::Client::builder()
-                .tls_info(true)
-                .danger_accept_invalid_certs(true)
-                .build()
-                .unwrap(),
-        );
+            test_transport(),
+        )
+        .unwrap();
         // No digest at all: compatibility failure, nothing is dispatched.
         let error = provider
             .chat(
@@ -1562,16 +1635,13 @@ mod tests {
     async fn tinfoil_http_provider_keys_tls_state_by_verified_evidence() {
         let (base_url, server) = spawn_tinfoil_fetch_fetch_chat().await;
         let route = http_route(&base_url);
-        let provider = TinfoilHttpProvider::with_client(
+        let provider = TinfoilHttpProvider::with_transport(
             "tinfoil-http-test",
             vec![route.clone()],
             Some("sk-tinfoil-test".to_owned()),
-            reqwest::Client::builder()
-                .tls_info(true)
-                .danger_accept_invalid_certs(true)
-                .build()
-                .unwrap(),
-        );
+            test_transport(),
+        )
+        .unwrap();
         let evidence_request = EvidenceRequest {
             requested_model: "llama-3.3-70b".into(),
             policy_digest: "sha256:policy".into(),
@@ -1611,6 +1681,176 @@ mod tests {
             .unwrap();
         assert_eq!(response.model, "llama-3.3-70b");
         server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn tinfoil_http_provider_streams_chunks_over_pinned_client() {
+        let frames = [
+            "{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}",
+            "{\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}",
+            "{\"id\":\"c3\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}",
+        ];
+        let (base_url, server) = spawn_tinfoil_evidence_then_sse(frames.to_vec()).await;
+        let address: std::net::SocketAddr =
+            base_url.trim_start_matches("https://").parse().unwrap();
+        let route = http_route(&base_url.replace("127.0.0.2", "localhost"));
+        let transport = test_transport_with_builder(move || {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("x-custom-transport", "preserved".parse().unwrap());
+            reqwest::Client::builder()
+                .no_proxy()
+                .resolve("localhost", address)
+                .default_headers(headers)
+        });
+        let provider = TinfoilHttpProvider::with_transport(
+            "tinfoil-http-test",
+            vec![route.clone()],
+            Some("sk-tinfoil-test".to_owned()),
+            transport,
+        )
+        .unwrap();
+        let raw = provider
+            .fetch_evidence(
+                &route,
+                &EvidenceRequest {
+                    requested_model: "llama-3.3-70b".into(),
+                    policy_digest: "sha256:policy".into(),
+                    nonce: None,
+                },
+            )
+            .await
+            .unwrap();
+        let verified_digest = confidential_inference_attestation::sha256_digest(&raw);
+
+        let mut chunks = provider
+            .chat_stream(
+                &route,
+                ProviderChatRequest::new(json!({
+                    "model": "llama-3.3-70b",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream_options": {"include_usage": true}
+                }))
+                .with_verified_evidence_digest(verified_digest),
+            )
+            .await
+            .unwrap();
+
+        let mut payloads = Vec::new();
+        while let Some(item) = chunks.next().await {
+            payloads.push(item.unwrap());
+        }
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0], frames[0].as_bytes());
+        assert_eq!(payloads[2], frames[2].as_bytes());
+
+        let captured = server.await.unwrap().unwrap();
+        assert!(
+            captured.contains("POST /v1/chat/completions "),
+            "{captured}"
+        );
+        assert!(
+            captured
+                .to_ascii_lowercase()
+                .contains("x-custom-transport: preserved"),
+            "{captured}"
+        );
+        let body = String::from_utf8_lossy(http_request_body(captured.as_bytes())).into_owned();
+        assert!(body.contains("\"stream\":true"), "{body}");
+        assert!(
+            body.contains("\"include_usage\":true"),
+            "stream request must request terminal usage: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tinfoil_http_provider_stream_fails_closed_when_tls_identity_changes() {
+        let (base_url, server) = spawn_tinfoil_tls_identity_rotation().await;
+        let route = http_route(&base_url);
+        let provider = TinfoilHttpProvider::with_transport(
+            "tinfoil-http-test",
+            vec![route.clone()],
+            Some("sk-tinfoil-test".to_owned()),
+            test_transport(),
+        )
+        .unwrap();
+        let raw = provider
+            .fetch_evidence(
+                &route,
+                &EvidenceRequest {
+                    requested_model: "llama-3.3-70b".into(),
+                    policy_digest: "sha256:policy".into(),
+                    nonce: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The pinned client refuses the rotated SPKI during the TLS
+        // handshake: the stream fails closed before any chunk is yielded.
+        let error = provider
+            .chat_stream(
+                &route,
+                ProviderChatRequest::new(json!({
+                    "model": "llama-3.3-70b",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .with_verified_evidence_digest(
+                    confidential_inference_attestation::sha256_digest(&raw),
+                ),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(error.is_key_rotation(), "{error:?}");
+        assert_eq!(
+            error.chat_dispatch_outcome(),
+            crate::DispatchOutcome::NotDispatched
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tinfoil_http_provider_stream_rejects_unknown_or_missing_evidence_digest() {
+        let route = http_route("https://127.0.0.1:1");
+        let provider = TinfoilHttpProvider::with_transport(
+            "tinfoil-http-test",
+            vec![route.clone()],
+            Some("sk-tinfoil-test".to_owned()),
+            test_transport(),
+        )
+        .unwrap();
+        // No digest at all: compatibility failure before any send.
+        let error = provider
+            .chat_stream(
+                &route,
+                ProviderChatRequest::new(json!({
+                    "model": "llama-3.3-70b",
+                    "messages": [{"role": "user", "content": "hi"}]
+                })),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, ProviderError::Compatibility(_)), "{error}");
+
+        // A digest the adapter never verified: key rotation, nothing sent.
+        let error = provider
+            .chat_stream(
+                &route,
+                ProviderChatRequest::new(json!({
+                    "model": "llama-3.3-70b",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .with_verified_evidence_digest("sha256:".to_owned() + &"0".repeat(64)),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(error.is_key_rotation(), "{error}");
+        assert_eq!(
+            error.chat_dispatch_outcome(),
+            crate::DispatchOutcome::NotDispatched
+        );
     }
 
     #[tokio::test]
@@ -1816,12 +2056,10 @@ mod tests {
     ) -> (String, tokio::task::JoinHandle<std::io::Result<()>>) {
         install_default_rustls_provider();
         let first_acceptor = TlsAcceptor::from(Arc::new(
-            test_tls_server_config(TINFOIL_TEST_CERT_DER_BASE64, TINFOIL_TEST_KEY_DER_BASE64)
-                .unwrap(),
+            test_tls_server_config(TINFOIL_TEST_LEAF, TINFOIL_TEST_KEY_DER_BASE64).unwrap(),
         ));
         let second_acceptor = TlsAcceptor::from(Arc::new(
-            test_tls_server_config(TINFOIL_ALT_CERT_DER_BASE64, TINFOIL_ALT_KEY_DER_BASE64)
-                .unwrap(),
+            test_tls_server_config(TINFOIL_ALT_LEAF, TINFOIL_ALT_KEY_DER_BASE64).unwrap(),
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1872,16 +2110,13 @@ mod tests {
     ) -> (String, tokio::task::JoinHandle<std::io::Result<()>>) {
         install_default_rustls_provider();
         let first_acceptor = TlsAcceptor::from(Arc::new(
-            test_tls_server_config(TINFOIL_TEST_CERT_DER_BASE64, TINFOIL_TEST_KEY_DER_BASE64)
-                .unwrap(),
+            test_tls_server_config(TINFOIL_TEST_LEAF, TINFOIL_TEST_KEY_DER_BASE64).unwrap(),
         ));
         let second_acceptor = TlsAcceptor::from(Arc::new(
-            test_tls_server_config(TINFOIL_ALT_CERT_DER_BASE64, TINFOIL_ALT_KEY_DER_BASE64)
-                .unwrap(),
+            test_tls_server_config(TINFOIL_ALT_LEAF, TINFOIL_ALT_KEY_DER_BASE64).unwrap(),
         ));
         let third_acceptor = TlsAcceptor::from(Arc::new(
-            test_tls_server_config(TINFOIL_TEST_CERT_DER_BASE64, TINFOIL_TEST_KEY_DER_BASE64)
-                .unwrap(),
+            test_tls_server_config(TINFOIL_TEST_LEAF, TINFOIL_TEST_KEY_DER_BASE64).unwrap(),
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1932,6 +2167,82 @@ mod tests {
                 .to_string(),
             )
             .await
+        });
+
+        (format!("https://{address}"), handle)
+    }
+
+    /// Two-accept TLS server: evidence on cert A, then a streaming chat
+    /// response on cert A. Returns the captured stream request for
+    /// assertions on `stream` and `stream_options`.
+    async fn spawn_tinfoil_evidence_then_sse(
+        frames: Vec<&str>,
+    ) -> (String, tokio::task::JoinHandle<std::io::Result<String>>) {
+        install_default_rustls_provider();
+        let acceptor = TlsAcceptor::from(Arc::new(
+            test_tls_server_config(TINFOIL_TEST_LEAF, TINFOIL_TEST_KEY_DER_BASE64).unwrap(),
+        ));
+        let frames: Vec<String> = frames.into_iter().map(str::to_owned).collect();
+        let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .map_err(std::io::Error::other)?;
+            let request = read_http_request(&mut stream).await?;
+            let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            if !request.starts_with("get /.well-known/tinfoil-attestation ")
+                || !request.contains("x-custom-transport: preserved")
+            {
+                return Err(std::io::Error::other(
+                    "evidence request lost custom transport configuration",
+                ));
+            }
+            let body = tinfoil_attestation_body()?;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+
+            let (stream, _) = listener.accept().await?;
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .map_err(std::io::Error::other)?;
+            let request = read_http_request(&mut stream).await?;
+            let request_text = String::from_utf8_lossy(&request);
+            if !request_text.starts_with("POST /v1/chat/completions ") {
+                return Err(std::io::Error::other(format!(
+                    "expected stream request, got {:?}",
+                    request_text.lines().next().unwrap_or("")
+                )));
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await?;
+            for frame in &frames {
+                let payload = format!("data: {frame}\n\n");
+                stream
+                    .write_all(format!("{:x}\r\n", payload.len()).as_bytes())
+                    .await?;
+                stream.write_all(payload.as_bytes()).await?;
+                stream.write_all(b"\r\n").await?;
+                stream.flush().await?;
+            }
+            let payload = "data: [DONE]\n\n";
+            stream
+                .write_all(format!("{:x}\r\n", payload.len()).as_bytes())
+                .await?;
+            stream.write_all(payload.as_bytes()).await?;
+            stream.write_all(b"\r\n0\r\n\r\n").await?;
+            Ok(request_text.into_owned())
         });
 
         (format!("https://{address}"), handle)

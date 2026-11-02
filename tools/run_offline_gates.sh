@@ -31,6 +31,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 toolchain() { rustup toolchain list 2>/dev/null | grep -q "^$1-"; }
 
 echo "== Confidential Inference SDK offline gates =="
+if ! have python3; then
+  printf 'Required prerequisite missing: python3\n' >&2
+  exit 1
+fi
 
 step "fmt" cargo fmt --all -- --check
 step "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -42,23 +46,46 @@ else
 fi
 step "demo" cargo run -p confidential-demo --locked
 # The language bindings load this shared library; build it before them.
-step "ffi-build" cargo build -p confidential-inference-ffi --locked
+step "ffi-build" cargo build -p confidential-inference-ffi --locked --message-format=json
+if ! CONFIDENTIAL_INFERENCE_FFI_LIBRARY=$(python3 -c '
+import json
+import sys
+from pathlib import Path
 
-if have python3; then
-  step "python-bindings" python3 -m unittest discover -s bindings/python/tests
-  step "tools-tests" python3 -m unittest discover -s tools -p 'test_*.py'
-  step "normative-fixtures" python3 tools/check_normative_fixtures.py
-  step "ffi-exports" python3 tools/check_ffi_exports.py
-  step "supply-chain-policy" python3 tools/check_supply_chain_policy.py
-  if git diff --quiet && git diff --cached --quiet; then
-    step "release-packaging" python3 tools/check_release_packaging.py --require-clean
-  else
-    skip "release-packaging" "working tree is dirty (commit for --require-clean)"
-    step "release-packaging" python3 tools/check_release_packaging.py
-  fi
-else
-  skip "python-bindings/tools/policies" "python3 not found"
+artifacts = (
+    json.loads(line)
+    for line in Path("target/gate-logs/ffi-build.log").read_text().splitlines()
+    if line.startswith("{")
+)
+libraries = [
+    Path(filename).resolve()
+    for artifact in artifacts
+    if artifact.get("reason") == "compiler-artifact"
+    and artifact["target"]["name"] == "confidential_inference_ffi"
+    for filename in artifact["filenames"]
+    if filename.endswith((".so", ".dylib", ".dll"))
+]
+if len(libraries) != 1 or not libraries[0].is_file():
+    sys.exit("FFI build did not produce exactly one native shared library")
+print(libraries[0])
+'); then
+  exit 1
 fi
+export CONFIDENTIAL_INFERENCE_FFI_LIBRARY
+
+step "python-bindings" python3 -m unittest discover -s bindings/python/tests
+step "tools-tests" python3 -m unittest discover -s tools -p 'test_*.py'
+step "normative-fixtures" python3 tools/check_normative_fixtures.py
+step "ffi-exports" python3 tools/check_ffi_exports.py
+step "supply-chain-policy" python3 tools/check_supply_chain_policy.py
+if git diff --quiet && git diff --cached --quiet; then
+  step "release-packaging" python3 tools/check_release_packaging.py --require-clean
+else
+  skip "release-packaging" "working tree is dirty (commit for --require-clean)"
+  step "release-packaging" python3 tools/check_release_packaging.py
+fi
+step "sbom" python3 tools/generate_sbom.py --output target/confidential-inference-sbom.json
+step "sbom-check" python3 tools/generate_sbom.py --output target/confidential-inference-sbom.json --check
 
 if have npm; then
   if [ ! -d bindings/node/node_modules ]; then

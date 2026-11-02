@@ -8,25 +8,27 @@ after the selected route satisfies an explicit attestation policy.
 
 ## Supported providers
 
-**Tinfoil · Chutes · NEAR · Venice · RedPill (Chutes E2EE) · Phala · Privatemode**
+**Tinfoil · Chutes · PPQ · RedPill · NEAR · Venice · Phala · Privatemode**
 
 | Provider | SDK integration | Current scope |
 | --- | --- | --- |
-| **Tinfoil** | Dedicated HTTP adapter, attestation endpoint capture, TLS certificate/SPKI binding, and TDX/DCAP + SEV-SNP quote verification | Live adapter and verifier path |
+| **Tinfoil** | Dedicated HTTP adapter, attestation endpoint capture, TLS certificate/SPKI binding, and TDX/DCAP + SEV-SNP quote verification | Live adapter and verifier path, including streaming over the SPKI-pinned connection; `pin tinfoil` checks SNP measurements against the Sigstore-signed release |
 | **Chutes** | Dedicated ML-KEM-768/ChaCha20-Poly1305 E2EE adapter, per-instance TDX/certificate/key binding, DCAP verification, and NVIDIA CC verification through NRAS | Live non-streaming adapter and verifier path |
-| **NEAR** | Model-direct adapter, TDX nonce/signing-address/TLS/model binding, DCAP verification, and NVIDIA CC verification through NRAS | Verifier implemented; the model-direct endpoint is currently unreachable (see [GA-08](docs/ga-readiness.md)) |
+| **PPQ** (private) | Dedicated EHBP adapter (HPKE X25519/HKDF-SHA256/AES-256-GCM) to a Tinfoil enclave: SEV-SNP/TDX quote verification, report-data binding of the enclave TLS SPKI and HPKE key, attestation-document/HPKE certificate SANs | Live non-streaming adapter; `pin ppq` checks the SNP measurement against the Sigstore-signed release; the bundle is session evidence (no request nonce) and model binding is unsupported |
+| **RedPill** | Dedicated ACI gateway adapter (`tee.redpill.ai`): gateway TDX quote with a nonce-bound keyset and TLS SPKI, content-addressed model-instance session with its own TDX quote and NVIDIA CC evidence through NRAS, dstack event-log replay (compose-hash, app-id, KMS key-provider), dispatch over the pinned gateway SPKI constrained to the verified session, signed receipt check | Adapter and verifier implemented, non-streaming; `pin redpill` currently refuses RedPill's deployment because its measured composes let the host provision root SSH keys (see [GA-22](docs/ga-readiness.md)). The older `chutes_e2ee` fixture profile stays claims-only |
+| **NEAR** | Model-direct adapter, TDX nonce/signing-address/TLS/model binding, DCAP verification, and NVIDIA CC verification through NRAS | Verifier implemented; the model-direct endpoint is unreachable and the gateway shape has no per-instance binding (see [GA-08](docs/ga-readiness.md)) |
 | **Venice** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Fixture / adapter-shape only — no live adapter yet |
-| **RedPill** | OpenAI-compatible HTTP execution, Chutes E2EE evidence, nonce/public-key report-data binding, and NVIDIA CC verification through NRAS | Fixture / adapter-shape only — `chutes_e2ee` evidence is claims-only, so a CPU-TEE requirement fails closed (set it to not required to use the app-E2EE checks) |
 | **Phala** | OpenAI-compatible HTTP execution, dstack evidence normalization, and SDK-managed app-E2EE | Fixture / adapter-shape only — `dstack_app_e2ee` evidence is claims-only, so a CPU-TEE requirement fails closed |
 | **Privatemode** | Contrast manifest, initdata, image-pin, coordinator-attestation, and model-path verification | Verification component; the caller supplies live transport |
 
-Tinfoil, Chutes, and NEAR have provider-specific HTTP integrations. The
-Tinfoil and NEAR adapters connect through a TLS layer pinned to the leaf SPKI
-bound into the verified quote: an SPKI mismatch fails the TLS handshake before
-any request bytes are sent. Chutes invocations are encrypted for the selected
-attested instance and consume one-use invocation nonces. Privatemode support
-covers verification of Contrast deployment evidence rather than a turn-key
-HTTP adapter.
+Tinfoil, Chutes, PPQ, RedPill, and NEAR have provider-specific HTTP
+integrations. The Tinfoil, RedPill, and NEAR adapters connect through a TLS
+layer pinned to the leaf SPKI bound into the verified quote: an SPKI mismatch
+fails the TLS handshake before any request bytes are sent. Chutes invocations
+are encrypted for the selected attested instance and consume one-use
+invocation nonces; PPQ requests are EHBP-encrypted to the HPKE key bound into
+the verified quote. Privatemode support covers verification of Contrast
+deployment evidence rather than a turn-key HTTP adapter.
 
 Provider support does not make an arbitrary deployment trusted. Production
 routes still require provider-issued signed metadata and reference values, the
@@ -117,13 +119,13 @@ material and prove SDK behavior, not the trustworthiness of a live provider.
 
 ## Use as a Rust dependency
 
-The `0.1.0` crates are not yet published to crates.io. Use the release tag as
-a git dependency until they are:
+The `0.1.0` crates are not yet published to crates.io and no release tag exists.
+Use the `main` branch as a git dependency; commit `Cargo.lock` to pin the resolved revision:
 
 ```toml
 [dependencies]
-confidential-inference-sdk = { version = "0.1", git = "https://github.com/enclava-labs/confidential-inference-sdk", tag = "v0.1.0" }
-confidential-inference-openai = { version = "0.1", git = "https://github.com/enclava-labs/confidential-inference-sdk", tag = "v0.1.0" }
+confidential-inference-sdk = { version = "0.1", git = "https://github.com/enclava-labs/confidential-inference-sdk", branch = "main" }
+confidential-inference-openai = { version = "0.1", git = "https://github.com/enclava-labs/confidential-inference-sdk", branch = "main" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -155,9 +157,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 For incremental output, use a configured streaming-enabled route that does not
-require request/response E2EE (the demo E2EE route intentionally fails closed).
-Call `.stream(true).streaming().await`. The returned stream includes the
-verified `verdict` and route metadata before the first chunk:
+require request/response E2EE (operator-pinned Tinfoil routes stream; the demo
+E2EE route intentionally fails closed). Call `.stream(true).streaming().await`.
+Candidates are tried in order: the SDK moves to the next streaming-capable
+route only when the failure proves no work was done (`not_dispatched`, or a
+`rejected` 429/503). The returned stream includes the verified `verdict` and
+route metadata before the first chunk:
 
 ```rust
 let mut stream = client
@@ -216,6 +221,8 @@ A production client supplies:
 4. Quote, GPU, and collateral verifiers required by the enabled routes.
 5. A verdict store and metrics observation appropriate for the deployment
    (metrics are emitted as `tracing` events; attach any exporter you want).
+   FFI and binding configs accept `"verdict_store": {"jsonl_path": "<file>"}`
+   to append one verdict record per verification.
 
 Metric events use the `confidential_inference.metrics` target. Collect that
 target in an exporter or filter it from normal application logs; high-frequency
@@ -246,28 +253,38 @@ the `ring` backend selected explicitly. The rationale is documented in
 
 The `confidential-inference-trust` binary (from
 `confidential-inference-trust-cli`) captures live provider evidence, verifies
-it end to end, and signs the trust-on-first-use artifacts a production client
-consumes:
+it end to end, and signs the artifacts a production client consumes. `pin
+tinfoil` and `pin ppq` additionally verify Tinfoil's Sigstore release
+attestation (embedded public-good trusted root, GitHub Actions identity
+`tinfoilsh/confidential-model-router`, Rekor and SCT checks) and refuse to pin
+unless the observed SNP measurement equals the signed release measurement;
+`pin chutes` and `pin redpill` pin observed measurements (trust on first use):
 
 ```bash
 # Generate an operator Ed25519 signing key (0600 seed + public entry).
 cargo run -p confidential-inference-trust-cli -- keygen --out keys/
 
-# Pin a Chutes model deployment (reads CHUTES_API_KEY).
+# Pin Chutes model deployments (reads CHUTES_API_KEY).
 cargo run -p confidential-inference-trust-cli -- pin chutes \
-  --model <provider-model> --canonical-model <name> \
-  --key-dir keys/ --out pinned/ \
+  --model <provider-model[,provider-model...]> --canonical-model <name[,name...]> \
+  --key-dir keys/ --out pinned/chutes/ \
   [--captures <n>] [--valid-days <d>] [--smoke-chat <prompt>]
 
-# Pin a Tinfoil model deployment (reads TINFOIL_API_KEY).
-cargo run -p confidential-inference-trust-cli -- pin tinfoil \
-  --model <provider-model> --canonical-model <name> \
-  --key-dir keys/ --out pinned/ [--smoke-chat <prompt>]
+# Pin Tinfoil, PPQ private, or RedPill ACI deployments
+# (reads TINFOIL_API_KEY / PPQ_API_KEY / REDPILL_API_KEY).
+cargo run -p confidential-inference-trust-cli -- pin <tinfoil|ppq|redpill> \
+  --model <provider-model[,provider-model...]> --canonical-model <name[,name...]> \
+  --key-dir keys/ --out pinned/<provider>/ [--smoke-chat <prompt>]
 ```
 
-The emitted registry, reference values, and policy are verified through the
-same `ConfidentialInference::builder` path before they are written, and are
-labeled `operator-pinned-observed`.
+Comma-separated `--model`/`--canonical-model` lists (equal length, no
+duplicates) pin several models into one registry, reference-values envelope,
+compatibility matrix, and `operator-config.json`; `--smoke-chat` runs once per
+model. The emitted registry, reference values, and policy are verified through
+the same `ConfidentialInference::builder` path before they are written, and
+are labeled `sigstore-verified-release` (Tinfoil, PPQ) or
+`operator-pinned-observed` (Chutes, RedPill). Consumers that serve several
+providers load one `operator-config.json` per provider (see GA-18).
 
 ## Documentation
 

@@ -93,10 +93,10 @@ It must be opted into explicitly — `demo_provider` defaults to `False`, so a
 missing, empty, or NULL config fails closed with
 `trusted_signing_keys_required`.
 
-Clients create a private Tokio runtime. Create them **after** `fork()`:
-handles used in a forked child fail with `client_used_after_fork`, and
-freeing a pre-fork client in the child releases the handle but leaks the
-runtime rather than dropping it.
+Clients own a Tokio runtime. If a process forks after SDK initialization, the
+child must `exec` before using the SDK. Creating, using, or freeing clients
+in that child is rejected with `client_used_after_fork`; prefer spawn/exec
+worker processes.
 
 Setting `demo_provider: False` requires a non-empty
 `trusted_ed25519_signing_keys` list, which becomes the exclusive trust root

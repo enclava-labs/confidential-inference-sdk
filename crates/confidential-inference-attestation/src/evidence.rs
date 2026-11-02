@@ -340,6 +340,47 @@ impl NearLiveEvidence {
     pub const SCHEMA: &'static str = "confidential-inference.near-live-evidence.v1";
 }
 
+/// PPQ's bundle is session evidence and contains no verifier challenge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PpqEhbpLiveEvidence {
+    pub schema: String,
+    pub provider: String,
+    pub route_id: String,
+    pub evidence_family: String,
+    pub requested_model: String,
+    pub policy_digest: String,
+    pub evidence_endpoint: String,
+    pub raw_bundle_base64: String,
+}
+
+impl PpqEhbpLiveEvidence {
+    pub const SCHEMA: &'static str = "confidential-inference.ppq-ehbp-live-evidence.v1";
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedpillAciLiveEvidence {
+    pub schema: String,
+    pub provider: String,
+    pub route_id: String,
+    pub evidence_family: String,
+    pub requested_model: String,
+    pub policy_digest: String,
+    pub request_nonce: String,
+    pub evidence_endpoint: String,
+    pub live_tls_spki_sha256: String,
+    pub live_tls_leaf_certificate_der_base64: String,
+    pub gateway_report: serde_json::Value,
+    pub session: serde_json::Value,
+    pub session_id: String,
+    pub gpu_attestation: Option<NvidiaGpuAttestationEvidence>,
+}
+
+impl RedpillAciLiveEvidence {
+    pub const SCHEMA: &'static str = "confidential-inference.redpill-aci-live.v1";
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DstackEvidence {

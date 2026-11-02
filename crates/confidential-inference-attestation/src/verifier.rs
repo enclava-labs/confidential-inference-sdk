@@ -13,8 +13,8 @@ use crate::{
     EvidenceHardware, FailClosedGpuAttestationVerifier, FailClosedTinfoilQuoteVerifier,
     FixtureEvidence, GpuAttestationVerifier, ModelBindingResult, NearLiveEvidence,
     NvidiaGpuAttestationEvidence, NvidiaGpuAttestationVerificationRequest,
-    ParsedTinfoilLiveCapture, ReferenceValuesPayload, ResponseIntegrityResult, Result,
-    RouteAttribution, RoutePartyAttribution, RoutePartyRole, SignatureMetadata,
+    ParsedTinfoilLiveCapture, PpqEhbpLiveEvidence, ReferenceValuesPayload, ResponseIntegrityResult,
+    Result, RouteAttribution, RoutePartyAttribution, RoutePartyRole, SignatureMetadata,
     TcbComposeHashBinding, TinfoilLiveCaptureEvidence, TinfoilQuoteVerificationRequest,
     TinfoilQuoteVerifier, TinfoilTlsEvidence, TrustTier, ValidityWindow, VerdictArtifacts,
     VerdictError, VerificationStatus, VerifiedTdxQuote, VerifiedTinfoilQuote,
@@ -106,6 +106,14 @@ pub fn verify_evidence_with_attestation_verifiers(
             tinfoil_quote_verifier,
             gpu_attestation_verifier,
         ),
+        "ppq_ehbp" => verify_ppq_ehbp_live_evidence_with_attestation_verifiers(
+            request,
+            tinfoil_quote_verifier,
+            gpu_attestation_verifier,
+        ),
+        "redpill_aci_verified_tls" => {
+            verify_redpill_live_evidence(request, tinfoil_quote_verifier, gpu_attestation_verifier)
+        }
         "tinfoil_hw_verified_tls" => {
             verify_tinfoil_tls_evidence_with_quote_verifier(request, tinfoil_quote_verifier)
         }
@@ -143,7 +151,7 @@ struct VerifiedProviderLiveEvidence {
     gpu_attestation: Option<NvidiaGpuAttestationEvidence>,
     gpu_nonce: String,
     report_data: String,
-    nonce_binding_verified: bool,
+    nonce_binding_verified: Option<bool>,
     channel_binding_verified: bool,
     channel_check: &'static str,
     channel_error: &'static str,
@@ -164,6 +172,85 @@ struct LiveCaptureMetadata<'a> {
     requested_model: &'a str,
     policy_digest: &'a str,
     evidence_endpoint: &'a str,
+}
+
+fn verify_redpill_live_evidence(
+    request: VerificationRequest,
+    quote_verifier: &dyn TinfoilQuoteVerifier,
+    gpu_verifier: &dyn GpuAttestationVerifier,
+) -> Result<AttestationVerdict> {
+    let capture: crate::RedpillAciLiveEvidence = serde_json::from_slice(&request.raw_evidence)?;
+    validate_live_capture_metadata(
+        LiveCaptureMetadata {
+            provider: &capture.provider,
+            route_id: &capture.route_id,
+            evidence_family: &capture.evidence_family,
+            requested_model: &capture.requested_model,
+            policy_digest: &capture.policy_digest,
+            evidence_endpoint: &capture.evidence_endpoint,
+        },
+        &request,
+        "RedPill",
+    )?;
+    if request.expected_freshness_nonce.as_deref() != Some(capture.request_nonce.as_str()) {
+        return Err(AttestationError::InvalidEvidence(
+            "RedPill ACI request nonce mismatch".into(),
+        ));
+    }
+    let verified = crate::verify_redpill_aci_capture(
+        &capture,
+        quote_verifier,
+        quote_verifier,
+        gpu_verifier,
+        &request.route.api_endpoint,
+        &request.route.provider_model,
+        now_epoch_millis(),
+    )?;
+    let accepted = request
+        .reference_values
+        .providers
+        .get(&request.route.provider)
+        .is_some_and(|provider| {
+            provider
+                .accepted_measurements
+                .contains(&verified.tee_measurement)
+        });
+    if !accepted {
+        return Err(AttestationError::InvalidEvidence(
+            "RedPill ACI gateway/model measurement pair is not pinned".into(),
+        ));
+    }
+    let evidence_digest = sha256_digest(&request.raw_evidence);
+    let evidence = VerifiedProviderLiveEvidence {
+        provider: capture.provider,
+        route_id: capture.route_id,
+        evidence_family: capture.evidence_family,
+        tee_measurement: verified.tee_measurement,
+        hardware: EvidenceHardware {
+            cpu: CpuTeeKind::Tdx,
+            gpu: Some(GpuTeeKind::NvidiaCc),
+        },
+        gpu_nonce: capture
+            .gpu_attestation
+            .as_ref()
+            .map(|gpu| gpu.nonce.clone())
+            .unwrap_or_default(),
+        gpu_attestation: capture.gpu_attestation,
+        report_data: verified.gateway_quote.report_data,
+        nonce_binding_verified: Some(true),
+        channel_binding_verified: true,
+        channel_check: "tls_binding",
+        channel_error: "RedPill ACI TLS binding failed",
+        confidentiality_result: ConfidentialityResult::ChannelBound,
+        attested_model: None,
+        issued_at: verified.issued_at,
+        expires_at: format_utc_timestamp_millis(verified.expires_at_epoch_ms),
+        expires_at_epoch_ms: verified.expires_at_epoch_ms,
+        evidence_digest,
+        signing_public_key: Some(verified.live_tls_spki_sha256),
+        e2ee_capability: None,
+    };
+    verify_provider_live_evidence(request, evidence, gpu_verifier)
 }
 
 pub fn verify_chutes_live_evidence_with_attestation_verifiers(
@@ -266,7 +353,7 @@ pub fn verify_chutes_live_evidence_with_attestation_verifiers(
         gpu_attestation: capture.gpu_attestation,
         gpu_nonce,
         report_data: verified_quote.report_data,
-        nonce_binding_verified,
+        nonce_binding_verified: Some(nonce_binding_verified),
         channel_binding_verified,
         channel_check: "e2ee_key_binding",
         channel_error: "Chutes ML-KEM key and instance certificate are not bound to the fresh verified TDX quote",
@@ -445,7 +532,7 @@ pub fn verify_near_live_evidence_with_attestation_verifiers(
         gpu_attestation: capture.gpu_attestation,
         gpu_nonce: capture.request_nonce,
         report_data: verified_quote.report_data,
-        nonce_binding_verified,
+        nonce_binding_verified: Some(nonce_binding_verified),
         channel_binding_verified,
         channel_check: "tls_binding",
         channel_error:
@@ -464,6 +551,55 @@ pub fn verify_near_live_evidence_with_attestation_verifiers(
         e2ee_capability: None,
     };
 
+    verify_provider_live_evidence(request, evidence, gpu_attestation_verifier)
+}
+
+pub fn verify_ppq_ehbp_live_evidence_with_attestation_verifiers(
+    request: VerificationRequest,
+    quote_verifier: &dyn TinfoilQuoteVerifier,
+    gpu_attestation_verifier: &dyn GpuAttestationVerifier,
+) -> Result<AttestationVerdict> {
+    let capture: PpqEhbpLiveEvidence = serde_json::from_slice(&request.raw_evidence)?;
+    validate_live_capture_metadata(
+        LiveCaptureMetadata {
+            provider: &capture.provider,
+            route_id: &capture.route_id,
+            evidence_family: &capture.evidence_family,
+            requested_model: &capture.requested_model,
+            policy_digest: &capture.policy_digest,
+            evidence_endpoint: &capture.evidence_endpoint,
+        },
+        &request,
+        "PPQ",
+    )?;
+    let parsed = crate::parse_ppq_ehbp_evidence(&capture)?;
+    let verified = crate::verify_ppq_ehbp_quote(&capture, &parsed, quote_verifier)?;
+    let certificate_expires_at =
+        validate_live_certificate(&parsed.enclave_certificate_der, &verified.issued_at, "PPQ")?;
+    let expires_at_epoch_ms = verified.expires_at_epoch_ms.min(certificate_expires_at);
+    let evidence_digest = canonical_digest(&(&capture, &verified))?;
+    let evidence = VerifiedProviderLiveEvidence {
+        provider: capture.provider,
+        route_id: capture.route_id,
+        evidence_family: capture.evidence_family,
+        tee_measurement: verified.tee_measurement,
+        hardware: verified.hardware,
+        gpu_attestation: None,
+        gpu_nonce: String::new(),
+        report_data: verified.report_data,
+        nonce_binding_verified: None,
+        channel_binding_verified: true,
+        channel_check: "e2ee_key_binding",
+        channel_error: "PPQ HPKE key is not bound to the verified quote",
+        confidentiality_result: ConfidentialityResult::EncryptedBound,
+        attested_model: None,
+        issued_at: verified.issued_at,
+        expires_at: format_utc_timestamp_millis(expires_at_epoch_ms),
+        expires_at_epoch_ms,
+        evidence_digest,
+        signing_public_key: None,
+        e2ee_capability: Some("ehbp".into()),
+    };
     verify_provider_live_evidence(request, evidence, gpu_attestation_verifier)
 }
 
@@ -506,6 +642,15 @@ fn verify_provider_live_evidence(
         .accepted_measurements
         .iter()
         .any(|measurement| measurement == &evidence.tee_measurement);
+    if evidence.evidence_family == "ppq_ehbp" {
+        push_check(
+            &mut checks,
+            &mut errors,
+            "cpu_measurement_reference",
+            measurement_accepted,
+            "PPQ TEE measurement is not pinned in reference values",
+        );
+    }
     let hardware_verified = match &request.policy.hardware.cpu {
         CpuTeeRequirement::NotRequired => {
             checks.insert("cpu_tee".into(), CheckResult::NotApplicable);
@@ -589,13 +734,17 @@ fn verify_provider_live_evidence(
         "tls_binding"
     };
     checks.insert(other_channel_check.into(), CheckResult::NotApplicable);
-    push_check(
-        &mut checks,
-        &mut errors,
-        "nonce_binding",
-        evidence.nonce_binding_verified,
-        "fresh provider challenge is not bound to verified TDX report_data",
-    );
+    if let Some(verified) = evidence.nonce_binding_verified {
+        push_check(
+            &mut checks,
+            &mut errors,
+            "nonce_binding",
+            verified,
+            "fresh provider challenge is not bound to verified TDX report_data",
+        );
+    } else {
+        checks.insert("nonce_binding".into(), CheckResult::NotSupported);
+    }
 
     let confidentiality_result = if channel_verified {
         evidence.confidentiality_result.clone()
@@ -3463,6 +3612,71 @@ mod tests {
             },
             raw_evidence: raw_evidence.to_vec(),
         }
+    }
+
+    #[test]
+    fn ppq_requires_pinned_measurement_and_cannot_claim_request_freshness() {
+        let mut request = request_with_evidence(b"ppq");
+        request.route.evidence_family = "ppq_ehbp".into();
+        request.policy.hardware.cpu = CpuTeeRequirement::NotRequired;
+        let provider = request
+            .reference_values
+            .providers
+            .get_mut(&request.route.provider)
+            .unwrap();
+        provider.accepted_measurements = vec!["pinned".into()];
+        provider
+            .routes
+            .get_mut(&request.route.route_id)
+            .unwrap()
+            .evidence_family = "ppq_ehbp".into();
+        let evidence = VerifiedProviderLiveEvidence {
+            provider: request.route.provider.clone(),
+            route_id: request.route.route_id.clone(),
+            evidence_family: "ppq_ehbp".into(),
+            tee_measurement: "wrong".into(),
+            hardware: EvidenceHardware {
+                cpu: CpuTeeKind::SevSnp,
+                gpu: None,
+            },
+            gpu_attestation: None,
+            gpu_nonce: String::new(),
+            report_data: String::new(),
+            nonce_binding_verified: None,
+            channel_binding_verified: true,
+            channel_check: "e2ee_key_binding",
+            channel_error: "unbound",
+            confidentiality_result: ConfidentialityResult::EncryptedBound,
+            attested_model: None,
+            issued_at: "2026-07-05T00:00:00Z".into(),
+            expires_at: "2027-01-01T00:00:00Z".into(),
+            expires_at_epoch_ms: parse_utc_timestamp_millis("2027-01-01T00:00:00Z").unwrap(),
+            evidence_digest: sha256_digest(b"ppq"),
+            signing_public_key: None,
+            e2ee_capability: Some("ehbp".into()),
+        };
+        let verdict = verify_provider_live_evidence(
+            request.clone(),
+            evidence.clone(),
+            &FailClosedGpuAttestationVerifier,
+        )
+        .unwrap();
+        assert_eq!(
+            verdict.checks.get("cpu_measurement_reference"),
+            Some(&CheckResult::Failed)
+        );
+        request.policy.freshness = FreshnessPolicy::PerRequest;
+        let verdict =
+            verify_provider_live_evidence(request, evidence, &FailClosedGpuAttestationVerifier)
+                .unwrap();
+        assert_eq!(
+            verdict.checks.get("nonce_binding"),
+            Some(&CheckResult::NotSupported)
+        );
+        assert_eq!(
+            verdict.checks.get("per_request_freshness"),
+            Some(&CheckResult::Failed)
+        );
     }
 
     fn request_with_tinfoil_evidence(

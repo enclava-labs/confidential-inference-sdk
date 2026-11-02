@@ -224,108 +224,101 @@ impl ServerCertVerifier for FailingVerifier {
     }
 }
 
-/// Base verifier for SPKI-pinned clients. Unit tests stand in for live
-/// provider endpoints with self-signed loopback certificates, so under
-/// `cfg(test)` normal verification is skipped and only the SPKI pin binds the
-/// channel — the pin check itself stays exercised.
-#[cfg(not(test))]
-fn pinned_base_verifier() -> Arc<dyn ServerCertVerifier> {
-    match rustls_platform_verifier::Verifier::new(
-        Arc::new(rustls::crypto::ring::default_provider()),
-    ) {
-        Ok(verifier) => Arc::new(verifier),
-        Err(error) => Arc::new(FailingVerifier::new(format!(
-            "platform TLS verification is unavailable: {error}"
-        ))),
+/// Reusable HTTP and TLS settings for attested transports.
+///
+/// The builder factory is invoked for evidence and for each pinned client.
+/// Its TLS backend, redirect policy and TLS-info setting are replaced by the
+/// SDK; configure trust and client authentication in `tls_config` and pass
+/// the corresponding server verifier separately so the SDK can wrap it.
+#[derive(Clone)]
+pub struct AttestedHttpTransport {
+    builder: Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>,
+    tls_config: ClientConfig,
+    verifier: Arc<dyn ServerCertVerifier>,
+}
+
+impl std::fmt::Debug for AttestedHttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttestedHttpTransport")
+            .finish_non_exhaustive()
     }
 }
 
-#[cfg(test)]
-fn pinned_base_verifier() -> Arc<dyn ServerCertVerifier> {
-    Arc::new(AcceptAnyVerifier)
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-struct AcceptAnyVerifier;
-
-#[cfg(test)]
-impl ServerCertVerifier for AcceptAnyVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-        ]
+impl Default for AttestedHttpTransport {
+    fn default() -> Self {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier: Arc<dyn ServerCertVerifier> =
+            match rustls_platform_verifier::Verifier::new(provider.clone()) {
+                Ok(verifier) => Arc::new(verifier),
+                Err(error) => Arc::new(FailingVerifier::new(format!(
+                    "platform TLS verification is unavailable: {error}"
+                ))),
+            };
+        Self::new(
+            || {
+                reqwest::Client::builder()
+                    .connect_timeout(CONNECT_TIMEOUT)
+                    .read_timeout(READ_TIMEOUT)
+            },
+            tls_config_with_verifier(provider, verifier.clone()),
+            verifier,
+        )
     }
 }
 
-fn pinned_client_for_spki(expected_spki_sha256: &str) -> Result<reqwest::Client> {
-    let verifier = SpkiPinnedVerifier {
-        inner: pinned_base_verifier(),
-        expected_spki_sha256: expected_spki_sha256.to_owned(),
-    };
-    let config = tls_config_with_verifier(
-        Arc::new(rustls::crypto::ring::default_provider()),
-        Arc::new(verifier),
-    );
-    reqwest_client_builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(READ_TIMEOUT)
-        .tls_info(true)
-        .tls_backend_preconfigured(config)
-        .build()
-        .map_err(|error| ProviderError::Http(error.to_string()))
+impl AttestedHttpTransport {
+    pub fn new(
+        builder: impl Fn() -> reqwest::ClientBuilder + Send + Sync + 'static,
+        tls_config: ClientConfig,
+        verifier: Arc<dyn ServerCertVerifier>,
+    ) -> Self {
+        Self {
+            builder: Arc::new(builder),
+            tls_config,
+            verifier,
+        }
+    }
+
+    fn client(&self, pin: Option<&str>) -> Result<reqwest::Client> {
+        let mut config = self.tls_config.clone();
+        let verifier: Arc<dyn ServerCertVerifier> = match pin {
+            Some(pin) => Arc::new(SpkiPinnedVerifier {
+                inner: self.verifier.clone(),
+                expected_spki_sha256: pin.to_owned(),
+            }),
+            None => self.verifier.clone(),
+        };
+        config.dangerous().set_certificate_verifier(verifier);
+        (self.builder)()
+            .tls_backend_preconfigured(config)
+            .redirect(reqwest::redirect::Policy::none())
+            .tls_info(true)
+            .build()
+            .map_err(|error| ProviderError::Http(error.to_string()))
+    }
+
+    pub(crate) fn evidence_client(&self) -> Result<reqwest::Client> {
+        self.client(None)
+    }
 }
 
 /// Small bounded cache of SPKI-pinned inference clients keyed by the verified
 /// SPKI sha256 hex. Clients are shareable, so a fixed-size map with
 /// oldest-key eviction suffices.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct PinnedSpkiClientCache {
     clients: Arc<Mutex<BTreeMap<String, (u64, reqwest::Client)>>>,
     sequence: Arc<std::sync::atomic::AtomicU64>,
+    transport: AttestedHttpTransport,
 }
 
 impl PinnedSpkiClientCache {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(transport: AttestedHttpTransport) -> Self {
+        Self {
+            transport,
+            clients: Arc::new(Mutex::new(BTreeMap::new())),
+            sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
     }
 
     pub(crate) fn client(&self, expected_spki_sha256: &str) -> Result<reqwest::Client> {
@@ -337,7 +330,7 @@ impl PinnedSpkiClientCache {
                 return Ok(client.clone());
             }
         }
-        let client = pinned_client_for_spki(expected_spki_sha256)?;
+        let client = self.transport.client(Some(expected_spki_sha256))?;
         let mut clients = self.clients.lock().map_err(|_| {
             ProviderError::Adapter("pinned TLS client cache lock is poisoned".into())
         })?;

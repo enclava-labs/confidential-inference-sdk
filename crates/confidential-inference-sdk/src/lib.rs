@@ -193,29 +193,59 @@ impl ConfidentialInference {
                 });
             }
         }
-        let (definition, route) = candidates.remove(0);
-        let verified = self
-            .verify_selected_route(
-                definition,
-                route,
-                VerificationRequestMode::for_chat_request(&request),
-            )
-            .await?;
-        verified.dispatch_chat_stream(request).await
+        let mut attempt_errors = Vec::new();
+        let mut last_error = None;
+        let mut unavailable_providers = BTreeSet::new();
+        let request_mode = VerificationRequestMode::for_chat_request(&request);
+        for (definition, route) in candidates {
+            let provider = route.provider.clone();
+            if unavailable_providers.contains(&provider) {
+                continue;
+            }
+            match self
+                .verify_selected_route(definition, route, request_mode)
+                .await
+            {
+                Ok(verified) => match verified.dispatch_chat_stream(request.clone()).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(error) if error.dispatch_outcome().allows_route_fallback() => {
+                        unavailable_providers.insert(provider);
+                        attempt_errors.push(error.to_string());
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
+                },
+                Err(error) => {
+                    if matches!(&error, ClientError::Provider(provider_error) if provider_error.is_retryable_outage())
+                    {
+                        unavailable_providers.insert(provider);
+                    }
+                    attempt_errors.push(error.to_string());
+                    last_error = Some(error);
+                }
+            }
+        }
+        if attempt_errors.len() == 1 {
+            return Err(last_error.expect("single route-attempt error was recorded"));
+        }
+        Err(ClientError::RouteAttemptsFailed {
+            model,
+            errors: attempt_errors,
+        })
     }
 }
 use base64::Engine;
 pub use confidential_inference_attestation::ReferenceValuesEnvelope;
 pub use confidential_inference_attestation::TrustedSigningKey;
 use confidential_inference_attestation::{
-    chutes_provider_nonce, parse_tinfoil_live_capture, sha256_digest,
+    chutes_provider_nonce, parse_ppq_ehbp_evidence, parse_tinfoil_live_capture, sha256_digest,
     verify_evidence_with_attestation_verifiers, ArtifactSignature, AttestationError,
     BoundDataRequirement, ChannelBindingKind, ChutesLiveEvidence, CpuTeeRequirement,
     FailClosedGpuAttestationVerifier, FailClosedTinfoilQuoteVerifier, FreshnessPolicy,
     GpuAttestationVerifier, GpuTeeRequirement, ModelBindingRequirement, NearLiveEvidence,
-    ReferenceValuesPayload, ResponseIntegrityRequirement, ResponseIntegrityResult,
-    SevSnpTinfoilQuoteVerifier, SignatureMetadata, StaleVerdictPolicy, TinfoilAttestationFormat,
-    TinfoilQuoteVerifier, TrustTier, VerificationRequest,
+    PpqEhbpLiveEvidence, ReferenceValuesPayload, ResponseIntegrityRequirement,
+    ResponseIntegrityResult, SevSnpTinfoilQuoteVerifier, SignatureMetadata, StaleVerdictPolicy,
+    TinfoilAttestationFormat, TinfoilQuoteVerifier, TrustTier, VerificationRequest,
 };
 // `ConfidentialInferenceBuilder` methods and public verdict/route types must be
 // nameable by integrators.
@@ -246,9 +276,10 @@ use confidential_inference_providers::{
     AmdKdsSevSnpVcekResolver, ChutesHttpProvider, ConfidentialHttpProvider,
     DcapTdxCollateralResolver, DemoProvider, EncryptionRequirement, EvidenceRequest,
     ModelBindingSupport, NearHttpProvider, NvidiaNrasRemoteClient, OpenAiEndpoint,
-    OpenAiHttpProvider, ProviderAdapter, ProviderChatStream, ProviderCompatibility, ProviderError,
-    ProviderRegistry, ProviderResponseManageRequest, RegistryModel, ResponseManageOperation,
-    RouteDefinition, RouteExecutionStatus, RouteLifecycle, SevSnpVcekResolver, TinfoilHttpProvider,
+    OpenAiHttpProvider, PpqPrivateHttpProvider, ProviderAdapter, ProviderChatStream,
+    ProviderCompatibility, ProviderError, ProviderRegistry, ProviderResponseManageRequest,
+    RedpillHttpProvider, RegistryModel, ResponseManageOperation, RouteDefinition,
+    RouteExecutionStatus, RouteLifecycle, SevSnpVcekResolver, TinfoilHttpProvider,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2471,6 +2502,46 @@ impl ConfidentialInference {
         route_definition: &RouteDefinition,
         attested_route: &AttestedRoute,
     ) -> Result<Arc<dyn TinfoilQuoteVerifier>> {
+        if raw_schema(raw_evidence).as_deref() == Some(PpqEhbpLiveEvidence::SCHEMA) {
+            let capture: PpqEhbpLiveEvidence =
+                serde_json::from_slice(raw_evidence).map_err(AttestationError::from)?;
+            let parsed = parse_ppq_ehbp_evidence(&capture)?;
+            return match parsed.format {
+                TinfoilAttestationFormat::TdxGuestV2 => {
+                    self.dcap_tdx_verifier_for_quote(parsed.quote, route_definition, attested_route)
+                        .await
+                }
+                TinfoilAttestationFormat::SevSnpGuestV2 => {
+                    Ok(Arc::new(SevSnpTinfoilQuoteVerifier::new(parsed.vcek)))
+                }
+            };
+        }
+        if raw_schema(raw_evidence).as_deref()
+            == Some(confidential_inference_attestation::RedpillAciLiveEvidence::SCHEMA)
+        {
+            let capture: confidential_inference_attestation::RedpillAciLiveEvidence =
+                serde_json::from_slice(raw_evidence).map_err(AttestationError::from)?;
+            let (gateway_quote, model_quote) =
+                confidential_inference_attestation::redpill_aci_quote_bytes(&capture)?;
+            let (gateway, model) = tokio::try_join!(
+                self.dcap_tdx_verifier_for_quote(
+                    gateway_quote.clone(),
+                    route_definition,
+                    attested_route,
+                ),
+                self.dcap_tdx_verifier_for_quote(
+                    model_quote.clone(),
+                    route_definition,
+                    attested_route,
+                )
+            )?;
+            return Ok(Arc::new(RedpillQuoteVerifiers {
+                gateway_quote,
+                model_quote,
+                gateway,
+                model,
+            }));
+        }
         if raw_schema(raw_evidence).as_deref()
             != Some(confidential_inference_attestation::TinfoilLiveCaptureEvidence::SCHEMA)
         {
@@ -2574,14 +2645,16 @@ impl ConfidentialInference {
         raw_evidence: &[u8],
     ) -> Result<Arc<dyn GpuAttestationVerifier>> {
         if self.inner.gpu_attestation_verifier_is_custom
-            || matches!(
+            || (!matches!(
+                raw_schema(raw_evidence).as_deref(),
+                Some(confidential_inference_attestation::RedpillAciLiveEvidence::SCHEMA)
+            ) && (matches!(
                 &self.inner.policy.hardware.gpu,
                 GpuTeeRequirement::NotRequired
-            )
-            || !matches!(
+            ) || !matches!(
                 raw_schema(raw_evidence).as_deref(),
                 Some(ChutesLiveEvidence::SCHEMA) | Some(NearLiveEvidence::SCHEMA)
-            )
+            )))
         {
             return Ok(self.inner.gpu_attestation_verifier.clone());
         }
@@ -2960,7 +3033,8 @@ impl ConfidentialInference {
     }
 
     fn evidence_nonce_for(&self, route_definition: &RouteDefinition) -> Option<String> {
-        self.requires_per_request_freshness(route_definition)
+        (self.requires_per_request_freshness(route_definition)
+            || route_definition.evidence_family == "redpill_aci_verified_tls")
             .then(fresh_evidence_nonce)
     }
 
@@ -2969,7 +3043,9 @@ impl ConfidentialInference {
         route_definition: &RouteDefinition,
         request: &EvidenceRequest,
     ) -> Option<String> {
-        if !self.requires_per_request_freshness(route_definition) {
+        if !self.requires_per_request_freshness(route_definition)
+            && route_definition.evidence_family != "redpill_aci_verified_tls"
+        {
             return None;
         }
 
@@ -2983,6 +3059,15 @@ impl ConfidentialInference {
                 _ => nonce.to_owned(),
             })
     }
+}
+
+fn retry_key_rotation(evidence_family: &str, error: &ProviderError, refreshes: usize) -> bool {
+    let max_refreshes = if evidence_family == "redpill_aci_verified_tls" {
+        2
+    } else {
+        1
+    };
+    error.is_key_rotation() && refreshes < max_refreshes
 }
 
 fn embeddings_request_input_is_empty(input: &EmbeddingInput) -> bool {
@@ -3772,6 +3857,41 @@ enum BuilderCompatibilityMatrix {
     Envelope(ProviderCompatibilityMatrixEnvelope),
 }
 
+struct RedpillQuoteVerifiers {
+    gateway_quote: Vec<u8>,
+    model_quote: Vec<u8>,
+    gateway: Arc<dyn TinfoilQuoteVerifier>,
+    model: Arc<dyn TinfoilQuoteVerifier>,
+}
+
+impl TinfoilQuoteVerifier for RedpillQuoteVerifiers {
+    fn verify_tinfoil_quote(
+        &self,
+        request: &confidential_inference_attestation::TinfoilQuoteVerificationRequest<'_>,
+    ) -> confidential_inference_attestation::Result<
+        confidential_inference_attestation::VerifiedTinfoilQuote,
+    > {
+        self.gateway.verify_tinfoil_quote(request)
+    }
+
+    fn verify_tdx_quote(
+        &self,
+        quote: &[u8],
+    ) -> confidential_inference_attestation::Result<
+        confidential_inference_attestation::VerifiedTdxQuote,
+    > {
+        if quote == self.gateway_quote {
+            self.gateway.verify_tdx_quote(quote)
+        } else if quote == self.model_quote {
+            self.model.verify_tdx_quote(quote)
+        } else {
+            Err(AttestationError::InvalidEvidence(
+                "unexpected RedPill quote".into(),
+            ))
+        }
+    }
+}
+
 /// Which live-verification collateral sources a registry's active routes need.
 /// Live Tinfoil evidence may be TDX or SEV-SNP, so its routes need both; a
 /// missing source makes live verification fail closed. Live Tinfoil is the
@@ -3800,7 +3920,10 @@ impl LiveCollateralNeeds {
             tdx: has_active(&|route| {
                 matches!(
                     route.evidence_family.as_str(),
-                    "chutes_live_e2ee" | "near_hw_verified_tls"
+                    "chutes_live_e2ee"
+                        | "near_hw_verified_tls"
+                        | "ppq_ehbp"
+                        | "redpill_aci_verified_tls"
                 ) || live_tinfoil(route)
             }),
             snp_vcek: has_active(&live_tinfoil),
@@ -3838,6 +3961,25 @@ fn install_default_credential_adapters(
                 .any(|route| route.evidence_family == "near_hw_verified_tls")
         {
             Arc::new(NearHttpProvider::new(
+                provider_id,
+                routes,
+                api_key.expose().to_owned(),
+            )?)
+        } else if provider_id == "ppq"
+            && routes
+                .iter()
+                .any(|route| route.evidence_family == "ppq_ehbp")
+        {
+            Arc::new(PpqPrivateHttpProvider::new(
+                routes,
+                api_key.expose().to_owned(),
+            )?)
+        } else if provider_id == "redpill"
+            && routes
+                .iter()
+                .any(|route| route.evidence_family == "redpill_aci_verified_tls")
+        {
+            Arc::new(RedpillHttpProvider::new(
                 provider_id,
                 routes,
                 api_key.expose().to_owned(),
@@ -4107,6 +4249,7 @@ impl VerifiedRoute {
         let provider_request = compatibility
             .adapt_chat_request(&refreshed.route_definition, &request)?
             .with_verified_evidence_digest(refreshed.verdict.raw_evidence_digest.clone());
+        let started_at = Instant::now();
         let stream = adapter
             .chat_stream(&refreshed.route_definition, provider_request)
             .instrument(tracing::info_span!(
@@ -4115,12 +4258,21 @@ impl VerifiedRoute {
                 route_id = %refreshed.route.route_id,
                 provider_model = %refreshed.route.provider_model
             ))
-            .await
-            .map_err(|error| ClientError::ProviderChat {
-                route_id: refreshed.route.route_id.clone(),
-                outcome: DispatchOutcome::Unknown,
-                error,
-            })?;
+            .await;
+        refreshed.client.record_latency(
+            ConfidentialInferenceRouteMetricLabels::from_route(
+                &refreshed.route_definition,
+                &refreshed.route,
+            ),
+            ConfidentialInferenceMetricStep::ProviderChat,
+            started_at.elapsed(),
+            stream.is_ok(),
+        );
+        let stream = stream.map_err(|error| ClientError::ProviderChat {
+            route_id: refreshed.route.route_id.clone(),
+            outcome: error.chat_dispatch_outcome(),
+            error,
+        })?;
         Ok(ConfidentialChatStream {
             stream,
             buffer: Vec::new(),
@@ -4184,7 +4336,7 @@ impl VerifiedRoute {
     ) -> Result<ConfidentialResponse<ChatCompletionResponse>> {
         let mut refreshed = self;
         let request_mode = VerificationRequestMode::NonStreamingChat;
-        let mut refreshed_after_rotation = false;
+        let mut rotation_refreshes = 0;
 
         loop {
             let adapter = refreshed.client.adapter(&refreshed.route.provider)?;
@@ -4252,13 +4404,20 @@ impl VerifiedRoute {
                         response,
                     });
                 }
-                Err(error) if error.is_key_rotation() && !refreshed_after_rotation => {
+                Err(error)
+                    if retry_key_rotation(
+                        &refreshed.route.evidence_family,
+                        &error,
+                        rotation_refreshes,
+                    ) =>
+                {
                     tracing::warn!(
                         provider = %refreshed.route.provider,
                         route_id = %refreshed.route.route_id,
+                        refresh_attempt = rotation_refreshes + 1,
                         "provider reported key rotation; refreshing evidence before retry"
                     );
-                    refreshed_after_rotation = true;
+                    rotation_refreshes += 1;
                     refreshed = refreshed
                         .client
                         .refresh_selected_route_after_key_rotation(
@@ -5095,6 +5254,7 @@ mod tests {
     struct KeyRotatingProvider {
         inner: CountingProvider,
         chat_attempts: Arc<AtomicUsize>,
+        failures: usize,
     }
 
     impl KeyRotatingProvider {
@@ -5102,6 +5262,7 @@ mod tests {
             Self {
                 inner: CountingProvider::valid(fetches),
                 chat_attempts,
+                failures: 1,
             }
         }
     }
@@ -5129,7 +5290,7 @@ mod tests {
             route: &RouteDefinition,
             request: ProviderChatRequest,
         ) -> std::result::Result<ChatCompletionResponse, ProviderError> {
-            if self.chat_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            if self.chat_attempts.fetch_add(1, Ordering::SeqCst) < self.failures {
                 return Err(ProviderError::key_rotation(
                     route.route_id.clone(),
                     "test provider key changed after cached verification",
@@ -5650,6 +5811,34 @@ mod tests {
                     "scripted connection reset after request".into(),
                 )),
                 None => DemoProvider::valid().chat(route, request).await,
+            }
+        }
+        async fn chat_stream(
+            &self,
+            _route: &RouteDefinition,
+            _request: ProviderChatRequest,
+        ) -> std::result::Result<ProviderChatStream, ProviderError> {
+            self.chat_attempts.fetch_add(1, Ordering::SeqCst);
+            match self.chat_failure {
+                Some(ScriptedChatFailure::Unavailable) => {
+                    Err(ProviderError::Unavailable(self.provider_id.clone()))
+                }
+                Some(ScriptedChatFailure::HttpStatus(status)) => Err(ProviderError::HttpStatus {
+                    status,
+                    message: "scripted upstream response".into(),
+                }),
+                Some(ScriptedChatFailure::Adapter) => {
+                    Err(ProviderError::Adapter("scripted failure".into()))
+                }
+                Some(ScriptedChatFailure::Transport) => {
+                    Err(ProviderError::Http("scripted connection reset".into()))
+                }
+                None => Ok(Box::pin(futures_util::stream::iter(vec![Ok(chunk_json(
+                    "ok",
+                    Some("stop"),
+                    true,
+                )
+                .into_bytes())]))),
             }
         }
         async fn embeddings(
@@ -8439,6 +8628,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rotation_refresh_budget_is_bounded_by_evidence_family() {
+        for (family, expected_attempts) in [
+            ("redpill_aci_verified_tls", 3),
+            ("tinfoil_hw_verified_tls", 2),
+            ("near_hw_verified_tls", 2),
+        ] {
+            let error = ProviderError::key_rotation("route", "session no longer accepted");
+            let mut attempts = 1;
+            while retry_key_rotation(family, &error, attempts - 1) {
+                attempts += 1;
+            }
+            assert_eq!(attempts, expected_attempts);
+            assert_eq!(
+                error.chat_dispatch_outcome(),
+                DispatchOutcome::NotDispatched
+            );
+        }
+        assert!(!retry_key_rotation(
+            "redpill_aci_verified_tls",
+            &ProviderError::HttpStatus {
+                status: 412,
+                message: "unrecognized refusal".into(),
+            },
+            0
+        ));
+    }
+
     #[tokio::test]
     async fn chat_revalidates_once_after_provider_key_rotation() {
         let audit = Arc::new(MemoryVerdictStore::default());
@@ -8470,6 +8687,31 @@ mod tests {
         let events = audit.records.lock().unwrap();
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|event| !event.cache_hit));
+    }
+
+    #[tokio::test]
+    async fn non_redpill_rotation_exhaustion_refetches_once() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut provider = KeyRotatingProvider::new(fetches.clone(), attempts.clone());
+        provider.failures = usize::MAX;
+        let client = ConfidentialInference::builder()
+            .with_demo_provider()
+            .with_provider(provider)
+            .policy(VerificationPolicy::require_attested_e2ee())
+            .build()
+            .await
+            .unwrap();
+        let error = client
+            .chat_completions()
+            .model("gpt-oss-120b")
+            .message(ChatMessage::user("rotate repeatedly"))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(error.dispatch_outcome(), DispatchOutcome::NotDispatched);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -10617,6 +10859,107 @@ mod tests {
         let verified = client.verify_route("demo", "gpt-oss-120b").await.unwrap();
         assert_eq!(verified.verdict().status, VerificationStatus::Verified);
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    }
+
+    fn scripted_streaming_client(
+        failure: ScriptedChatFailure,
+    ) -> (ConfidentialInference, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let mut registry = ProviderRegistry::bundled_demo().unwrap();
+        let primary = add_extra_demo_route(
+            &mut registry,
+            "primary-demo",
+            TrustTier::AppE2ee,
+            ChannelBindingKind::AttestedAppE2ee,
+        );
+        let routes = &mut registry.models.get_mut("gpt-oss-120b").unwrap().routes;
+        for route in routes.iter_mut() {
+            route.streaming = StreamingSupport::Supported;
+            route.request_encryption = EncryptionRequirement::NotRequired;
+            route.response_decryption = EncryptionRequirement::NotRequired;
+        }
+        let primary = routes
+            .iter()
+            .find(|route| route.provider == primary.provider)
+            .unwrap()
+            .clone();
+        let fallback = routes
+            .iter()
+            .find(|route| route.provider == "demo")
+            .unwrap()
+            .clone();
+        let mut matrix = ProviderCompatibilityMatrix::bundled().unwrap();
+        add_compatibility_for_route(&mut matrix, &primary);
+        add_compatibility_for_route(&mut matrix, &fallback);
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let mut adapters = BTreeMap::<String, Arc<dyn ProviderAdapter>>::new();
+        for (route, failure, attempts) in [
+            (primary, Some(failure), first.clone()),
+            (fallback, None, second.clone()),
+        ] {
+            adapters.insert(
+                route.provider.clone(),
+                Arc::new(ScriptedFixtureProvider {
+                    provider_id: route.provider.clone(),
+                    routes: vec![route],
+                    evidence_fetches: Arc::new(AtomicUsize::new(0)),
+                    chat_attempts: attempts,
+                    chat_failure: failure,
+                }),
+            );
+        }
+        (
+            client_from_parts(
+                registry,
+                matrix,
+                adapters,
+                VerificationPolicy::require_hardware(),
+            ),
+            first,
+            second,
+        )
+    }
+
+    #[tokio::test]
+    async fn streaming_503_falls_back_but_transport_failure_does_not() {
+        let (mut single, _, _) = scripted_streaming_client(ScriptedChatFailure::HttpStatus(503));
+        Arc::get_mut(&mut single.inner).unwrap().provider_routing =
+            ProviderRoutingConfig::new().with_provider_order("gpt-oss-120b", ["primary-demo"]);
+        let mut request = ChatCompletionRequest::new("gpt-oss-120b", vec![ChatMessage::user("hi")]);
+        request.stream = Some(true);
+        let error = match single.stream_chat_request(request).await {
+            Ok(_) => panic!("expected rejected stream"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.dispatch_outcome(),
+            DispatchOutcome::Rejected { status: 503 }
+        );
+        for (failure, fallback) in [
+            (ScriptedChatFailure::HttpStatus(503), true),
+            (ScriptedChatFailure::Transport, false),
+        ] {
+            let (client, first, second) = scripted_streaming_client(failure);
+            let routes = client
+                .select_routes(None, "gpt-oss-120b", RouteSelectionPurpose::Chat)
+                .unwrap();
+            assert!(routes.iter().all(|(_, route)| route.streaming_allowed));
+            let mut request =
+                ChatCompletionRequest::new("gpt-oss-120b", vec![ChatMessage::user("hi")]);
+            request.stream = Some(true);
+            match client.stream_chat_request(request).await {
+                Ok(mut stream) if fallback => {
+                    assert_eq!(stream.provider, "demo");
+                    assert!(stream.next().await.unwrap().is_ok());
+                }
+                Err(error) if !fallback => {
+                    assert_eq!(error.dispatch_outcome(), DispatchOutcome::Unknown)
+                }
+                _ => panic!("unexpected streaming fallback outcome"),
+            }
+            assert_eq!(first.load(Ordering::SeqCst), 1);
+            assert_eq!(second.load(Ordering::SeqCst), usize::from(fallback));
+        }
     }
 
     async fn chat_stream_over(items: Vec<String>) -> ConfidentialChatStream {

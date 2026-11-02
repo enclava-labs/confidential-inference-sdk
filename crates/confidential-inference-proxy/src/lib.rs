@@ -484,15 +484,13 @@ impl ProxyServer {
                             });
                         }
                         Err(error) => {
+                            if !retryable_accept_error(&error) {
+                                return Err(error.into());
+                            }
                             eprintln!("confidential-inference-proxy: accept failed: {error}");
-                            // File-descriptor exhaustion is transient: back off
-                            // briefly rather than spin on failing accept calls.
-                            #[cfg(unix)]
-                            if matches!(
-                                error.raw_os_error(),
-                                Some(libc::EMFILE) | Some(libc::ENFILE)
-                            ) {
-                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            tokio::select! {
+                                _ = &mut shutdown => return Ok(()),
+                                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                             }
                         }
                     }
@@ -500,6 +498,28 @@ impl ProxyServer {
             }
         }
     }
+}
+
+fn retryable_accept_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::OutOfMemory
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOMEM) | Some(libc::ENOBUFS)
+    ) {
+        return true;
+    }
+    false
 }
 
 #[derive(Debug)]
@@ -1356,6 +1376,25 @@ mod tests {
     use confidential_inference_sdk::{VerdictRecord, VerdictStore};
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn accept_errors_retry_resources_but_not_permanent_failures() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::Interrupted,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::OutOfMemory,
+        ] {
+            assert!(retryable_accept_error(&Error::from(kind)));
+        }
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::InvalidInput] {
+            assert!(!retryable_accept_error(&Error::from(kind)));
+        }
+        #[cfg(unix)]
+        for code in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::ENOBUFS] {
+            assert!(retryable_accept_error(&Error::from_raw_os_error(code)));
+        }
+    }
 
     #[derive(Default)]
     struct MemoryVerdictStore {

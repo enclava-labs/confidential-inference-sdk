@@ -8,6 +8,10 @@ Run everything at once (skips optional steps whose toolchains are missing):
 tools/run_offline_gates.sh
 ```
 
+Python is required. The runner selects the native library from Cargo's build
+output, so bindings test the fresh artifact even if an older release build or
+`CONFIDENTIAL_INFERENCE_FFI_LIBRARY` setting exists.
+
 The individual gates, in dependency order (bindings load the FFI library, so
 build it first; `--require-clean` needs a committed tree):
 
@@ -21,8 +25,8 @@ cargo +nightly fuzz build                            # after installing pinned c
 python3 tools/check_normative_fixtures.py
 python3 tools/check_ffi_exports.py
 python3 -m unittest discover -s tools -p 'test_*.py'
-python3 -m unittest discover -s bindings/python/tests
 cargo build -p confidential-inference-ffi --locked
+python3 -m unittest discover -s bindings/python/tests
 (cd bindings/node && npm ci && npm test)
 (cd bindings/go && go test -race -count=1 ./...)
 cargo deny check

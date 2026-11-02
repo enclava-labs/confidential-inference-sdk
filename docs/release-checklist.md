@@ -33,10 +33,11 @@ python3 tools/check_release_packaging.py --require-clean
 python3 tools/generate_sbom.py --output target/confidential-inference-sbom.json
 python3 tools/generate_sbom.py --output target/confidential-inference-sbom.json --check
 python3 tools/generate_release_manifest.py \
-  --manifest target/confidential-inference-release-manifest.json \
+  --output target/confidential-inference-release-manifest.json \
   --artifact-glob 'target/package/*.crate' \
   --artifact target/confidential-inference-sbom.json \
   --sbom target/confidential-inference-sbom.json \
+  --signature-output target/confidential-inference-release-manifest.ci.sig.json \
   --signature-key-seed-env CONFIDENTIAL_INFERENCE_RELEASE_CI_SIGNING_KEY_SEED_BASE64URL \
   --signature-signer confidential-inference-release-ci \
   --signature-key-id release-ci-key
@@ -64,23 +65,23 @@ python3 tools/check_release_manifest.py \
   --signature <manifest>.sig.json \
   --trusted-release-key <signer>:<key-id>:<public-key> \
   --live-conformance-report <signed-report>.json \
-  --require-production-release \
-  --live-conformance-plan-path <operator-plan>.json \
-  --dcap-production-review-path <dcap-production-review>.json
+  --production-release \
+  --live-conformance-plan <operator-plan>.json \
+  --dcap-production-review <dcap-production-review>.json
 ```
 
 - `--trusted-release-key` must be the operator release key. CI/test public
   keys (`confidential-inference-release-ci:release-ci-key`) are rejected.
 - The live-conformance report must cover every provider in the supplied plan
-  (`live-conformance-plan-path`), with observed model IDs matching the
+  (`--live-conformance-plan`), with observed model IDs matching the
   operator's compatibility and model-alias matrices, all signed by the
   operator release key. Report fields are schema-checked against
   `confidential-inference.live-conformance-report.v1`; the plan against
   `confidential-inference.live-conformance-plan.v1`. The compatibility matrix
   must not name a `*-fixture` provider in production mode.
-- `--dcap-production-review-path` must point to a passing
+- `--dcap-production-review` must point to a passing
   `confidential-inference.dcap-qvl-production-review.v1` document (see
-  `dcap-qvl-upstream-sync.md`), produced by the human review in step 3.
+  [dcap-qvl-upstream-sync.md](dcap-qvl-upstream-sync.md)), produced by the human review in step 4.
 
 ## 3. Fuzz campaign
 

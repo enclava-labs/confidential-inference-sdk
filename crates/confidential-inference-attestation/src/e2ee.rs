@@ -210,7 +210,7 @@ mod tests {
         // returns None instead and the binding fails closed.
         let nonce = "11".repeat(32);
         let public_key = "test-public-key";
-        let report_data = format!("{}é{}", "aa".repeat(31), "00".repeat(33));
+        let report_data = format!("{}é{}", "a".repeat(63), "0".repeat(63));
 
         assert_eq!(
             verify_chutes_e2ee_report_data_binding(&report_data, &nonce, public_key),

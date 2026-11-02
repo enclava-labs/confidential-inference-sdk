@@ -121,8 +121,10 @@ demo mode requires an explicit `{"demo_provider":true}` opt-in. It installs
 the demo provider and trusts the bundled fixture signing keys for the
 bundled artifacts only.
 
-Clients create a private Tokio runtime. Create them **after** `fork()`:
-handles used in a forked child fail with `client_used_after_fork`.
+Clients own a Tokio runtime. If a process forks after SDK initialization, the
+child must `exec` before using the SDK. Creating, using, or freeing clients
+in that child is rejected with `client_used_after_fork`; prefer spawn/exec
+worker processes.
 
 For production, use `NewConfiguredClient` with an exclusive operator public
 key and signed envelopes. The Go `Config` fields map directly to the FFI
@@ -181,6 +183,10 @@ verified against the same trust roots. `Routing` is also `json.RawMessage`
 containing the SDK routing object. Inline API keys require
 `AllowInlineAPIKeys: true`. `NewClient(json.RawMessage)` remains available for
 callers needing complete control of the JSON.
+
+Set `Config.VerdictStore` to `&VerdictStoreConfig{JSONLPath: "/path/verdicts.jsonl"}`
+to append structured verdict records to that file. Client creation fails if
+the file cannot be opened.
 
 ## Library ownership
 

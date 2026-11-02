@@ -164,6 +164,12 @@ impl SevSnpVcekResolver for AmdKdsSevSnpVcekResolver {
                 Ok(cert)
             }
             Err(error) => {
+                if let Some(VcekCacheEntry {
+                    result: Ok(cert), ..
+                }) = cache.get(&key)
+                {
+                    return Ok(cert.clone());
+                }
                 cache.insert(
                     key,
                     VcekCacheEntry {
@@ -273,5 +279,67 @@ mod tests {
         assert!(resolver.resolve_vcek(product, &hwid, tcb).await.is_err());
         assert!(resolver.resolve_vcek(product, &hwid, tcb).await.is_err());
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_failure_preserves_successful_vcek() {
+        async fn receive_headers(stream: &mut tokio::net::TcpStream) {
+            use tokio::io::AsyncBufReadExt;
+            let mut reader = tokio::io::BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let resolver = AmdKdsSevSnpVcekResolver::with_base_url(format!(
+            "http://{}",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let (first_seen, first_ready) = tokio::sync::oneshot::channel();
+        let (release_failure, failure_ready) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut success, _) = listener.accept().await.unwrap();
+            receive_headers(&mut success).await;
+            first_seen.send(()).unwrap();
+            let (mut failure, _) = listener.accept().await.unwrap();
+            receive_headers(&mut failure).await;
+            success
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n\x01\x02\x03")
+                .await
+                .unwrap();
+            drop(success);
+            failure_ready.await.unwrap();
+            failure
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let first_resolver = resolver.clone();
+        let first = tokio::spawn(async move {
+            let (product, hwid, tcb) = args();
+            first_resolver.resolve_vcek(product, &hwid, tcb).await
+        });
+        first_ready.await.unwrap();
+        let second_resolver = resolver.clone();
+        let second = tokio::spawn(async move {
+            let (product, hwid, tcb) = args();
+            second_resolver.resolve_vcek(product, &hwid, tcb).await
+        });
+        assert_eq!(first.await.unwrap().unwrap(), [1, 2, 3]);
+        release_failure.send(()).unwrap();
+        assert_eq!(second.await.unwrap().unwrap(), [1, 2, 3]);
+        server.await.unwrap();
+        let (product, hwid, tcb) = args();
+        assert_eq!(
+            resolver.resolve_vcek(product, &hwid, tcb).await.unwrap(),
+            [1, 2, 3]
+        );
     }
 }

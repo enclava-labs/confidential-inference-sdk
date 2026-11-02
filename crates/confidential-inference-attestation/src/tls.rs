@@ -195,7 +195,7 @@ mod tests {
     fn tls_spki_report_data_binding_does_not_panic_on_multibyte_prefix() {
         // A multi-byte char inside the first 64 bytes must not split a UTF-8
         // boundary when prefixing report_data.
-        let report_data = format!("{}é{}", "00".repeat(31), "11".repeat(33));
+        let report_data = format!("{}é{}", "0".repeat(63), "1".repeat(63));
         assert!(verify_tls_spki_report_data_binding(&report_data, TEST_SPKI_SHA256).is_none());
     }
 
