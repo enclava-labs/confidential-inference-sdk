@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-dcap-qvl = { version = "0.6.1", default-features = false, features = ["std", "ring", "default-x509", "report"] }
+dcap-qvl = { version = "0.7.0", default-features = false, features = ["std", "ring", "default-x509", "report"] }
 confidential-inference-attestation = { path = "../crates/confidential-inference-attestation" }
 confidential-inference-providers = { path = "../crates/confidential-inference-providers" }
 confidential-inference-proxy = { path = "../crates/confidential-inference-proxy" }

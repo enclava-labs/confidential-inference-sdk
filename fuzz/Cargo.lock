@@ -281,7 +281,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "base64ct",
- "dcap-qvl",
+ "dcap-qvl 0.6.6",
  "ed25519-compact",
  "flate2",
  "ring",
@@ -302,7 +302,7 @@ dependencies = [
  "confidential-inference-attestation",
  "confidential-inference-providers",
  "confidential-inference-proxy",
- "dcap-qvl",
+ "dcap-qvl 0.7.0",
  "libfuzzer-sys",
 ]
 
@@ -325,7 +325,7 @@ dependencies = [
  "chacha20poly1305",
  "confidential-inference-attestation",
  "confidential-inference-openai",
- "dcap-qvl",
+ "dcap-qvl 0.6.6",
  "flate2",
  "futures-core",
  "futures-util",
@@ -543,6 +543,39 @@ name = "dcap-qvl"
 version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "975e00ca7c287451d12647856125e3fdea386681f19bfbb5c0c56cdc88cbb61d"
+dependencies = [
+ "anyhow",
+ "asn1_der",
+ "base64 0.23.1",
+ "borsh",
+ "byteorder",
+ "chrono",
+ "const-oid",
+ "dcap-qvl-webpki",
+ "der",
+ "derive_more 2.1.1",
+ "futures",
+ "hex",
+ "log",
+ "parity-scale-codec",
+ "pem",
+ "reqwest",
+ "ring",
+ "rustls-pki-types",
+ "scale-info",
+ "serde",
+ "serde-human-bytes",
+ "serde_json",
+ "tracing",
+ "urlencoding",
+ "x509-cert",
+]
+
+[[package]]
+name = "dcap-qvl"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b992c9511adf7135ae7c63c023c9303a3615c0f38d7b39514dcc262f91c6adda"
 dependencies = [
  "anyhow",
  "asn1_der",
