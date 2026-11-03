@@ -6,6 +6,7 @@ use crate::{
 };
 use dcap_qvl::{
     quote::{Quote, Report, TDReport10},
+    tcb_info::TcbStatus,
     QuoteCollateralV3,
 };
 use serde::{Deserialize, Serialize};
@@ -370,18 +371,7 @@ impl TinfoilQuoteVerifier for DcapTdxTinfoilQuoteVerifier {
             expires_at_epoch_ms,
             "TDX DCAP quote verification returned collateral status"
         );
-        if verified.status != "UpToDate" {
-            return Err(AttestationError::InvalidEvidence(format!(
-                "TDX DCAP collateral status is not UpToDate: {}",
-                verified.status
-            )));
-        }
-        if !verified.advisory_ids.is_empty() {
-            return Err(AttestationError::InvalidEvidence(format!(
-                "TDX DCAP quote returned advisories: {:?}",
-                verified.advisory_ids
-            )));
-        }
+        validate_tcb_status(&verified)?;
 
         let quote = Quote::parse(quote_bytes).map_err(|err| {
             AttestationError::InvalidEvidence(format!("TDX quote parse failed: {err}"))
@@ -423,10 +413,38 @@ impl TinfoilQuoteVerifier for DcapTdxTinfoilQuoteVerifier {
     }
 }
 
+fn validate_tcb_status(verified: &dcap_qvl::verify::VerifiedReport) -> Result<()> {
+    if verified.status != "UpToDate" {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "TDX DCAP collateral status is not UpToDate: {}",
+            verified.status
+        )));
+    }
+    // Intel convergence can mask a non-current QE status; require both components to be UpToDate.
+    if verified.platform_status.status != TcbStatus::UpToDate
+        || verified.qe_status.status != TcbStatus::UpToDate
+    {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "TDX DCAP component TCB status is not UpToDate: platform={}, qe={}",
+            verified.platform_status.status, verified.qe_status.status
+        )));
+    }
+    if !verified.advisory_ids.is_empty() {
+        return Err(AttestationError::InvalidEvidence(format!(
+            "TDX DCAP quote returned advisories: {:?}",
+            verified.advisory_ids
+        )));
+    }
+    Ok(())
+}
+
 fn tdx_report(quote: &Quote) -> Result<&TDReport10> {
     match &quote.report {
         Report::TD10(report) => Ok(report),
         Report::TD15(report) => Ok(&report.base),
+        // A TD 1.5ex quote carries the TDX 1.5 report followed by signed
+        // (but not appraised) extension fields; the report 1.0 fields are base.
+        Report::TD15Ex(report) => Ok(&report.base.base),
         Report::SgxEnclave(_) => Err(AttestationError::InvalidEvidence(
             "TDX verifier received an SGX quote".into(),
         )),
@@ -493,6 +511,15 @@ mod tests {
     const SAMPLE_QUOTE: &[u8] = include_bytes!("../../../fixtures/evidence/dcap-qvl/tdx_quote.bin");
     const SAMPLE_COLLATERAL: &[u8] =
         include_bytes!("../../../fixtures/evidence/dcap-qvl/tdx_quote_collateral.json");
+    const SAMPLE_TD15EX_QUOTE: &[u8] =
+        include_bytes!("../../../fixtures/evidence/dcap-qvl/tdx_quote_td15ex.bin");
+    const SAMPLE_TD15EX_COLLATERAL: &[u8] =
+        include_bytes!("../../../fixtures/evidence/dcap-qvl/tdx_quote_td15ex_collateral.json");
+    // One second before the earliest collateral expiration (the QE identity
+    // nextUpdate), matching upstream dcap-qvl 0.7.0's test window.
+    const TD15EX_NOW: &str = "2026-11-06T23:45:10Z";
+    const TD15EX_MR_TD: &str =
+        "2a674327c50218dba880066b349b8d559d749ed68dce33fd651c184a877d084b07a9e583767a7ad5da13ed91deec2b70";
 
     #[derive(Debug, Deserialize)]
     struct DcapMalformedCorpus {
@@ -560,6 +587,100 @@ mod tests {
         assert_eq!(verified.report_data.len(), 128);
         assert_eq!(verified.issued_at, "2025-06-20T00:00:00Z");
         assert_eq!(verified.expires_at, "2025-07-19T10:00:35Z");
+    }
+
+    #[test]
+    fn dcap_tdx_verifier_accepts_real_td15ex_quote_with_matching_collateral() {
+        // Upstream dcap-qvl 0.7.0 sample: a quote v5 body type 4
+        // (sgx_report2_body_v1_5_ex_t) signed by a real Intel PCK chain.
+        let now = parse_utc_timestamp_millis(TD15EX_NOW).unwrap();
+        let verifier =
+            DcapTdxTinfoilQuoteVerifier::from_collateral_json_at(SAMPLE_TD15EX_COLLATERAL, now)
+                .unwrap();
+        let capture = quote_capture();
+        let request = quote_request(SAMPLE_TD15EX_QUOTE, &capture);
+
+        let verified = verifier.verify_tinfoil_quote(&request).unwrap();
+
+        assert_eq!(
+            verified.attestation_format,
+            TinfoilAttestationFormat::TdxGuestV2.as_str()
+        );
+        assert_eq!(verified.hardware.cpu, CpuTeeKind::Tdx);
+        assert!(
+            verified
+                .tee_measurement
+                .starts_with(&format!("tdx:mr_td:{TD15EX_MR_TD}:")),
+            "unexpected tee_measurement: {}",
+            verified.tee_measurement
+        );
+        assert_eq!(verified.report_data.len(), 128);
+        assert_eq!(verified.issued_at, TD15EX_NOW);
+        assert_eq!(verified.expires_at, "2026-11-06T23:45:11Z");
+    }
+
+    #[test]
+    fn dcap_tdx_rejects_non_current_components_despite_up_to_date_convergence() {
+        let now = parse_utc_timestamp_millis(TD15EX_NOW).unwrap();
+        let verifier =
+            DcapTdxTinfoilQuoteVerifier::from_collateral_json_at(SAMPLE_TD15EX_COLLATERAL, now)
+                .unwrap();
+        let mut verified =
+            dcap_qvl::verify::verify(SAMPLE_TD15EX_QUOTE, &verifier.collateral, now / 1000)
+                .unwrap();
+        assert_eq!(verified.status, "UpToDate");
+        validate_tcb_status(&verified).unwrap();
+
+        verified.qe_status.status = TcbStatus::ConfigurationNeeded;
+        assert!(matches!(
+            validate_tcb_status(&verified),
+            Err(AttestationError::InvalidEvidence(_))
+        ));
+
+        verified.qe_status.status = TcbStatus::UpToDate;
+        verified.platform_status.status = TcbStatus::SWHardeningNeeded;
+        assert!(matches!(
+            validate_tcb_status(&verified),
+            Err(AttestationError::InvalidEvidence(_))
+        ));
+    }
+
+    #[test]
+    fn dcap_tdx_verifier_rejects_td15ex_signed_extension_tampering() {
+        // The 1.5ex extension fields sit inside the signed region: a flip must
+        // fail signature verification, not be silently accepted.
+        let now = parse_utc_timestamp_millis(TD15EX_NOW).unwrap();
+        let verifier =
+            DcapTdxTinfoilQuoteVerifier::from_collateral_json_at(SAMPLE_TD15EX_COLLATERAL, now)
+                .unwrap();
+        // File offset of the td_id extension field (48-byte header + 6-byte
+        // v5 body + 649-byte offset into the 885-byte report).
+        let mut quote = SAMPLE_TD15EX_QUOTE.to_vec();
+        quote[48 + 6 + 649] ^= 0x01;
+        let capture = quote_capture();
+        let request = quote_request(&quote, &capture);
+
+        assert!(matches!(
+            verifier.verify_tinfoil_quote(&request),
+            Err(AttestationError::InvalidEvidence(_))
+        ));
+    }
+
+    #[test]
+    fn dcap_tdx_verifier_rejects_td15ex_body_size_mismatch() {
+        // Body type 4 requires an 885-byte report; the v5 body-size field is at 50..54.
+        let mut quote = SAMPLE_TD15EX_QUOTE.to_vec();
+        quote[50] ^= 0x01;
+
+        assert!(Quote::parse(&quote).is_err());
+
+        let now = parse_utc_timestamp_millis(TD15EX_NOW).unwrap();
+        let verifier =
+            DcapTdxTinfoilQuoteVerifier::from_collateral_json_at(SAMPLE_TD15EX_COLLATERAL, now)
+                .unwrap();
+        let capture = quote_capture();
+        let request = quote_request(&quote, &capture);
+        assert!(verifier.verify_tinfoil_quote(&request).is_err());
     }
 
     #[test]

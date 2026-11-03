@@ -88,9 +88,7 @@ step "sbom" python3 tools/generate_sbom.py --output target/confidential-inferenc
 step "sbom-check" python3 tools/generate_sbom.py --output target/confidential-inference-sbom.json --check
 
 if have npm; then
-  if [ ! -d bindings/node/node_modules ]; then
-    step "node-deps" bash -c 'cd bindings/node && npm ci'
-  fi
+  step "node-deps" bash -c 'cd bindings/node && npm ci'
   step "node-bindings" bash -c 'cd bindings/node && npm test'
 else
   skip "node-bindings" "npm not found"

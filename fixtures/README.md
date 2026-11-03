@@ -68,6 +68,13 @@ provider artifacts exist.
 
 - `evidence/dcap-qvl/tdx_quote.bin` and
   `evidence/dcap-qvl/tdx_quote_collateral.json` are the positive sample.
+- `evidence/dcap-qvl/tdx_quote_td15ex.bin` and
+  `evidence/dcap-qvl/tdx_quote_td15ex_collateral.json` are the upstream
+  dcap-qvl 0.7.0 samples for the TDX 1.5ex quote v5 body type 4
+  (`sample/tdx_quote_td15ex` and `sample/tdx_quote_td15ex_collateral.json` in
+  the published crate, commit 94208e2753a854191759e493ca5892be482ad453). They
+  are copied byte-for-byte so the verifier exercises the new report layout
+  against a real Intel-signed quote.
 - `evidence/dcap-qvl/malformed-corpus.json` covers malformed quote and
   collateral inputs.
 - `evidence/dcap-qvl/mutation-sweep.json` defines deterministic quote and
