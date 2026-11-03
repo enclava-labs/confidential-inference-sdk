@@ -7,7 +7,7 @@ or publish a source fork.
 
 The workspace currently selects:
 
-- `dcap-qvl` `0.6.1`
+- `dcap-qvl` `0.6.6` (resolved in `Cargo.lock`; the `0.6.1` requirement selects it)
 - default features disabled
 - `std`, `ring`, and `default-x509` enabled
 - `report` additionally enabled by the provider crate that fetches collateral
@@ -29,21 +29,10 @@ validation code without changing the runtime path. Upstream feature selection
 and a locked dependency graph provide the required backend control with less
 maintenance risk.
 
-## Remaining upstream metadata
+## Lockfile hygiene
 
-`dcap-qvl-webpki` declares an optional RustCrypto RSA backend. Cargo records
-`rsa 0.9.10` in `Cargo.lock`, so Cargo Audit sees RUSTSEC-2023-0071 even though
-the SDK selects `ring`.
-
-```bash
-cargo tree --target all -i rsa
-```
-
-The command prints no reverse dependency tree: RSA is not enabled or compiled
-for any SDK target. Removing the lockfile entry would require an upstream
-webpki release that drops the optional dependency or another local fork. The
-SDK keeps the narrowly scoped Cargo Audit exception and verifies the active
-graph instead.
+`rsa` no longer appears in `Cargo.lock`, so no Cargo Audit exception is
+required. `cargo audit` runs unfiltered in CI.
 
 ## Release policy
 

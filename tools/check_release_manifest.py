@@ -36,6 +36,7 @@ from live_conformance import (
     validate_model_alias_matrix_envelope_matches_payload,
 )
 from artifact_signatures import (
+    DEFAULT_TRUSTED_SIGNING_KEYS,
     ArtifactSignatureError,
     TrustedSigningKey,
     verify_artifact_signature,
@@ -469,6 +470,7 @@ def _validate_live_report_artifact_metadata(
     violations: list[str],
     *,
     require_payload_digest: bool,
+    trusted_signing_keys: list[TrustedSigningKey] | None,
 ) -> None:
     metadata = report.get(section)
     if not isinstance(metadata, dict):
@@ -513,6 +515,9 @@ def _validate_live_report_artifact_metadata(
                     signature,
                     canonical_json(payload).encode("utf-8"),
                     relative_path.as_posix(),
+                    DEFAULT_TRUSTED_SIGNING_KEYS
+                    if trusted_signing_keys is None
+                    else trusted_signing_keys,
                 )
             except (ArtifactSignatureError, ValueError) as error:
                 violations.append(str(error))
@@ -521,50 +526,47 @@ def _validate_live_report_artifact_metadata(
 def _validate_live_report_trust_artifact_metadata(
     report: dict[str, Any],
     workspace_root: Path,
+    plan_artifact_paths: dict[str, str],
+    trusted_signing_keys: list[TrustedSigningKey] | None,
     violations: list[str],
 ) -> None:
-    _validate_live_report_artifact_metadata(
-        report,
-        workspace_root,
-        "model_alias_matrix",
-        MODEL_ALIAS_MATRIX_PATH,
-        violations,
-        require_payload_digest=False,
-    )
-    _validate_live_report_artifact_metadata(
-        report,
-        workspace_root,
-        "model_alias_matrix_envelope",
-        MODEL_ALIAS_MATRIX_ENVELOPE_PATH,
-        violations,
-        require_payload_digest=True,
-    )
-    _validate_live_report_artifact_metadata(
-        report,
-        workspace_root,
-        "compatibility_matrix",
-        COMPATIBILITY_MATRIX_PATH,
-        violations,
-        require_payload_digest=False,
-    )
-    _validate_live_report_artifact_metadata(
-        report,
-        workspace_root,
-        "compatibility_matrix_envelope",
-        COMPATIBILITY_MATRIX_ENVELOPE_PATH,
-        violations,
-        require_payload_digest=True,
-    )
+    for section, path_field, require_payload_digest in (
+        ("model_alias_matrix", "model_alias_matrix_path", False),
+        ("model_alias_matrix_envelope", "model_alias_matrix_envelope_path", True),
+        ("compatibility_matrix", "compatibility_matrix_path", False),
+        ("compatibility_matrix_envelope", "compatibility_matrix_envelope_path", True),
+    ):
+        relative = plan_artifact_paths.get(path_field)
+        if relative is None:
+            # The plan loader already reported the missing field.
+            continue
+        _validate_live_report_artifact_metadata(
+            report,
+            workspace_root,
+            section,
+            Path(relative),
+            violations,
+            require_payload_digest=require_payload_digest,
+            trusted_signing_keys=trusted_signing_keys,
+        )
 
 
 def _signed_live_compatibility_profiles(
     workspace_root: Path,
+    matrix_paths: dict[str, str],
+    trusted_signing_keys: list[TrustedSigningKey] | None,
     violations: list[str],
 ) -> dict[str, dict[str, Any]] | None:
+    matrix_path = matrix_paths.get("compatibility_matrix_path")
+    envelope_path = matrix_paths.get("compatibility_matrix_envelope_path")
+    if matrix_path is None or envelope_path is None:
+        # The plan loader already reported the missing fields.
+        return None
     try:
-        matrix_source = load_compatibility_matrix(workspace_root / COMPATIBILITY_MATRIX_PATH)
+        matrix_source = load_compatibility_matrix(workspace_root / matrix_path)
         envelope_source = load_compatibility_matrix_envelope(
-            workspace_root / COMPATIBILITY_MATRIX_ENVELOPE_PATH
+            workspace_root / envelope_path,
+            trusted_signing_keys,
         )
         validate_compatibility_matrix_envelope_matches_payload(
             matrix_source,
@@ -582,12 +584,20 @@ def _signed_live_compatibility_profiles(
 
 def _signed_live_model_alias_provider_models(
     workspace_root: Path,
+    matrix_paths: dict[str, str],
+    trusted_signing_keys: list[TrustedSigningKey] | None,
     violations: list[str],
 ) -> dict[str, list[str]] | None:
+    matrix_path = matrix_paths.get("model_alias_matrix_path")
+    envelope_path = matrix_paths.get("model_alias_matrix_envelope_path")
+    if matrix_path is None or envelope_path is None:
+        # The plan loader already reported the missing fields.
+        return None
     try:
-        matrix_source = load_model_alias_matrix(workspace_root / MODEL_ALIAS_MATRIX_PATH)
+        matrix_source = load_model_alias_matrix(workspace_root / matrix_path)
         envelope_source = load_model_alias_matrix_envelope(
-            workspace_root / MODEL_ALIAS_MATRIX_ENVELOPE_PATH
+            workspace_root / envelope_path,
+            trusted_signing_keys,
         )
         validate_model_alias_matrix_envelope_matches_payload(
             matrix_source,
@@ -600,40 +610,49 @@ def _signed_live_model_alias_provider_models(
     return matrix_source.provider_models
 
 
-def _expected_live_conformance_plan_providers(
+def _load_live_conformance_plan(
     workspace_root: Path,
+    plan_path: Path | None,
     violations: list[str],
-) -> dict[str, dict[str, Any]]:
-    plan_path = workspace_root / LIVE_CONFORMANCE_PLAN_PATH
+) -> tuple[str, dict[str, str], dict[str, dict[str, Any]]]:
+    """Load the live-conformance plan and return (display path, matrix paths, providers)."""
+    display_path = (
+        plan_path.as_posix() if plan_path is not None else "<no live conformance plan>"
+    )
+    if plan_path is None:
+        violations.append("a live conformance plan path is required")
+        return display_path, {}, {}
+    plan_path = plan_path if plan_path.is_absolute() else workspace_root / plan_path
     try:
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        violations.append(
-            f"live conformance plan cannot be loaded from "
-            f"{LIVE_CONFORMANCE_PLAN_PATH.as_posix()}: {error}"
-        )
-        return {}
+        violations.append(f"live conformance plan cannot be loaded: {error}")
+        return display_path, {}, {}
     if not isinstance(plan, dict):
         violations.append("live conformance plan must be an object")
-        return {}
+        return display_path, {}, {}
     if plan.get("schema") != LIVE_CONFORMANCE_PLAN_SCHEMA:
         violations.append(
             f"live conformance plan schema must be {LIVE_CONFORMANCE_PLAN_SCHEMA}"
         )
-    for field, expected_path in (
-        ("model_alias_matrix_path", MODEL_ALIAS_MATRIX_PATH),
-        ("model_alias_matrix_envelope_path", MODEL_ALIAS_MATRIX_ENVELOPE_PATH),
-        ("compatibility_matrix_path", COMPATIBILITY_MATRIX_PATH),
-        ("compatibility_matrix_envelope_path", COMPATIBILITY_MATRIX_ENVELOPE_PATH),
+    matrix_paths: dict[str, str] = {}
+    for field in (
+        "model_alias_matrix_path",
+        "model_alias_matrix_envelope_path",
+        "compatibility_matrix_path",
+        "compatibility_matrix_envelope_path",
     ):
-        if plan.get(field) != expected_path.as_posix():
+        value = plan.get(field)
+        if not _non_empty_string(value):
             violations.append(
-                f"live conformance plan {field} must be {expected_path.as_posix()}"
+                f"live conformance plan {field} must be a non-empty path"
             )
+            continue
+        matrix_paths[field] = value
     providers = plan.get("providers")
     if not isinstance(providers, list) or not providers:
         violations.append("live conformance plan providers must be a non-empty array")
-        return {}
+        return display_path, matrix_paths, {}
     plan_providers: dict[str, dict[str, Any]] = {}
     for index, provider in enumerate(providers):
         if not isinstance(provider, dict):
@@ -651,16 +670,7 @@ def _expected_live_conformance_plan_providers(
             )
             continue
         plan_providers[provider_id] = provider
-    return plan_providers
-
-
-def _expected_live_conformance_provider_ids(
-    workspace_root: Path,
-    violations: list[str],
-) -> list[str]:
-    return sorted(
-        _expected_live_conformance_plan_providers(workspace_root, violations)
-    )
+    return display_path, matrix_paths, plan_providers
 
 
 def _live_report_provider_enable_overrides(
@@ -972,6 +982,8 @@ def _validate_live_provider_enablement(
 def _validate_live_conformance_report(
     workspace_root: Path,
     report_path: Path | None,
+    plan_path: Path | None,
+    trusted_signing_keys: list[TrustedSigningKey] | None,
     violations: list[str],
 ) -> bool:
     if report_path is None:
@@ -1000,24 +1012,34 @@ def _validate_live_conformance_report(
     if report.get("network_enabled") is not True:
         violations.append("live conformance report must be generated with network_enabled=true")
     _validate_live_report_freshness(report, violations)
-    _validate_live_report_trust_artifact_metadata(report, workspace_root, violations)
+    plan_display, matrix_paths, plan_providers = _load_live_conformance_plan(
+        workspace_root,
+        plan_path,
+        violations,
+    )
+    _validate_live_report_trust_artifact_metadata(
+        report,
+        workspace_root,
+        matrix_paths,
+        trusted_signing_keys,
+        violations,
+    )
     enable_all, enabled_provider_overrides = _live_report_provider_enable_overrides(
         report,
         violations,
     )
-    plan_providers = _expected_live_conformance_plan_providers(
-        workspace_root,
-        violations,
-    )
     model_alias_provider_models = _signed_live_model_alias_provider_models(
         workspace_root,
+        matrix_paths,
+        trusted_signing_keys,
         violations,
     )
     compatibility_profiles = _signed_live_compatibility_profiles(
         workspace_root,
+        matrix_paths,
+        trusted_signing_keys,
         violations,
     )
-
     providers = report.get("providers")
     if not isinstance(providers, list) or not providers:
         violations.append("live conformance report providers must be a non-empty array")
@@ -1071,8 +1093,8 @@ def _validate_live_conformance_report(
         missing = sorted(set(expected_provider_ids) - set(report_provider_ids))
         extra = sorted(set(report_provider_ids) - set(expected_provider_ids))
         violations.append(
-            "live conformance report providers must match "
-            f"{LIVE_CONFORMANCE_PLAN_PATH.as_posix()}: missing={missing} extra={extra}"
+            f"live conformance report providers must match {plan_display}: "
+            f"missing={missing} extra={extra}"
         )
     unknown_enabled_overrides = sorted(
         set(enabled_provider_overrides) - set(expected_provider_ids)
@@ -1476,6 +1498,7 @@ def validate_manifest(
     live_conformance_report_path: Path | None = None,
     require_production_release: bool = False,
     dcap_production_review_path: Path | None = None,
+    live_conformance_plan_path: Path | None = None,
 ) -> dict[str, Any]:
     workspace_root = workspace_root.resolve()
     manifest_path = manifest_path if manifest_path.is_absolute() else workspace_root / manifest_path
@@ -1518,9 +1541,22 @@ def validate_manifest(
         violations,
     )
     _validate_sbom(workspace_root, manifest, sbom_path, violations)
+    # Production evidence verifies against operator keys only; never fall back
+    # to the bundled fixture signing keys there.
+    live_artifact_trust_keys = (
+        trusted_release_keys if require_production_release else None
+    )
+    if require_production_release and live_conformance_plan_path is None:
+        violations.append(
+            "production release requires an operator-supplied live conformance "
+            "plan (--live-conformance-plan)"
+        )
+    effective_plan_path = live_conformance_plan_path or LIVE_CONFORMANCE_PLAN_PATH
     live_conformance_gate_verified = _validate_live_conformance_report(
         workspace_root,
         live_conformance_report_path,
+        effective_plan_path,
+        live_artifact_trust_keys,
         violations,
     )
     dcap_production_review_verified = _validate_dcap_production_review(
@@ -1653,6 +1689,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--live-conformance-plan",
+        type=Path,
+        help=(
+            "Live conformance plan the report was produced under. Defaults to "
+            "the bundled fixture plan; production releases must supply an "
+            "operator plan because it selects the signed trust matrices."
+        ),
+    )
+    parser.add_argument(
         "--production-release",
         action="store_true",
         help=(
@@ -1693,6 +1738,7 @@ def main(argv: list[str] | None = None) -> int:
             args.live_conformance_report,
             args.production_release,
             args.dcap_production_review,
+            live_conformance_plan_path=args.live_conformance_plan,
         )
     except ReleaseManifestError as error:
         print(f"check_release_manifest.py: {error}", file=sys.stderr)

@@ -65,76 +65,6 @@ def _package_name(manifest_path: Path, manifest: dict[str, Any]) -> str:
         raise ReleasePackagingError(f"{manifest_path}: package.name is required")
     return name
 
-
-def discover_local_path_patches(
-    workspace_root: Path,
-    release_packages: list[str],
-) -> dict[str, str]:
-    """Return crates.io patches needed to package unpublished local dependencies.
-
-    Cargo normalizes path dependencies to registry dependencies while preparing a
-    package. Without temporary patches, a workspace cannot package a crate that
-    depends on another workspace crate until the dependency has already been
-    published. Recursively patching every local dependency keeps the release gate
-    useful before the first publish while preserving the normalized archive.
-    """
-
-    workspace_root = workspace_root.resolve()
-    root_manifest = load_toml(workspace_root / "Cargo.toml")
-    workspace_manifests: dict[str, Path] = {}
-    for member in _workspace_members(root_manifest):
-        manifest_path = (workspace_root / member / "Cargo.toml").resolve()
-        manifest = load_toml(manifest_path)
-        workspace_manifests[_package_name(manifest_path, manifest)] = manifest_path
-
-    missing = sorted(set(release_packages) - set(workspace_manifests))
-    if missing:
-        raise ReleasePackagingError(
-            "release package manifests are missing from the workspace: " + ", ".join(missing)
-        )
-
-    pending = [workspace_manifests[name] for name in release_packages]
-    visited: set[Path] = set()
-    patch_paths: dict[str, Path] = {}
-    while pending:
-        manifest_path = pending.pop()
-        if manifest_path in visited:
-            continue
-        visited.add(manifest_path)
-        manifest = load_toml(manifest_path)
-        for _, dependencies in _dependency_sections(manifest):
-            for spec in dependencies.values():
-                if not isinstance(spec, dict) or not isinstance(spec.get("path"), str):
-                    continue
-                dependency_root = (manifest_path.parent / spec["path"]).resolve()
-                dependency_manifest_path = dependency_root / "Cargo.toml"
-                if not dependency_manifest_path.is_file():
-                    raise ReleasePackagingError(
-                        f"{manifest_path}: local dependency manifest does not exist: "
-                        f"{dependency_manifest_path}"
-                    )
-                dependency_manifest = load_toml(dependency_manifest_path)
-                dependency_name = _package_name(
-                    dependency_manifest_path, dependency_manifest
-                )
-                previous = patch_paths.get(dependency_name)
-                if previous is not None and previous != dependency_root:
-                    raise ReleasePackagingError(
-                        f"local dependency {dependency_name} resolves to both "
-                        f"{previous} and {dependency_root}"
-                    )
-                patch_paths[dependency_name] = dependency_root
-                pending.append(dependency_manifest_path)
-
-    patches: dict[str, str] = {}
-    for name, path in sorted(patch_paths.items()):
-        try:
-            patches[name] = path.relative_to(workspace_root).as_posix()
-        except ValueError:
-            patches[name] = path.as_posix()
-    return patches
-
-
 def _check_path_dependency_versions(
     manifest_path: Path,
     manifest: dict[str, Any],
@@ -224,15 +154,13 @@ def inspect_workspace(workspace_root: Path) -> dict[str, object]:
 def cargo_package_command(
     packages: list[str],
     allow_dirty: bool,
-    path_patches: dict[str, str] | None = None,
 ) -> list[str]:
+    # Cargo resolves workspace path dependencies itself when packaging multiple
+    # workspace crates in one invocation, so the packaged archives match what
+    # `cargo publish` would upload for each crate.
     command = ["cargo", "package", "--locked"]
     if allow_dirty:
         command.append("--allow-dirty")
-    for name, path in sorted((path_patches or {}).items()):
-        command.extend(
-            ["--config", f"patch.crates-io.{name}.path={json.dumps(path)}"]
-        )
     for package in packages:
         command.extend(["-p", package])
     return command
@@ -258,8 +186,7 @@ def run_cargo_package(
 ) -> tuple[int, list[str]]:
     if clean_first:
         clean_target_package_archives(workspace_root)
-    path_patches = discover_local_path_patches(workspace_root, packages)
-    command = cargo_package_command(packages, allow_dirty, path_patches)
+    command = cargo_package_command(packages, allow_dirty)
     completed = subprocess.run(command, cwd=workspace_root, check=False)
     return completed.returncode, command
 

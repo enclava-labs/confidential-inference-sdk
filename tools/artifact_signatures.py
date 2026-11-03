@@ -71,6 +71,16 @@ DEFAULT_TRUSTED_SIGNING_KEYS: tuple[TrustedSigningKey, ...] = (
     ),
 )
 
+def parse_trusted_signing_key(value: str) -> TrustedSigningKey:
+    """Parse a SIGNER:KEY_ID:PUBLIC_KEY_BASE64URL trusted key specification."""
+    parts = value.split(":")
+    if len(parts) != 3 or not all(parts):
+        raise ArtifactSignatureError(
+            "trusted signing key must be SIGNER:KEY_ID:PUBLIC_KEY_BASE64URL"
+        )
+    signer, key_id, public_key_base64url = parts
+    return TrustedSigningKey(signer, key_id, public_key_base64url)
+
 
 def verify_artifact_signature(
     signature: Mapping[str, str],

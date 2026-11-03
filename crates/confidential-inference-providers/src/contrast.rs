@@ -102,8 +102,18 @@ pub fn require_privatemode_contrast_images_verified(
 
 pub fn verify_privatemode_contrast_active_evidence(
     evidence: &PrivatemodeContrastActiveEvidence,
+    expected_manifest_sha256: &str,
 ) -> Result<PrivatemodeContrastActiveVerification> {
     let manifest = summarize_privatemode_contrast_manifest_bytes(&evidence.manifest_bytes)?;
+    let expected = expected_manifest_sha256
+        .trim()
+        .trim_start_matches("sha256:")
+        .to_ascii_lowercase();
+    if manifest.manifest_sha256 != expected {
+        return Err(ProviderError::Compatibility(
+            "Privatemode Contrast manifest digest does not match the expected reference".into(),
+        ));
+    }
     require_privatemode_contrast_manifest_active(&manifest)?;
 
     let images = summarize_privatemode_contrast_initdata_texts(
@@ -155,7 +165,7 @@ fn extract_reference_values(manifest: &Value) -> Vec<String> {
                     .unwrap_or_else(|| "unknown".into());
                 reference_values.push(format!(
                     "SNP/{product}:{}",
-                    &measurement[..24.min(measurement.len())]
+                    truncated_prefix(&measurement, 24)
                 ));
             }
         }
@@ -169,7 +179,7 @@ fn extract_reference_values(manifest: &Value) -> Vec<String> {
             if let Some(mr_td) =
                 string_field(entry, &["MrTd"]).or_else(|| string_field(entry, &["mr_td"]))
             {
-                reference_values.push(format!("TDX:{}", &mr_td[..24.min(mr_td.len())]));
+                reference_values.push(format!("TDX:{}", truncated_prefix(&mr_td, 24)));
             }
         }
     }
@@ -238,7 +248,7 @@ fn required_model_path<'a>(value: Option<&'a str>, message: &str) -> Result<&'a 
         .ok_or_else(|| ProviderError::Compatibility(message.into()))
 }
 
-fn extract_marker_image_values(text: &str, marker: &str) -> Vec<String> {
+pub(crate) fn extract_marker_image_values(text: &str, marker: &str) -> Vec<String> {
     let mut values = Vec::new();
     let mut offset = 0;
     while let Some(position) = text[offset..].find(marker) {
@@ -247,10 +257,19 @@ fn extract_marker_image_values(text: &str, marker: &str) -> Vec<String> {
             .chars()
             .take_while(|c| is_image_ref_char(*c))
             .collect::<String>();
+        let skip = if value.is_empty() {
+            // One char past the marker keeps the next slice on a char boundary.
+            text[value_start..].chars().next().map_or(1, char::len_utf8)
+        } else {
+            value.len()
+        };
         if looks_like_container_image_ref(&value) {
             values.push(value);
         }
-        offset = value_start.saturating_add(1);
+        offset = value_start + skip;
+        if offset >= text.len() {
+            break;
+        }
     }
     values
 }
@@ -319,6 +338,13 @@ fn is_image_ref_char(value: char) -> bool {
 
 fn is_image_ref_byte(value: u8) -> bool {
     value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-' | b'/' | b':' | b'@')
+}
+
+fn truncated_prefix(value: &str, chars: usize) -> &str {
+    match value.char_indices().nth(chars) {
+        Some((index, _)) => &value[..index],
+        None => value,
+    }
 }
 
 fn string_field(value: &Value, path: &[&str]) -> Option<String> {
@@ -431,7 +457,8 @@ mod tests {
                 local_proxy_model_path: case.local_proxy_model_path.clone(),
                 expected_model_path: case.expected_model_path.clone(),
             };
-            let result = verify_privatemode_contrast_active_evidence(&evidence);
+            let expected_digest = sha256_hex(&evidence.manifest_bytes);
+            let result = verify_privatemode_contrast_active_evidence(&evidence, &expected_digest);
 
             match (
                 case.expected.as_ref(),
@@ -602,7 +629,11 @@ mod tests {
     fn privatemode_active_evidence_verifies_manifest_images_coordinator_and_model_path() {
         let evidence = active_contrast_evidence();
 
-        let verification = verify_privatemode_contrast_active_evidence(&evidence).unwrap();
+        let verification = verify_privatemode_contrast_active_evidence(
+            &evidence,
+            &sha256_hex(&evidence.manifest_bytes),
+        )
+        .unwrap();
 
         assert_eq!(verification.model_path, MODEL_PATH);
         assert_eq!(
@@ -622,9 +653,12 @@ mod tests {
         let mut evidence = active_contrast_evidence();
         evidence.coordinator_attestation_verified = false;
 
-        let error = verify_privatemode_contrast_active_evidence(&evidence)
-            .unwrap_err()
-            .to_string();
+        let error = verify_privatemode_contrast_active_evidence(
+            &evidence,
+            &sha256_hex(&evidence.manifest_bytes),
+        )
+        .unwrap_err()
+        .to_string();
 
         assert!(error.contains("Coordinator attestation was not verified"));
     }
@@ -634,9 +668,12 @@ mod tests {
         let mut evidence = active_contrast_evidence();
         evidence.local_proxy_model_path = Some("privatemode/models/wrong-model".into());
 
-        let error = verify_privatemode_contrast_active_evidence(&evidence)
-            .unwrap_err()
-            .to_string();
+        let error = verify_privatemode_contrast_active_evidence(
+            &evidence,
+            &sha256_hex(&evidence.manifest_bytes),
+        )
+        .unwrap_err()
+        .to_string();
 
         assert!(error.contains("local proxy model path mismatch"));
     }
@@ -646,9 +683,12 @@ mod tests {
         let mut evidence = active_contrast_evidence();
         evidence.local_proxy_model_path = None;
 
-        let error = verify_privatemode_contrast_active_evidence(&evidence)
-            .unwrap_err()
-            .to_string();
+        let error = verify_privatemode_contrast_active_evidence(
+            &evidence,
+            &sha256_hex(&evidence.manifest_bytes),
+        )
+        .unwrap_err()
+        .to_string();
 
         assert!(error.contains("local proxy model path was not confirmed"));
     }
@@ -672,9 +712,12 @@ mod tests {
         });
         evidence.manifest_bytes = serde_json::to_vec(&manifest).unwrap();
 
-        let error = verify_privatemode_contrast_active_evidence(&evidence)
-            .unwrap_err()
-            .to_string();
+        let error = verify_privatemode_contrast_active_evidence(
+            &evidence,
+            &sha256_hex(&evidence.manifest_bytes),
+        )
+        .unwrap_err()
+        .to_string();
 
         assert!(error.contains("coordinator workload"));
     }
@@ -692,10 +735,59 @@ mod tests {
         });
         evidence.manifest_bytes = serde_json::to_vec(&manifest).unwrap();
 
-        let error = verify_privatemode_contrast_active_evidence(&evidence)
+        let error = verify_privatemode_contrast_active_evidence(
+            &evidence,
+            &sha256_hex(&evidence.manifest_bytes),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("platform reference values"));
+    }
+
+    #[test]
+    fn privatemode_active_evidence_rejects_manifest_digest_mismatch() {
+        let evidence = active_contrast_evidence();
+
+        let error = verify_privatemode_contrast_active_evidence(&evidence, &"ab".repeat(32))
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("platform reference values"));
+        assert!(error.contains("manifest digest does not match"));
+    }
+
+    #[test]
+    fn privatemode_manifest_truncates_multibyte_measurement_safely() {
+        let manifest = serde_json::json!({
+            "ReferenceValues": {
+                "snp": [{
+                    "ProductName": "Genoa",
+                    "TrustedMeasurement": format!("\u{2603}{}", "ab".repeat(30))
+                }],
+                "tdx": [{"MrTd": format!("x\u{2603}{}", "cd".repeat(30))}]
+            },
+            "Policies": {}
+        });
+        let summary =
+            summarize_privatemode_contrast_manifest_bytes(&serde_json::to_vec(&manifest).unwrap())
+                .unwrap();
+        // 24 chars kept, cut on char boundaries (the snowman is 3 bytes).
+        let values = &summary.reference_values;
+        assert!(values.contains(&format!("SNP/Genoa:\u{2603}{}", &"ab".repeat(30)[..23])));
+        assert!(values.contains(&format!("TDX:x\u{2603}{}", &"cd".repeat(30)[..22])));
+    }
+
+    #[test]
+    fn privatemode_marker_at_text_end_does_not_panic() {
+        let text = "prefix io.kubernetes.cri.image-name\": \"";
+        let summary = summarize_privatemode_contrast_initdata_texts([text]);
+        assert!(summary.image_refs.is_empty());
+    }
+
+    #[test]
+    fn privatemode_marker_followed_by_multibyte_char_does_not_panic() {
+        let text = "io.kubernetes.cri.image-name\": \"\u{2603} more";
+        let summary = summarize_privatemode_contrast_initdata_texts([text]);
+        assert!(summary.image_refs.is_empty());
     }
 }

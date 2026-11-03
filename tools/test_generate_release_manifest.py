@@ -106,6 +106,22 @@ repository = "https://github.com/enclava-labs/confidential-inference-sdk"
             rendered_signature = generate_release_manifest.render_signature(signature)
             self.assertEqual(json.loads(rendered_signature), signature)
 
+    def test_check_output_fails_when_output_is_missing_or_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "manifest.json"
+
+            self.assertIsNotNone(
+                generate_release_manifest.check_output(output, "{}\n")
+            )
+
+            output.write_text("{}\n", encoding="utf-8")
+            self.assertIsNone(generate_release_manifest.check_output(output, "{}\n"))
+
+            output.write_text("{\"stale\": true}\n", encoding="utf-8")
+            self.assertIsNotNone(
+                generate_release_manifest.check_output(output, "{}\n")
+            )
+
     def test_manifest_rejects_missing_duplicate_and_outside_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

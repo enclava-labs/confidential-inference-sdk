@@ -1,16 +1,18 @@
 use async_trait::async_trait;
+use base64::Engine;
 use confidential_inference_attestation::{
     sha256_digest, DcapTdxCollateralBundle, DcapTdxCollateralBundleEnvelope,
     DcapTdxCollateralCache, DcapTdxCollateralSource, DcapTdxTinfoilQuoteVerifier,
     TrustedSigningKey,
 };
+use dcap_qvl::config::{Config, ParsedCert, PckCa, X509Codec};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tracing::Instrument;
@@ -22,14 +24,28 @@ struct DcapReqwestHttp(reqwest::Client);
 
 impl dcap_qvl::http::HttpClient for DcapReqwestHttp {
     async fn get(&self, url: &str) -> anyhow::Result<dcap_qvl::http::HttpResponse> {
-        let response = self.0.get(url).send().await?;
+        let response = self
+            .0
+            .get(url)
+            .timeout(crate::tls::FETCH_REQUEST_TIMEOUT)
+            .send()
+            .await?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
             .iter()
             .map(|(name, value)| Ok((name.as_str().to_owned(), value.to_str()?.to_owned())))
             .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
-        let body = response.bytes().await?.to_vec();
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            anyhow::ensure!(
+                body.len() + chunk.len() <= MAX_PCCS_RESPONSE_BYTES,
+                "PCCS response exceeds {} bytes",
+                MAX_PCCS_RESPONSE_BYTES
+            );
+            body.extend_from_slice(&chunk);
+        }
         Ok(dcap_qvl::http::HttpResponse {
             status,
             headers,
@@ -38,6 +54,8 @@ impl dcap_qvl::http::HttpClient for DcapReqwestHttp {
     }
 }
 
+const MAX_PCCS_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
 const DEFAULT_DCAP_TDX_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_DCAP_TDX_FETCH_ATTEMPTS: usize = 2;
 const DEFAULT_DCAP_TDX_FETCH_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
@@ -45,6 +63,141 @@ const DEFAULT_DCAP_TDX_FETCH_MAX_BACKOFF: Duration = Duration::from_secs(2);
 const DEFAULT_DCAP_TDX_MAX_CONCURRENT_FETCHES: usize = 4;
 const DEFAULT_DCAP_TDX_MAX_QUEUED_FETCHES: usize = 16;
 const DEFAULT_DCAP_TDX_FETCH_QUEUE_TIMEOUT: Duration = Duration::from_secs(30);
+const COLLATERAL_STORE_MAX_ENTRIES: usize = 256;
+
+/// Platform collateral (PCK CRL, TCB info, QE identity, root CA CRL) is
+/// identical for every quote from the same platform, but Chutes/NEAR quotes
+/// embed a fresh nonce so a quote-sha256 cache never hits. Cache fetched
+/// bundles by (FMSPC, PCK CA) — the same key dcap-qvl uses to fetch them —
+/// so nonce-bearing quotes reuse collateral; quotes that do not embed a PCK
+/// chain keep the per-quote key.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum CollateralCacheKey {
+    Platform { fmspc: String, ca: String },
+    Quote { sha256: String },
+}
+
+impl CollateralCacheKey {
+    fn describe(&self) -> String {
+        match self {
+            CollateralCacheKey::Platform { fmspc, ca } => {
+                format!("platform:{fmspc}:{ca}")
+            }
+            CollateralCacheKey::Quote { sha256 } => sha256.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CollateralStore {
+    entries: BTreeMap<CollateralCacheKey, (u64, DcapTdxCollateralBundle)>,
+    sequence: u64,
+}
+
+impl CollateralStore {
+    fn insert(&mut self, key: CollateralCacheKey, value: DcapTdxCollateralBundle) {
+        let sequence = self.sequence;
+        self.sequence = self.sequence.wrapping_add(1);
+        self.entries.insert(key, (sequence, value));
+        while self.entries.len() > COLLATERAL_STORE_MAX_ENTRIES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (sequence, _))| *sequence)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+}
+
+/// Derives the collateral cache key for a quote: the platform (FMSPC + PCK
+/// CA) when the quote embeds its PCK chain, else the quote digest.
+fn collateral_key_for_quote(quote_bytes: &[u8]) -> CollateralCacheKey {
+    let fallback = || CollateralCacheKey::Quote {
+        sha256: sha256_digest(quote_bytes),
+    };
+    let Ok(quote) = dcap_qvl::quote::Quote::parse(quote_bytes) else {
+        return fallback();
+    };
+    // cert_type 5 (dcap-qvl's private PCK_ID_PCK_CERT_CHAIN) embeds the PCK
+    // certificate chain in the quote body.
+    if quote.inner_cert_type() != 5 {
+        return fallback();
+    }
+    match fmspc_and_ca_from_pem(quote.inner_cert_data()) {
+        Some((fmspc, ca)) => CollateralCacheKey::Platform { fmspc, ca },
+        None => fallback(),
+    }
+}
+
+/// Extracts (FMSPC hex, PCK CA id) from a PEM PCK chain, mirroring
+/// dcap-qvl's `extract_fmspc_and_ca_with` on the same public types it uses.
+fn fmspc_and_ca_from_pem(pem_chain: &[u8]) -> Option<(String, String)> {
+    let cert_der = pem_certificates(pem_chain)?.into_iter().next()?;
+    let parsed =
+        <<dcap_qvl::configs::DefaultConfig as Config>::X509 as X509Codec>::from_der(&cert_der)
+            .ok()?;
+    let extension = parsed
+        .extension(dcap_qvl::oids::SGX_EXTENSION.as_bytes())
+        .ok()??;
+    let fmspc = sgx_extension_octet_value(&extension, dcap_qvl::oids::FMSPC.as_bytes())?;
+    let ca = parsed.pck_ca().unwrap_or(PckCa::Processor);
+    Some((encode_hex_upper(&fmspc), ca.as_id_str().to_owned()))
+}
+
+/// Extracts DER certificates from a PEM bundle.
+fn pem_certificates(pem_chain: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let text = std::str::from_utf8(pem_chain).ok()?;
+    let mut certificates = Vec::new();
+    let mut remainder = text;
+    while let Some(start) = remainder.find("-----BEGIN CERTIFICATE-----") {
+        remainder = &remainder[start + "-----BEGIN CERTIFICATE-----".len()..];
+        let end = remainder.find("-----END CERTIFICATE-----")?;
+        let body: String = remainder[..end]
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        certificates.push(
+            base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .ok()?,
+        );
+        remainder = &remainder[end..];
+    }
+    Some(certificates)
+}
+
+/// Reads the OCTET STRING paired with `oid` inside an Intel SGX extension
+/// section (a SEQUENCE of {OID, OCTET STRING} pairs), the same walk
+/// dcap-qvl's `find_extension` performs.
+fn sgx_extension_octet_value(extension: &[u8], oid: &[u8]) -> Option<Vec<u8>> {
+    use asn1_der::typed::{DerDecodable, Sequence};
+    use asn1_der::DerObject;
+    let outer = Sequence::load(DerObject::decode(extension).ok()?).ok()?;
+    for index in 0..outer.len() {
+        let pair = Sequence::load(outer.get(index).ok()?).ok()?;
+        if pair.len() < 2 {
+            continue;
+        }
+        if pair.get(0).ok()?.value() == oid {
+            return Some(pair.get(1).ok()?.value().to_vec());
+        }
+    }
+    None
+}
+
+fn encode_hex_upper(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
 
 #[async_trait]
 pub trait DcapTdxCollateralFetcher: Send + Sync {
@@ -156,8 +309,7 @@ pub struct PccsDcapTdxCollateralFetcher {
 
 impl PccsDcapTdxCollateralFetcher {
     pub fn with_default_http(pccs_url: impl Into<String>) -> Result<Self> {
-        install_default_rustls_provider();
-        let client = reqwest::Client::builder()
+        let client = crate::tls::reqwest_client_builder()
             .build()
             .map_err(|error| ProviderError::Http(error.to_string()))?;
         Ok(Self::with_reqwest_client(pccs_url, client))
@@ -183,13 +335,6 @@ impl PccsDcapTdxCollateralFetcher {
             source: DcapTdxCollateralSource::pccs(pccs_url),
         }
     }
-}
-
-fn install_default_rustls_provider() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
 }
 
 impl Debug for PccsDcapTdxCollateralFetcher {
@@ -323,6 +468,7 @@ impl Default for DcapTdxCollateralFetchPolicy {
 pub struct DcapTdxCollateralResolver {
     fetcher: Arc<dyn DcapTdxCollateralFetcher>,
     memory_cache: Arc<Mutex<DcapTdxCollateralCache>>,
+    collateral_store: Arc<Mutex<CollateralStore>>,
     cache_dir: Option<PathBuf>,
     fetch_policy: DcapTdxCollateralFetchPolicy,
     fetch_permits: Arc<Semaphore>,
@@ -344,6 +490,7 @@ impl DcapTdxCollateralResolver {
         Self {
             fetcher,
             memory_cache: Arc::new(Mutex::new(DcapTdxCollateralCache::new())),
+            collateral_store: Arc::new(Mutex::new(CollateralStore::default())),
             cache_dir: None,
             fetch_policy,
             fetch_permits,
@@ -435,14 +582,20 @@ impl DcapTdxCollateralResolver {
     ) -> Result<DcapTdxTinfoilQuoteVerifier> {
         let quote_digest = sha256_digest(quote_bytes);
         let quote_digest_for_span = quote_digest.clone();
+        let cache_key = collateral_key_for_quote(quote_bytes);
         async move {
             if let Some(verifier) = self.memory_verifier_for_quote(quote_bytes, now_epoch_ms)? {
                 tracing::debug!(cache_hit = "memory", "using TDX collateral memory cache");
                 self.record_cache_metric(&quote_digest, DcapTdxCollateralCacheEvent::MemoryHit);
                 return Ok(verifier);
             }
+            if let Some(verifier) = self.stored_verifier_for_key(&cache_key, now_epoch_ms)? {
+                tracing::debug!(cache_hit = "memory", "using TDX collateral memory cache");
+                self.record_cache_metric(&quote_digest, DcapTdxCollateralCacheEvent::MemoryHit);
+                return Ok(verifier);
+            }
 
-            if let Some(verifier) = self.file_verifier_for_quote(quote_bytes, now_epoch_ms)? {
+            if let Some(verifier) = self.file_verifier_for_key(&cache_key, now_epoch_ms)? {
                 tracing::debug!(cache_hit = "file", "using TDX collateral file cache");
                 self.record_cache_metric(&quote_digest, DcapTdxCollateralCacheEvent::FileHit);
                 return Ok(verifier);
@@ -454,8 +607,8 @@ impl DcapTdxCollateralResolver {
             let bundle = self
                 .fetch_bundle_with_policy(quote_bytes, now_epoch_ms)
                 .await?;
-            self.insert_memory_bundle(quote_bytes, bundle.clone())?;
-            self.write_file_bundle(quote_bytes, &bundle)?;
+            let bundle = self.insert_fetched_bundle(&cache_key, bundle)?;
+            self.write_file_bundle(&cache_key, &bundle)?;
             bundle
                 .verifier_at(now_epoch_ms)
                 .map_err(provider_attestation_error)
@@ -697,19 +850,44 @@ impl DcapTdxCollateralResolver {
             .map_err(provider_attestation_error)
     }
 
-    fn file_verifier_for_quote(
+    /// Looks up a bundle in the platform/quote store.
+    fn stored_verifier_for_key(
         &self,
-        quote_bytes: &[u8],
+        cache_key: &CollateralCacheKey,
         now_epoch_ms: u64,
     ) -> Result<Option<DcapTdxTinfoilQuoteVerifier>> {
-        let Some(path) = self.cache_path_for_quote(quote_bytes)? else {
+        let bundle = self
+            .collateral_store
+            .lock()
+            .map_err(|_| ProviderError::Adapter("TDX collateral cache lock is poisoned".into()))?
+            .entries
+            .get(cache_key)
+            .map(|(_, bundle)| bundle.clone());
+        let Some(bundle) = bundle else {
+            return Ok(None);
+        };
+        if !bundle.is_valid_at(now_epoch_ms) {
+            return Ok(None);
+        }
+        bundle
+            .verifier_at(now_epoch_ms)
+            .map(Some)
+            .map_err(provider_attestation_error)
+    }
+
+    fn file_verifier_for_key(
+        &self,
+        cache_key: &CollateralCacheKey,
+        now_epoch_ms: u64,
+    ) -> Result<Option<DcapTdxTinfoilQuoteVerifier>> {
+        let Some(path) = self.cache_path_for_key(cache_key)? else {
             return Ok(None);
         };
         if !path.exists() {
             return Ok(None);
         }
 
-        let key = sha256_digest(quote_bytes);
+        let key = cache_key.describe();
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -729,7 +907,17 @@ impl DcapTdxCollateralResolver {
                 return Ok(None);
             }
         };
-        if bundle.quote_sha256() != Some(key.as_str()) {
+        // Quote files keep the original quote digest tag. Platform files hold
+        // no PCK chain (verification uses the quote's own chain), and DCAP
+        // verification rejects collateral whose TCB info FMSPC does not match
+        // the quote's PCK certificate, so a mislabeled file fails closed.
+        let bundle_matches = match cache_key {
+            CollateralCacheKey::Platform { .. } => {
+                bundle.collateral.pck_certificate_chain.is_none()
+            }
+            CollateralCacheKey::Quote { sha256 } => bundle.quote_sha256() == Some(sha256.as_str()),
+        };
+        if !bundle_matches {
             remove_cache_file(&path)?;
             self.record_cache_metric(&key, DcapTdxCollateralCacheEvent::Invalidated);
             return Ok(None);
@@ -740,7 +928,7 @@ impl DcapTdxCollateralResolver {
             return Ok(None);
         }
 
-        self.insert_memory_bundle(quote_bytes, bundle.clone())?;
+        let bundle = self.insert_fetched_bundle(cache_key, bundle)?;
         bundle
             .verifier_at(now_epoch_ms)
             .map(Some)
@@ -759,12 +947,32 @@ impl DcapTdxCollateralResolver {
             .map_err(provider_attestation_error)
     }
 
+    /// Stores a fetched bundle and returns the stored form. Platform entries
+    /// are shared by every quote from that platform: they drop the
+    /// quote-specific tag and the PCK chain (dcap-qvl prefers a collateral
+    /// chain over the quote's own, which would pin one machine's PCK key).
+    fn insert_fetched_bundle(
+        &self,
+        cache_key: &CollateralCacheKey,
+        mut bundle: DcapTdxCollateralBundle,
+    ) -> Result<DcapTdxCollateralBundle> {
+        if matches!(cache_key, CollateralCacheKey::Platform { .. }) {
+            bundle.quote_sha256 = None;
+            bundle.collateral.pck_certificate_chain = None;
+        }
+        self.collateral_store
+            .lock()
+            .map_err(|_| ProviderError::Adapter("TDX collateral cache lock is poisoned".into()))?
+            .insert(cache_key.clone(), bundle.clone());
+        Ok(bundle)
+    }
+
     fn write_file_bundle(
         &self,
-        quote_bytes: &[u8],
+        cache_key: &CollateralCacheKey,
         bundle: &DcapTdxCollateralBundle,
     ) -> Result<()> {
-        let Some(path) = self.cache_path_for_quote(quote_bytes)? else {
+        let Some(path) = self.cache_path_for_key(cache_key)? else {
             return Ok(());
         };
         let Some(parent) = path.parent() else {
@@ -795,12 +1003,27 @@ impl DcapTdxCollateralResolver {
         Ok(())
     }
 
-    fn cache_path_for_quote(&self, quote_bytes: &[u8]) -> Result<Option<PathBuf>> {
+    fn cache_path_for_key(&self, cache_key: &CollateralCacheKey) -> Result<Option<PathBuf>> {
         let Some(cache_dir) = &self.cache_dir else {
             return Ok(None);
         };
-        let digest = sha256_digest(quote_bytes);
-        let filename = cache_filename_for_digest(&digest)?;
+        let filename = match cache_key {
+            CollateralCacheKey::Quote { sha256 } => cache_filename_for_digest(sha256)?,
+            CollateralCacheKey::Platform { fmspc, ca } => {
+                let fmspc = fmspc.trim();
+                let ca = ca.trim();
+                if fmspc.is_empty()
+                    || ca.is_empty()
+                    || !fmspc.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || !ca.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                {
+                    return Err(ProviderError::Adapter(
+                        "TDX collateral platform key is malformed".into(),
+                    ));
+                }
+                format!("platform-{fmspc}-{ca}.json")
+            }
+        };
         Ok(Some(cache_dir.join(filename)))
     }
 
@@ -1122,7 +1345,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
-        assert!(cache_file(&cache_dir, SAMPLE_QUOTE).exists());
+        let cache_files = fs::read_dir(&cache_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+            .count();
+        assert_eq!(cache_files, 1);
 
         let second_fetches = Arc::new(AtomicUsize::new(0));
         let second_resolver = DcapTdxCollateralResolver::from_fetcher(StaticFetcher {
@@ -1180,6 +1408,31 @@ mod tests {
             Some(sha256_digest(&other_quote).as_str())
         );
         let _ = fs::remove_dir_all(cache_dir);
+    }
+
+    #[tokio::test]
+    async fn resolver_fetches_once_for_quotes_from_same_platform() {
+        let now = parse_utc_timestamp_millis("2025-06-20T00:00:00Z").unwrap();
+        // Mutate a byte inside the signature region: the quote digest changes
+        // but the embedded PCK chain (and therefore FMSPC + CA) stays the
+        // same, which is the nonce-bearing Chutes/NEAR shape.
+        let mut second_quote = SAMPLE_QUOTE.to_vec();
+        second_quote[600] ^= 0x01;
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let resolver = DcapTdxCollateralResolver::from_fetcher(StaticFetcher {
+            fetches: fetches.clone(),
+        });
+
+        resolver
+            .verifier_for_quote_at(SAMPLE_QUOTE, now)
+            .await
+            .unwrap();
+        resolver
+            .verifier_for_quote_at(&second_quote, now)
+            .await
+            .unwrap();
+
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

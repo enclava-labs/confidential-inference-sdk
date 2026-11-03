@@ -24,9 +24,15 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from artifact_signatures import ArtifactSignatureError, verify_artifact_signature
+from artifact_signatures import (
+    DEFAULT_TRUSTED_SIGNING_KEYS,
+    ArtifactSignatureError,
+    TrustedSigningKey,
+    parse_trusted_signing_key,
+    verify_artifact_signature,
+)
 
 
 SCHEMA = "confidential-inference.live-conformance-report.v1"
@@ -205,10 +211,22 @@ class CompatibilityMatrixEnvelopeSource:
         }
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        # Redirects are refused: urllib would re-send unredirected headers
+        # (including Authorization) to a different, possibly http://, origin.
+        return None
+
+
 class HttpClient:
+    def __init__(self) -> None:
+        self._opener = urllib.request.build_opener(_NoRedirectHandler())
+
     def get(self, url: str, headers: dict[str, str], timeout_seconds: float) -> HttpResult:
-        request = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        request = urllib.request.Request(url, method="GET")
+        for name, value in headers.items():
+            request.add_unredirected_header(name, value)
+        with self._opener.open(request, timeout=timeout_seconds) as response:
             return HttpResult(
                 status=response.status,
                 headers={key.lower(): value for key, value in response.headers.items()},
@@ -497,7 +515,10 @@ def load_model_alias_matrix(path: Path) -> ModelAliasMatrixSource:
     )
 
 
-def load_model_alias_matrix_envelope(path: Path) -> ModelAliasMatrixEnvelopeSource:
+def load_model_alias_matrix_envelope(
+    path: Path,
+    trusted_signing_keys: Sequence[TrustedSigningKey] | None = None,
+) -> ModelAliasMatrixEnvelopeSource:
     try:
         envelope = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -521,7 +542,9 @@ def load_model_alias_matrix_envelope(path: Path) -> ModelAliasMatrixEnvelopeSour
         "model alias matrix envelope",
         envelope.get("signature"),
     )
-    _verify_artifact_signature("model alias matrix envelope", signature, payload)
+    _verify_artifact_signature(
+        "model alias matrix envelope", signature, payload, trusted_signing_keys
+    )
     return ModelAliasMatrixEnvelopeSource(
         path=path.as_posix(),
         digest=canonical_sha256_digest(envelope),
@@ -565,7 +588,10 @@ def load_compatibility_matrix(path: Path) -> CompatibilityMatrixSource:
     )
 
 
-def load_compatibility_matrix_envelope(path: Path) -> CompatibilityMatrixEnvelopeSource:
+def load_compatibility_matrix_envelope(
+    path: Path,
+    trusted_signing_keys: Sequence[TrustedSigningKey] | None = None,
+) -> CompatibilityMatrixEnvelopeSource:
     try:
         envelope = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -589,7 +615,9 @@ def load_compatibility_matrix_envelope(path: Path) -> CompatibilityMatrixEnvelop
         "compatibility matrix envelope",
         envelope.get("signature"),
     )
-    _verify_artifact_signature("compatibility matrix envelope", signature, payload)
+    _verify_artifact_signature(
+        "compatibility matrix envelope", signature, payload, trusted_signing_keys
+    )
     return CompatibilityMatrixEnvelopeSource(
         path=path.as_posix(),
         digest=canonical_sha256_digest(envelope),
@@ -642,12 +670,16 @@ def _verify_artifact_signature(
     subject: str,
     signature: dict[str, str],
     payload: dict[str, Any],
+    trusted_signing_keys: Sequence[TrustedSigningKey] | None = None,
 ) -> None:
     try:
         verify_artifact_signature(
             signature,
             canonical_json(payload).encode("utf-8"),
             subject,
+            DEFAULT_TRUSTED_SIGNING_KEYS
+            if trusted_signing_keys is None
+            else trusted_signing_keys,
         )
     except ArtifactSignatureError as error:
         raise LiveConformanceError(str(error)) from error
@@ -1065,6 +1097,7 @@ def run_conformance(
     timeout_seconds: float = 10.0,
     enable_providers: set[str] | None = None,
     enable_all_providers: bool = False,
+    trusted_signing_keys: Sequence[TrustedSigningKey] | None = None,
 ) -> dict[str, Any]:
     validate_plan(plan)
     http = http or HttpClient()
@@ -1089,7 +1122,8 @@ def run_conformance(
     alias_matrix_envelope_source = None
     if plan.get("model_alias_matrix_envelope_path"):
         alias_matrix_envelope_source = load_model_alias_matrix_envelope(
-            Path(str(plan["model_alias_matrix_envelope_path"]))
+            Path(str(plan["model_alias_matrix_envelope_path"])),
+            trusted_signing_keys,
         )
     compatibility_matrix_source = None
     if plan.get("compatibility_matrix_path"):
@@ -1099,7 +1133,8 @@ def run_conformance(
     compatibility_matrix_envelope_source = None
     if plan.get("compatibility_matrix_envelope_path"):
         compatibility_matrix_envelope_source = load_compatibility_matrix_envelope(
-            Path(str(plan["compatibility_matrix_envelope_path"]))
+            Path(str(plan["compatibility_matrix_envelope_path"])),
+            trusted_signing_keys,
         )
     validate_alias_matrix_imports(plan, alias_matrix_source)
     validate_model_alias_matrix_envelope_matches_payload(
@@ -1243,6 +1278,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Per-request timeout.",
     )
     parser.add_argument(
+        "--trusted-signing-key",
+        action="append",
+        default=[],
+        metavar="SIGNER:KEY_ID:PUBLIC_KEY_BASE64URL",
+        help=(
+            "Operator Ed25519 key trusted to sign the plan-referenced matrix "
+            "envelopes. When supplied, the bundled fixture keys are not "
+            "trusted. May be repeated."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         help="Optional report JSON output path.",
@@ -1250,6 +1296,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        trusted_keys = (
+            [parse_trusted_signing_key(value) for value in args.trusted_signing_key]
+            if args.trusted_signing_key
+            else None
+        )
         if args.env_file is not None:
             load_env_file(args.env_file)
         plan = load_plan(args.plan)
@@ -1259,8 +1310,14 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds,
             enable_providers=set(args.enable_provider),
             enable_all_providers=args.enable_all_providers,
+            trusted_signing_keys=trusted_keys,
         )
-    except (OSError, json.JSONDecodeError, LiveConformanceError) as error:
+    except (
+        OSError,
+        json.JSONDecodeError,
+        LiveConformanceError,
+        ArtifactSignatureError,
+    ) as error:
         print(f"live_conformance.py: {error}", file=sys.stderr)
         return 1
 

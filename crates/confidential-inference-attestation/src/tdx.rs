@@ -213,6 +213,8 @@ pub struct DcapTdxCollateralCache {
     bundles_by_quote_sha256: BTreeMap<String, DcapTdxCollateralBundle>,
 }
 
+const DCAP_COLLATERAL_CACHE_MAX_BUNDLES: usize = 256;
+
 impl DcapTdxCollateralCache {
     pub fn new() -> Self {
         Self::default()
@@ -232,6 +234,20 @@ impl DcapTdxCollateralCache {
             }
         }
         bundle.validate()?;
+        if !self.bundles_by_quote_sha256.contains_key(&key)
+            && self.bundles_by_quote_sha256.len() >= DCAP_COLLATERAL_CACHE_MAX_BUNDLES
+        {
+            // Evict the earliest-expiring bundle, breaking ties by oldest
+            // fetch time, so the cache stays bounded at 256 bundles.
+            if let Some(evict_key) = self
+                .bundles_by_quote_sha256
+                .iter()
+                .min_by_key(|(_, bundle)| (bundle.valid_until_epoch_ms, bundle.fetched_at_epoch_ms))
+                .map(|(key, _)| key.clone())
+            {
+                self.bundles_by_quote_sha256.remove(&evict_key);
+            }
+        }
         self.bundles_by_quote_sha256.insert(key, bundle);
         Ok(())
     }
@@ -372,13 +388,27 @@ impl TinfoilQuoteVerifier for DcapTdxTinfoilQuoteVerifier {
         })?;
         let report = tdx_report(&quote)?;
         tracing::info!(
-            tee_measurement = %format!("tdx:mr_td:{}", hex_bytes(&report.mr_td)),
+            tee_measurement = %format!(
+                "tdx:mr_td:{}:rtmr0:{}:rtmr1:{}:rtmr2:{}:rtmr3:{}",
+                hex_bytes(&report.mr_td),
+                hex_bytes(&report.rt_mr0),
+                hex_bytes(&report.rt_mr1),
+                hex_bytes(&report.rt_mr2),
+                hex_bytes(&report.rt_mr3)
+            ),
             expires_at_epoch_ms,
             "TDX DCAP quote verified"
         );
 
         Ok(VerifiedTdxQuote {
-            tee_measurement: format!("tdx:mr_td:{}", hex_bytes(&report.mr_td)),
+            tee_measurement: format!(
+                "tdx:mr_td:{}:rtmr0:{}:rtmr1:{}:rtmr2:{}:rtmr3:{}",
+                hex_bytes(&report.mr_td),
+                hex_bytes(&report.rt_mr0),
+                hex_bytes(&report.rt_mr1),
+                hex_bytes(&report.rt_mr2),
+                hex_bytes(&report.rt_mr3)
+            ),
             mr_td: hex_bytes(&report.mr_td),
             mr_config_id: hex_bytes(&report.mr_config_id),
             rtmr0: hex_bytes(&report.rt_mr0),
@@ -678,6 +708,31 @@ mod tests {
         let error = cache.insert_for_quote(&other_quote, bundle).unwrap_err();
 
         assert!(error.to_string().contains("quote digest does not match"));
+    }
+
+    #[test]
+    fn dcap_tdx_collateral_cache_is_bounded_at_256_bundles() {
+        let now = parse_utc_timestamp_millis("2025-06-20T00:00:00Z").unwrap();
+        let collateral = sample_collateral();
+        let mut cache = DcapTdxCollateralCache::new();
+
+        for index in 0_u64..(DCAP_COLLATERAL_CACHE_MAX_BUNDLES as u64 + 8) {
+            let mut quote = SAMPLE_QUOTE.to_vec();
+            quote.extend_from_slice(&index.to_le_bytes());
+            let bundle = DcapTdxCollateralBundle::from_collateral_at(
+                collateral.clone(),
+                now,
+                DcapTdxCollateralSource::offline_bundle(),
+                Some(&quote),
+            )
+            .unwrap();
+            cache.insert_for_quote(&quote, bundle).unwrap();
+        }
+
+        assert_eq!(
+            cache.bundles_by_quote_sha256.len(),
+            DCAP_COLLATERAL_CACHE_MAX_BUNDLES
+        );
     }
 
     #[test]

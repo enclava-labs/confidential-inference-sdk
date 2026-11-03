@@ -18,5 +18,11 @@ confidential-inference-openai = { version = "0.1.0", path = "../confidential-inf
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+libc = { version = "0.2", default-features = false }
 
 [dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

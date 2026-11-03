@@ -204,7 +204,7 @@ class CheckNormativeFixturesTests(unittest.TestCase):
         )
         plan["providers"][0]["expected_model_ids"] = ["copied-model"]
         plan["providers"][1]["expected_model_ids_from_alias_matrix"] = False
-        plan["providers"][2]["compatibility_provider"] = "missing-profile"
+        plan["providers"][1]["compatibility_provider"] = "missing-profile"
 
         violations = check_normative_fixtures.validate_live_conformance_plan(
             Path("fixtures/providers/live-conformance-plan.json"),

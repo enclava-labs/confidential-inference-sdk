@@ -9,7 +9,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-dcap-qvl = { version = "0.6.1", default-features = false, features = ["std", "ring", "default-x509"] }
+dcap-qvl = { version = "0.6.1", default-features = false, features = ["std", "ring", "default-x509", "report"] }
+confidential-inference-attestation = { path = "../crates/confidential-inference-attestation" }
+confidential-inference-providers = { path = "../crates/confidential-inference-providers" }
+confidential-inference-proxy = { path = "../crates/confidential-inference-proxy" }
 
 [workspace]
 members = ["."]
@@ -17,5 +20,65 @@ members = ["."]
 [[bin]]
 name = "dcap_quote_parse"
 path = "fuzz_targets/dcap_quote_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "attestation_timestamp"
+path = "fuzz_targets/attestation_timestamp.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "attestation_tinfoil_live_capture"
+path = "fuzz_targets/attestation_tinfoil_live_capture.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "attestation_sev_snp_report"
+path = "fuzz_targets/attestation_sev_snp_report.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "attestation_evidence"
+path = "fuzz_targets/attestation_evidence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "providers_normalize_dstack"
+path = "fuzz_targets/providers_normalize_dstack.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "providers_normalize_chutes_e2ee"
+path = "fuzz_targets/providers_normalize_chutes_e2ee.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "providers_sse_frames"
+path = "fuzz_targets/providers_sse_frames.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "providers_contrast_manifest"
+path = "fuzz_targets/providers_contrast_manifest.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "providers_contrast_initdata"
+path = "fuzz_targets/providers_contrast_initdata.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "proxy_http_request"
+path = "fuzz_targets/proxy_http_request.rs"
 test = false
 doc = false

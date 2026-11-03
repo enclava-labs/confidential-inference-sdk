@@ -41,5 +41,5 @@ tracing-core = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 x509-cert = { version = "0.3", default-features = false, features = ["std"] }
-zeroize = { version = "=1.9.1", default-features = false }
-zeroize_derive = "=1.5.0"
+zeroize = { version = "1.9.1", default-features = false }
+zeroize_derive = "1.5.0"

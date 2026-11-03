@@ -4,6 +4,7 @@ export type ClientConfig = JsonObject & {
   registry?: JsonObject;
   reference_values?: JsonObject;
   compatibility_matrix?: JsonObject;
+  verdict_store?: { jsonl_path: string };
 };
 
 export type ClientOptions = {
@@ -33,7 +34,10 @@ export class ConfidentialInferenceError extends Error {
  * Rust owns every attestation/policy/registry/digest/signature decision; the
  * binding only marshals JSON across the ABI and applies minimal shape checks.
  * Inference methods run the blocking FFI call on a Koffi worker thread, so
- * they never block the Node event loop.
+ * they never block the Node event loop. Each async call occupies a libuv
+ * threadpool thread for its full duration — real concurrency is bounded by
+ * `UV_THREADPOOL_SIZE` (default 4; set it to expected concurrency + 4 at
+ * process start).
  */
 export class Client {
   constructor(config?: ClientConfig | null, options?: ClientOptions | string);

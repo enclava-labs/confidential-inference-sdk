@@ -17,21 +17,21 @@ use ml_kem::{
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::Sha256;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex, Once};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
 use crate::http::{checked_response_bytes, https_or_test_loopback};
 use crate::nvidia::NvidiaNrasRemoteClient;
+use crate::provider::EvidenceStateStore;
+use crate::tls::{reqwest_client_builder, CONNECT_TIMEOUT, FETCH_REQUEST_TIMEOUT, READ_TIMEOUT};
 use crate::{
     EvidenceRequest, ProviderAdapter, ProviderChatRequest, ProviderError,
     ProviderRequestConfidentiality, Result, RouteDefinition,
 };
 
-const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const ML_KEM_768_PUBLIC_KEY_BYTES: usize = 1_184;
 const ML_KEM_768_CIPHERTEXT_BYTES: usize = 1_088;
 const CHACHA_NONCE_BYTES: usize = 12;
@@ -74,7 +74,7 @@ pub struct ChutesHttpProvider {
     api_key: ChutesApiKey,
     client: reqwest::Client,
     nras_client: Option<NvidiaNrasRemoteClient>,
-    attested_instances: Arc<Mutex<BTreeMap<String, AttestedChutesInstance>>>,
+    attested_instances: Arc<Mutex<EvidenceStateStore<AttestedChutesInstance>>>,
 }
 
 impl ChutesHttpProvider {
@@ -83,9 +83,9 @@ impl ChutesHttpProvider {
         routes: Vec<RouteDefinition>,
         api_key: impl Into<String>,
     ) -> Result<Self> {
-        install_default_rustls_provider();
-        let client = reqwest::Client::builder()
-            .timeout(DEFAULT_HTTP_TIMEOUT)
+        let client = reqwest_client_builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .build()
             .map_err(|error| ProviderError::Http(error.to_string()))?;
         Ok(Self::with_clients(
@@ -110,7 +110,7 @@ impl ChutesHttpProvider {
             api_key: ChutesApiKey::new(api_key),
             client,
             nras_client,
-            attested_instances: Arc::new(Mutex::new(BTreeMap::new())),
+            attested_instances: Arc::new(Mutex::new(EvidenceStateStore::new())),
         }
     }
 
@@ -121,7 +121,7 @@ impl ChutesHttpProvider {
     async fn resolve_chute_id(&self, route: &RouteDefinition) -> Result<String> {
         let url = format!("{}/models", route.api_base_url.trim_end_matches('/'));
         let response = self
-            .authorize(self.client.get(url))
+            .authorize(self.client.get(url).timeout(FETCH_REQUEST_TIMEOUT))
             .send()
             .await
             .map_err(|error| ProviderError::Http(error.to_string()))?;
@@ -153,7 +153,7 @@ impl ChutesHttpProvider {
             chute_id
         );
         let response = self
-            .authorize(self.client.get(url))
+            .authorize(self.client.get(url).timeout(FETCH_REQUEST_TIMEOUT))
             .send()
             .await
             .map_err(|error| ProviderError::Http(error.to_string()))?;
@@ -187,7 +187,12 @@ impl ChutesHttpProvider {
             instance_id
         );
         let response = self
-            .authorize(self.client.get(url).query(&[("nonce", nonce)]))
+            .authorize(
+                self.client
+                    .get(url)
+                    .query(&[("nonce", nonce)])
+                    .timeout(FETCH_REQUEST_TIMEOUT),
+            )
             .send()
             .await
             .map_err(|error| ProviderError::Http(error.to_string()))?;
@@ -238,16 +243,13 @@ impl ChutesHttpProvider {
     fn take_attested_invocation(
         &self,
         route: &RouteDefinition,
+        request: &ProviderChatRequest,
     ) -> Result<(AttestedChutesInstance, String)> {
         let mut instances = self.attested_instances.lock().map_err(|_| {
             ProviderError::Adapter("Chutes attested-instance state lock is poisoned".into())
         })?;
-        let instance = instances.get_mut(&route.route_id).ok_or_else(|| {
-            ProviderError::Compatibility(format!(
-                "route {} has no attested Chutes instance; verify evidence before chat",
-                route.route_id
-            ))
-        })?;
+        let instance =
+            instances.lookup_for_request_mut(route, request, "Chutes attested instance")?;
         let nonce = instance.invocation_nonces.pop_front().ok_or_else(|| {
             ProviderError::key_rotation(
                 route.route_id.clone(),
@@ -319,7 +321,8 @@ impl ProviderAdapter for ChutesHttpProvider {
                 ProviderError::Adapter("Chutes attested-instance state lock is poisoned".into())
             })?
             .insert(
-                route.route_id.clone(),
+                &route.route_id,
+                &sha256_digest(&serialized),
                 AttestedChutesInstance {
                     chute_id,
                     instance_id: instance.instance_id,
@@ -341,7 +344,7 @@ impl ProviderAdapter for ChutesHttpProvider {
                 "Chutes live chat requires adapter-managed E2EE".into(),
             ));
         }
-        let (instance, invocation_nonce) = self.take_attested_invocation(route)?;
+        let (instance, invocation_nonce) = self.take_attested_invocation(route, &request)?;
         let encrypted = encrypt_request(&instance.e2e_public_key_base64, request.body())?;
         let control_base = control_api_base(&route.evidence_endpoint)?;
         let response = self
@@ -529,13 +532,6 @@ fn validate_nonce(nonce: &str, field: &str) -> Result<()> {
             "{field} must be exactly 32 bytes of hex"
         )))
     }
-}
-
-fn install_default_rustls_provider() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
 }
 
 #[derive(Debug, Deserialize)]

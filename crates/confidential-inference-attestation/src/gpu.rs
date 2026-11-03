@@ -234,6 +234,13 @@ fn verify_nvidia_nras_jwt_with_jwks(
         ));
     }
     validate_optional_time_claim(&claims, "nbf", |claim, now| claim <= now)?;
+    // NRAS tokens must carry an expiry; a missing exp claim would otherwise
+    // let a token live forever.
+    if claims.get("exp").is_none() {
+        return Err(AttestationError::InvalidEvidence(
+            "NRAS JWT missing exp claim".into(),
+        ));
+    }
     validate_optional_time_claim(&claims, "exp", |claim, now| claim > now)?;
 
     Ok(VerifiedNvidiaNrasJwt {
@@ -397,6 +404,18 @@ mod tests {
     }
 
     #[test]
+    fn nvidia_nras_jwt_verifier_rejects_missing_exp_claim() {
+        let fixture = SignedNrasTokenFixture::new_without_exp();
+        let verifier = NvidiaNrasJwtVerifier::from_jwks_json(&fixture.jwks.to_string()).unwrap();
+
+        let error = verifier
+            .verify_token(&fixture.token, &fixture.nonce)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exp claim"));
+    }
+
+    #[test]
     fn nvidia_nras_jwt_verifier_rejects_failed_overall_result() {
         let fixture = SignedNrasTokenFixture::new(false);
         let verifier = NvidiaNrasJwtVerifier::from_jwks_json(&fixture.jwks.to_string()).unwrap();
@@ -468,6 +487,29 @@ mod tests {
         }
 
         fn new_with_claims_version(overall_result: bool, claims_version: &str) -> Self {
+            Self::new_with_claims(json!({
+                "iss": NVIDIA_NRAS_ISSUER,
+                "sub": "nvidia-gpu",
+                "x-nvidia-ver": claims_version,
+                "x-nvidia-overall-att-result": overall_result,
+                "eat_nonce": "33".repeat(32),
+                "nbf": 0u64,
+                "exp": 4_070_908_800u64
+            }))
+        }
+
+        fn new_without_exp() -> Self {
+            Self::new_with_claims(json!({
+                "iss": NVIDIA_NRAS_ISSUER,
+                "sub": "nvidia-gpu",
+                "x-nvidia-ver": NVIDIA_NRAS_CLAIMS_VERSION,
+                "x-nvidia-overall-att-result": true,
+                "eat_nonce": "33".repeat(32),
+                "nbf": 0u64
+            }))
+        }
+
+        fn new_with_claims(claims: Value) -> Self {
             let rng = SystemRandom::new();
             let pkcs8 =
                 EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_FIXED_SIGNING, &rng).unwrap();
@@ -494,15 +536,6 @@ mod tests {
                 "alg": "ES384",
                 "typ": "JWT",
                 "kid": "nras-test-key"
-            });
-            let claims = json!({
-                "iss": NVIDIA_NRAS_ISSUER,
-                "sub": "nvidia-gpu",
-                "x-nvidia-ver": claims_version,
-                "x-nvidia-overall-att-result": overall_result,
-                "eat_nonce": nonce,
-                "nbf": 0u64,
-                "exp": 4_070_908_800u64
             });
             let signing_input = format!(
                 "{}.{}",

@@ -1,0 +1,8 @@
+# Check out text files with LF on every platform. Raw-evidence digests in the
+# test fixtures are computed over these bytes; CRLF checkouts change them.
+* text=auto eol=lf
+
+# Binary fixtures must never be re-encoded.
+*.bin binary
+*.der binary
+*.cbor binary

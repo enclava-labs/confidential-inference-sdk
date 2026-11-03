@@ -5,11 +5,9 @@ use confidential_inference_attestation::{
     NvidiaGpuAttestationVerificationRequest, NvidiaNrasJwtVerifier, VerifiedGpuAttestation,
 };
 use serde_json::{json, Value};
-use std::time::Duration;
 
 use crate::{ProviderError, Result};
 
-const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const NVIDIA_NRAS_ATTEST_GPU_V4_URL: &str = "https://nras.attestation.nvidia.com/v4/attest/gpu";
 pub const NVIDIA_NRAS_CLAIMS_VERSION: &str = "3.0";
 #[deprecated(
@@ -28,9 +26,12 @@ pub struct NvidiaNrasRemoteClient {
 
 impl NvidiaNrasRemoteClient {
     pub fn with_default_http() -> Result<Self> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = reqwest::Client::builder()
-            .timeout(DEFAULT_HTTP_TIMEOUT)
+        // connect + idle-read timeouts only: NRAS evidence submissions are
+        // attestation fetches and get a per-request timeout at call sites
+        // that need one; the client itself must not impose a total timeout.
+        let client = crate::tls::reqwest_client_builder()
+            .connect_timeout(crate::tls::CONNECT_TIMEOUT)
+            .read_timeout(crate::tls::READ_TIMEOUT)
             .build()
             .map_err(|error| ProviderError::Http(error.to_string()))?;
         Ok(Self::with_client_and_urls(
@@ -56,6 +57,7 @@ impl NvidiaNrasRemoteClient {
         let response = self
             .client
             .get(&self.jwks_url)
+            .timeout(crate::tls::FETCH_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|error| ProviderError::Http(format!("NRAS JWKS fetch failed: {error}")))?;
@@ -78,6 +80,7 @@ impl NvidiaNrasRemoteClient {
             .post(&self.attest_gpu_url)
             .header("accept", "application/json")
             .json(&request_body)
+            .timeout(crate::tls::FETCH_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|error| {

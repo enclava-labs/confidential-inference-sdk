@@ -161,82 +161,15 @@ version = "0.1.0"
         self.assertIn("--allow-dirty", command)
         self.assertEqual(command[-4:], ["-p", "confidential-inference-openai", "-p", "confidential-inference-sdk"])
 
-    def test_cargo_package_command_patches_unpublished_local_dependencies(self) -> None:
+    def test_cargo_package_command_never_injects_config_patches(self) -> None:
         command = check_release_packaging.cargo_package_command(
             ["confidential-inference-sdk"],
             allow_dirty=False,
-            path_patches={
-                "confidential-inference-attestation": "crates/confidential-inference-attestation",
-                "confidential-inference-dcap-qvl": "third_party/dcap-qvl-0.4.0",
-            },
         )
 
-        self.assertIn(
-            'patch.crates-io.confidential-inference-attestation.path="crates/confidential-inference-attestation"',
-            command,
-        )
-        self.assertIn(
-            'patch.crates-io.confidential-inference-dcap-qvl.path="third_party/dcap-qvl-0.4.0"',
-            command,
-        )
+        self.assertNotIn("--config", command)
+        self.assertNotIn("--allow-dirty", command)
         self.assertEqual(command[-2:], ["-p", "confidential-inference-sdk"])
-
-    def test_local_path_patches_are_discovered_recursively(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_manifest(
-                root,
-                "Cargo.toml",
-                """
-[workspace]
-members = ["crates/core", "crates/client"]
-""",
-            )
-            write_manifest(
-                root,
-                "crates/core/Cargo.toml",
-                """
-[package]
-name = "core"
-description = "core test crate"
-version = "0.1.0"
-
-[dependencies]
-vendor = { version = "0.2.0", path = "../../vendor" }
-""",
-            )
-            write_manifest(
-                root,
-                "crates/client/Cargo.toml",
-                """
-[package]
-name = "client"
-description = "client test crate"
-version = "0.1.0"
-
-[dependencies]
-core = { version = "0.1.0", path = "../core" }
-""",
-            )
-            write_manifest(
-                root,
-                "vendor/Cargo.toml",
-                """
-[package]
-name = "vendor"
-description = "vendor test crate"
-version = "0.2.0"
-""",
-            )
-
-            patches = check_release_packaging.discover_local_path_patches(
-                root, ["client"]
-            )
-
-            self.assertEqual(
-                patches,
-                {"core": "crates/core", "vendor": "vendor"},
-            )
 
     def test_clean_target_package_archives_removes_hidden_and_normal_crates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
