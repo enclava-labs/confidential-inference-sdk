@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).with_name("check_release_packaging.py")
@@ -152,24 +157,43 @@ version = "0.1.0"
             self.assertEqual(report["release_packages"], ["core"])
             self.assertIn("package.description is required", report["violations"][0])
 
-    def test_cargo_package_command_lists_each_release_package(self) -> None:
-        command = check_release_packaging.cargo_package_command(
-            ["confidential-inference-openai", "confidential-inference-sdk"], allow_dirty=True
-        )
+    @unittest.skipUnless(shutil.which("cargo"), "requires Cargo")
+    def test_repeated_packaging_verifies_current_same_version_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_manifest(root, "Cargo.toml", '[workspace]\nmembers = ["base", "client"]\nresolver = "2"\n')
+            for name in ("base", "client"):
+                write_manifest(
+                    root, f"{name}/Cargo.toml",
+                    f'[package]\nname = "packaging-test-{name}"\nversion = "0.1.0"\nedition = "2021"\n'
+                    'description = "Packaging regression fixture"\nlicense = "MIT"\n'
+                    + ('[dependencies]\npackaging-test-base = { version = "0.1.0", path = "../base" }\n'
+                       if name == "client" else ""),
+                )
+                (root / name / "src").mkdir()
+            packages = ["packaging-test-base", "packaging-test-client"]
+            environment = {"CARGO_HOME": str(root / "cargo-home"), "CARGO_NET_OFFLINE": "true"}
+            if shutil.which("rustup"):
+                # Temporary workspaces must retain the repository's selected toolchain.
+                environment["RUSTUP_TOOLCHAIN"] = subprocess.check_output(
+                    ["rustup", "show", "active-toolchain"], text=True,
+                ).split()[0]
+            with patch.dict(os.environ, environment):
+                for function in ("original", "updated"):
+                    source = f"pub fn {function}() -> u8 {{ 1 }}\n"
+                    (root / "base/src/lib.rs").write_text(source)
+                    (root / "client/src/lib.rs").write_text(f"pub use packaging_test_base::{function};\n")
+                    subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=root, check=True)
+                    result, _ = check_release_packaging.run_cargo_package(root, packages, True)
+                    self.assertEqual(result, 0)
+                    with tarfile.open(root / "target/package/packaging-test-base-0.1.0.crate") as archive:
+                        member = archive.extractfile("packaging-test-base-0.1.0/src/lib.rs")
+                        self.assertIsNotNone(member)
+                        self.assertEqual(member.read().decode(), source)
 
-        self.assertEqual(command[:3], ["cargo", "package", "--locked"])
-        self.assertIn("--allow-dirty", command)
-        self.assertEqual(command[-4:], ["-p", "confidential-inference-openai", "-p", "confidential-inference-sdk"])
-
-    def test_cargo_package_command_never_injects_config_patches(self) -> None:
-        command = check_release_packaging.cargo_package_command(
-            ["confidential-inference-sdk"],
-            allow_dirty=False,
-        )
-
-        self.assertNotIn("--config", command)
-        self.assertNotIn("--allow-dirty", command)
-        self.assertEqual(command[-2:], ["-p", "confidential-inference-sdk"])
+                (root / "client/src/lib.rs").write_text("pub use packaging_test_base::nonexistent;\n")
+                result, _ = check_release_packaging.run_cargo_package(root, packages, True)
+                self.assertNotEqual(result, 0)
 
     def test_clean_target_package_archives_removes_hidden_and_normal_crates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

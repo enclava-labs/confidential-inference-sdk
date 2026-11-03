@@ -10,6 +10,23 @@ These changes break the public API, the FFI client configuration, the verdict
 JSON check set, and existing test expectations. That is acceptable because
 `0.1.0` has never been tagged or published and there are no downstream users.
 
+#### Dependency integration
+
+- Upgrade DCAP QVL to `0.7.0` in the SDK and fuzz workspace. Handle TDX 1.5ex
+  reports and retain strict `UpToDate` checks for the platform and QE despite
+  upstream TCB-status convergence changes. Add real signed 1.5ex fixtures and
+  parser, signature-tampering, and component-status regressions. Refresh the
+  audit metadata without claiming the outstanding human production review.
+- Upgrade `serde_json_canonicalizer` to `0.4.1` and Koffi to `3.3.6`; the
+  canonicalizer preserves signature bytes for the SDK's JSON-value inputs.
+  Pin setup-node/setup-python `7.1.0` and setup-go `7.0.0` release commits.
+- Verify packages in an isolated build directory so Cargo cannot reuse stale
+  same-version workspace crates. Move only successfully verified archives to
+  `target/package`; an offline regression changes a dependency's API without
+  changing its version and also checks that invalid packages are rejected.
+- Reinstall locked Node dependencies before binding gates instead of reusing
+  potentially stale `node_modules`.
+
 #### Final PR review corrections
 
 - Native fork guards read handle fields under the lifetime registry lock.

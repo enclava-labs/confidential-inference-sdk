@@ -7,6 +7,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any, Iterable
@@ -187,7 +188,15 @@ def run_cargo_package(
     if clean_first:
         clean_target_package_archives(workspace_root)
     command = cargo_package_command(packages, allow_dirty)
-    completed = subprocess.run(command, cwd=workspace_root, check=False)
+    package_dir = workspace_root / "target" / "package"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    # A unique registry path prevents Cargo from reusing older same-version workspace sources.
+    with tempfile.TemporaryDirectory(prefix="package-check-", dir=package_dir.parent) as target:
+        command.extend(["--target-dir", target])
+        completed = subprocess.run(command, cwd=workspace_root, check=False)
+        if completed.returncode == 0:
+            for archive in (Path(target) / "package").glob("*.crate"):
+                archive.replace(package_dir / archive.name)
     return completed.returncode, command
 
 

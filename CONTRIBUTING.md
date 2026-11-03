@@ -10,7 +10,9 @@ tools/run_offline_gates.sh
 
 Python is required. The runner selects the native library from Cargo's build
 output, so bindings test the fresh artifact even if an older release build or
-`CONFIDENTIAL_INFERENCE_FFI_LIBRARY` setting exists.
+`CONFIDENTIAL_INFERENCE_FFI_LIBRARY` setting exists. It reinstalls locked Node
+dependencies and verifies crate packages in an isolated build directory before
+placing the verified archives in `target/package`.
 
 The individual gates, in dependency order (bindings load the FFI library, so
 build it first; `--require-clean` needs a committed tree):

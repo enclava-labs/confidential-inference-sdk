@@ -1,6 +1,6 @@
 {
   "schema": "confidential-inference.dcap-qvl-audit.v1",
-  "review_date": "2026-10-31",
+  "review_date": "2026-11-03",
   "scope": "Upstream dcap-qvl dependency, review policy, lockfile, and TDX/DCAP evidence used by the SDK.",
   "upstream_sync_policy": {
     "path": "docs/dcap-qvl-upstream-sync.md",
@@ -25,13 +25,13 @@
   "crates": [
     {
       "name": "dcap-qvl",
-      "version": "0.6.6",
+      "version": "0.7.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "MIT"
     },
     {
       "name": "dcap-qvl-webpki",
-      "version": "0.103.4+dcap.1",
+      "version": "0.103.15+dcap.1",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "ISC"
     }
@@ -39,7 +39,7 @@
   "audited_files": [
     {
       "path": "docs/dcap-qvl-upstream-sync.md",
-      "sha256": "4ce6dd693724432d8edfe050e6cc099bb75a9ac13db5604a14157309c30dc6ab",
+      "sha256": "31ebc5bd08c0e9ceea2497ec076e9caa8cc2e4431934ea736222d0ee6be21bad",
       "reason": "Checked-in upstream review and production release policy."
     },
     {
@@ -53,6 +53,16 @@
       "reason": "Collateral paired with the real TDX quote fixture."
     },
     {
+      "path": "fixtures/evidence/dcap-qvl/tdx_quote_td15ex.bin",
+      "sha256": "fd88575b046315787daac21cb3657d03d95d74760a9c5006ad689fa5c2c498f7",
+      "reason": "Upstream dcap-qvl 0.7.0 TDX 1.5ex quote v5 body type 4 sample exercised by the verifier tests."
+    },
+    {
+      "path": "fixtures/evidence/dcap-qvl/tdx_quote_td15ex_collateral.json",
+      "sha256": "29e1cb0c2dc98c2cc7f241cc142bdf9d61dee288276d33ae45d5fb2b6b5cc0b0",
+      "reason": "Upstream dcap-qvl 0.7.0 collateral paired with the TDX 1.5ex quote fixture."
+    },
+    {
       "path": "fixtures/evidence/dcap-qvl/malformed-corpus.json",
       "sha256": "e0fa2e6f8a158f213b20a5408b748edfe3185184841ea588b966c8b0f18ce060",
       "reason": "Malformed quote and collateral cases that must fail closed."
@@ -64,7 +74,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "9d68dc7b51e8f05c35068b2ea5b88d86b5fdd6896bfc1002fb055088a09bc826",
+      "sha256": "b73eb52f7d35294c1a218081a00a96a2b5437ed91e0528d368b4d604765abff3",
       "reason": "Exact upstream dependency resolution used by release verification."
     }
   ],
@@ -76,18 +86,23 @@
     },
     {
       "path": "crates/confidential-inference-attestation/Cargo.toml",
-      "value": "dcap-qvl = { version = \"0.6.1\", default-features = false, features = [\"std\", \"ring\", \"default-x509\"] }",
+      "value": "dcap-qvl = { version = \"0.7.0\", default-features = false, features = [\"std\", \"ring\", \"default-x509\"] }",
       "reason": "Offline verification uses upstream QVL with explicit ring feature selection."
     },
     {
       "path": "crates/confidential-inference-providers/Cargo.toml",
-      "value": "dcap-qvl = { version = \"0.6.1\", default-features = false, features = [\"std\", \"ring\", \"default-x509\", \"report\"] }",
+      "value": "dcap-qvl = { version = \"0.7.0\", default-features = false, features = [\"std\", \"ring\", \"default-x509\", \"report\"] }",
       "reason": "The provider collateral client adds only the reviewed report feature."
     },
     {
       "path": "Cargo.lock",
-      "value": "name = \"dcap-qvl\"\nversion = \"0.6.6\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"",
+      "value": "name = \"dcap-qvl\"\nversion = \"0.7.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"",
       "reason": "The lockfile resolves the reviewed upstream registry package."
+    },
+    {
+      "path": "Cargo.lock",
+      "value": "name = \"dcap-qvl-webpki\"\nversion = \"0.103.15+dcap.1\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"",
+      "reason": "The lockfile resolves the webpki fork pinned by upstream dcap-qvl 0.7.0."
     }
   ],
   "forbidden_substrings": [
