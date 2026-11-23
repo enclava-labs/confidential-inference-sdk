@@ -39,7 +39,7 @@
   "audited_files": [
     {
       "path": "docs/dcap-qvl-upstream-sync.md",
-      "sha256": "31ebc5bd08c0e9ceea2497ec076e9caa8cc2e4431934ea736222d0ee6be21bad",
+      "sha256": "cf10d707fed60ccc0556f7eee926d71fe7a815ee04250ff255552f0793293c6f",
       "reason": "Checked-in upstream review and production release policy."
     },
     {
@@ -74,7 +74,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "b73eb52f7d35294c1a218081a00a96a2b5437ed91e0528d368b4d604765abff3",
+      "sha256": "a5cc7aa5887da23ce50aa47532dcf01beaceee17347e8a764c21f18f90bf4dbf",
       "reason": "Exact upstream dependency resolution used by release verification."
     }
   ],
