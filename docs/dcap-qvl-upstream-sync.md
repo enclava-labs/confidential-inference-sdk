@@ -76,6 +76,38 @@ This records technical review scope only. Independent human security review
 of the upstream diff and the 24-hour fuzz campaign remain outstanding
 production-release blockers; no review attestation is claimed here.
 
+### 2026-11-22 — RUSTSEC-2026-0543: chrono unmaintained (advisory trigger)
+
+Trigger: RustSec advisory affecting DCAP verifier dependencies.
+
+RUSTSEC-2026-0543 marks `chrono` as unmaintained
+(chronotope/chrono#1768); all versions affected, no vulnerability, no safe
+upgrade. Reachability: `cargo tree -i chrono` resolves to exactly one path —
+`dcap-qvl 0.7.0` (unchanged, registry checksum still
+`b992c9511adf7135ae7c63c023c9303a3615c0f38d7b39514dcc262f91c6adda`, the
+reviewed 0.7.0 from 2026-11-03) into the attestation/providers crates. No
+other workspace dependency pulls chrono. Since the audited dependency graph
+is unchanged — only the advisory database moved — the 2026-11-03 review of
+the resolved graph remains the operative technical review; nothing new ships.
+
+Action: `RUSTSEC-2026-0543` added to `deny.toml` `[advisories] ignore` with a
+revisit condition; `cargo deny check` fails closed on any new advisory class
+(vulnerabilities, yanked) as before. Drop the ignore when dcap-qvl migrates
+off chrono (jiff/time) or a safe upgrade becomes available.
+
+### 2026-11-22 — RUSTSEC-2026-0592: url stack overflow (vulnerability, patched)
+
+Trigger: RustSec advisory affecting the resolved dependency graph.
+
+`url` 2.5.8 and earlier recurse in `Url::origin()` on nested `blob:` URLs
+with no depth limit — a crafted URL stack-overflows any process that calls
+`origin()` on untrusted input (abort, not catchable). The SDK reaches `url`
+via reqwest/hickory (HTTP + DNS) and dcap-qvl. Safe upgrade available and
+applied: `cargo update -p url` 2.5.8 → 2.5.9 (companion transitive
+`form_urlencoded` 1.2.2 → 1.2.3 required by the resolver; no other packages
+moved). `Cargo.lock` hash refreshed in this manifest accordingly; no Cargo.toml
+version floor was affected.
+
 ## Triggers
 
 Run this review before each production release and whenever:
