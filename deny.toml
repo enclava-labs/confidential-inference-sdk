@@ -4,7 +4,13 @@ version = 2
 # unmaintained. We use it only for dynamic Value parsing of dstack compose
 # evidence. shortcut: swap for a safe-Rust YAML crate (saphyr) if/when the
 # parser rewrite is justified; no vulnerability is being ignored here.
-ignore = ["RUSTSEC-2024-0449"]
+# RUSTSEC-2026-0543: chrono is unmaintained (chronotope/chrono#1768). chrono
+# 0.4.45 reaches this workspace only as a transitive dependency of the audited
+# dcap-qvl 0.7.0 (see docs/dcap-qvl-upstream-sync.md, review log 2026-11-22);
+# the advisory reports no vulnerability, only maintenance status, and no safe
+# upgrade is available: dropping chrono requires dcap-qvl to migrate to
+# jiff/time upstream. Revisit on the next dcap-qvl upgrade.
+ignore = ["RUSTSEC-2024-0449", "RUSTSEC-2026-0543"]
 
 [licenses]
 version = 2
